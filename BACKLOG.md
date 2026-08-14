@@ -367,7 +367,12 @@ green again at v0.3.0 (18 tests + full validate).
 
 ## P1 (cont.) — gaps found while integrating against the library
 
-### 24. Standalone ENOB quantisation in `instrument`
+### 24. Standalone ENOB quantisation in `instrument` — ✅ DONE (v0.7)
+`instrument.quantize_adc(x, enob, full_scale=None)` — finite-ENOB lattice, no longer
+buried in the deep_capture pipeline. validate asserts ~2^enob distinct codes with each
+sample moving at most half an LSB.
+
+ORIG:
 `instrument` exposes `clip_adc`, `interleave_adc` and `shaped_noise_floor`, but
 finite-ENOB quantisation exists only *inside* `pam4._digitize`, bundled with
 resampling and thermal noise. So a caller who wants "quantise this waveform to N
@@ -385,7 +390,14 @@ or absence of an ADC lattice is one of the most obvious differences.
 **Done when:** validate asserts the distinct-value count collapses to ~2^enob
 while the waveform moves by at most half an LSB.
 
-### 25. A composed `digitize()` with the stages in the right order
+### 25. A composed `digitize()` with the stages in the right order — ✅ DONE (v0.7)
+`instrument.digitize(x, grid=, interleave=, clip_full_scale=, enob=, noise_floor=, rng=)`
+-> (y, info), composing noise -> interleave -> clip -> quantise (the physically correct
+order) once so a caller cannot get it wrong; returns the applied settings + clipped
+fraction. validate asserts it matches the manual stage-by-stage path and that reordering
+(quantise-before-noise) changes the result.
+
+ORIG:
 The instrument primitives are individually clean but the caller has to know the
 physically correct order, and getting it wrong is silent. Interleave mismatch
 happens at the sampling instant, clipping happens at the ADC input, quantisation
@@ -405,7 +417,13 @@ and #8 (measured ground truth).
 application, and that reordering changes the result — i.e. that the order matters
 and is therefore worth fixing in one place.
 
-### 26. `interleave_adc` offset mismatch in absolute units
+### 26. `interleave_adc` offset mismatch in absolute units — ✅ DONE (v0.7)
+`interleave_adc(..., offset_v=)` expresses per-core offset in absolute volts (a property
+of the converter, not the signal); `shaped_noise_floor(rms=)` was already absolute.
+validate asserts the offset tone is invariant to input scaling in volts and proportional
+as a fraction.
+
+ORIG:
 `offset_mm` is a standard deviation expressed as a fraction of the signal span,
 so the artifact scales with the input. A real per-core offset error is a property
 of the converter, not of the signal: it stays put when the signal shrinks, which
@@ -447,3 +465,15 @@ Kept out to keep this package *pure synthesis*. From `ROADMAP.md`, plus one addi
 2. Implement behind existing defaults where possible; if output could change, add an
    opt-in flag and say so in the docstring.
 3. Add the validation assertion, plus a test that the legacy path is bit-identical.
+
+### 27. Unify compose `Signal.digitize()` onto `instrument.digitize()`
+The composer's `_op_digitize` and the new `instrument.digitize()` now model the same ADC
+stages independently. `Signal.digitize()` should delegate to `instrument.digitize()` so
+there is one canonical, correctly-ordered pipeline. The wrinkle: compose draws noise and
+interleave from SEPARATE role streams (#6), while `instrument.digitize` takes a single
+rng — so the delegation must thread per-role streams through, and it will change composed
+waveform values (a deliberate minor-version break). Kept separate here to land #24-26
+without touching the provenance/round-trip guarantees.
+
+**Done when:** `Signal.digitize()` calls `instrument.digitize()`; provenance round-trip
+and the #6 contrastive-pair assertions still hold.
