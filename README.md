@@ -76,6 +76,21 @@ And `causal=True` on the carrier generators uses forward-only edge shaping; the 
 zero-phase shaping is symmetric and therefore adds pre-cursor content, which is worth
 knowing about in a library whose channel model is otherwise strictly causal.
 
+## Absolute units (real ps / Hz / dB / V)
+Bind the abstract grid to real units with `Grid`, then specify parameters the way an
+engineer would — delays in ps, jitter in seconds, corner/periodic-jitter frequencies in
+Hz, channel loss in dB at a stated frequency. Omit the grid and the fraction/sample forms
+are unchanged.
+
+```python
+g = ws.Grid(fs=256e9, baud=112e9, n=1 << 16)     # 256 GSa/s, 112 GBd, ~65k points
+g.samples_per_ui                                  # 2.286  (non-integer, as in reality)
+x = P.pam4(n_ui=g.n // 8, seed=1, n=g.n, pattern="prbs13q")
+x = P.lossy_channel(x, loss_db=15.0, loss_at_ghz=26.0, grid=g, causal=True)  # 15 dB @ 26 GHz
+x = P.multi_reflection(x, td_ps=55.0, grid=g)                                 # echo at 55 ps
+x = P.inject_jitter(x, sigma_rj_s=300e-15, f_pj_hz=4e6, grid=g)              # 300 fs Rj + 4 MHz Pj
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

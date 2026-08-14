@@ -14,16 +14,17 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-from . import physics, impairments, grammar, pam4
+from . import physics, impairments, grammar, pam4, grid
 from .physics import N, T
+from .grid import Grid
 from .impairments import IMPAIRMENTS, apply_impairment, domain_randomize
 from .grammar import sample, generate, CARRIERS, ENVELOPES
 from .pam4 import deep_capture, PATHOLOGIES
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
-    "physics", "impairments", "grammar", "pam4",
-    "N", "T", "IMPAIRMENTS", "apply_impairment", "domain_randomize",
+    "physics", "impairments", "grammar", "pam4", "grid",
+    "N", "T", "Grid", "IMPAIRMENTS", "apply_impairment", "domain_randomize",
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "__version__",
 ]
