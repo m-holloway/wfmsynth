@@ -337,6 +337,45 @@ _xa = _sig2.waveform()
 check("different seed -> different waveform, still exactly reproducible",
       not np.array_equal(_xa, _xr) and np.array_equal(_xa, Signal.from_recipe(_sig2.recipe()).waveform()))
 
+print("== rng stream roles: factors are independent & re-rollable (valid contrastive pairs) ==")
+from wfmsynth.streams import Streams as _St
+_s = _St(1234)
+_j1 = _s.role("jitter").standard_normal(64); _n1 = _s.role("noise").standard_normal(64)
+_s2 = _St(1234)  # draw the SAME roles in the OPPOSITE order
+_n2 = _s2.role("noise").standard_normal(64); _j2 = _s2.role("jitter").standard_normal(64)
+check("role streams are order-independent and mutually independent",
+      np.array_equal(_n1, _n2) and np.array_equal(_j1, _j2))
+_s3 = _St(1234).reroll("jitter")  # a sibling with ONLY jitter re-rolled
+check("re-rolling one factor changes that factor and leaves the others bit-identical",
+      (not np.array_equal(_s3.role("jitter").standard_normal(64), _j1))
+      and np.array_equal(_s3.role("noise").standard_normal(64), _n1))
+
+# compose level: a changed UPSTREAM factor must leave the DOWNSTREAM noise realization
+# untouched. (with a single shared rng the jitter change would shift the noise draws ->
+# confounded.) An absolute noise floor lets us reconstruct the added noise bit-for-bit.
+_g6 = Grid(fs=256e9, baud=112e9, n=1 << 12)
+def _full_and_clean(rj):
+    _sig = (Signal(seed=7, grid=_g6)                # carrier=op0, digitize=op1 -> role noise/1
+            .carrier("pam4", n_ui=_g6.n // 8, pattern="prbs13q", jitter=dict(rj=rj))
+            .digitize(noise_rms=0.01))
+    _quiet = Signal.from_recipe(_sig.recipe())
+    _quiet.ops[-1] = {k: v for k, v in _quiet.ops[-1].items() if k != "noise_rms"}
+    return _sig.waveform(), _quiet.waveform()       # (clean + noise, clean)
+_fA, _cA = _full_and_clean(0.3); _fB, _cB = _full_and_clean(3.0)
+_N = _St(7).role("noise/1").normal(0.0, 0.01, len(_cA))   # the noise role's draws, standalone
+check("the same-seed noise realization is identical regardless of the upstream jitter",
+      np.array_equal(_fA, _cA + _N) and np.array_equal(_fB, _cB + _N)
+      and not np.array_equal(_cA, _cB))             # ...even though the clean signals differ
+
+# and the ergonomic wrapper: contrast() re-rolls exactly the named factor
+_cs = (Signal(seed=3, grid=_g6)
+       .carrier("pam4", n_ui=_g6.n // 8, pattern="prbs13q", jitter=dict(rj=0.5))
+       .digitize(snr_db=28.0))
+check("Signal.contrast(factor) re-rolls only that factor (reproducibly)",
+      set(_cs.roles()) == {"jitter/0", "noise/1"}
+      and not np.array_equal(_cs.contrast("noise/1", seed=1), _cs.waveform())
+      and np.array_equal(_cs.contrast("noise/1", seed=1), _cs.contrast("noise/1", seed=1)))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

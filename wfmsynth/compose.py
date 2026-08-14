@@ -32,19 +32,23 @@ from scipy.signal import resample_poly
 from . import physics as P
 from . import instrument as INST
 from .grid import Grid
+from .streams import Streams
 
 
 # --------------------------------------------------------------- op executors
+# Each executor takes (x, params, streams, grid, idx). Randomness is drawn from a named
+# ROLE stream (`streams.role(...)`) keyed by factor + op index, never from a single
+# shared rng — so re-rolling one factor leaves every other factor bit-identical.
 def _grid_n(grid, p):
     return p.get("n", grid.n if grid is not None else None)
 
 
-def _op_carrier(x, p, rng, grid):
+def _carrier(p, streams, grid, idx):
     j = p.get("jitter")
     jitter = P.Jitter(**j) if j else None
     common = dict(n_ui=p.get("n_ui", 32), tr_frac=p.get("tr_frac", 0.15),
                   seed=p.get("seed", 1), n=_grid_n(grid, p), causal=p.get("causal", False),
-                  jitter=jitter, rng=rng)
+                  jitter=jitter, rng=streams.role(f"jitter/{idx}"))
     if p["kind"] == "pam4":
         return P.pam4(pattern=p.get("pattern", "legacy"), **common)
     if p["kind"] == "nrz":
@@ -52,39 +56,45 @@ def _op_carrier(x, p, rng, grid):
     raise ValueError(f"unknown carrier kind {p['kind']!r} (use 'nrz' or 'pam4')")
 
 
-def _op_lossy(x, p, rng, grid):
+def _op_carrier(x, p, streams, grid, idx):
+    return _carrier(p, streams, grid, idx)
+
+
+def _op_lossy(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("length_in", "tand", "eps_r", "skin_k", "causal",
                             "loss_db", "loss_at_ghz") if k in p}
     return P.lossy_channel(x, grid=grid, **kw)
 
 
-def _op_reflect(x, p, rng, grid):
+def _op_reflect(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("td_frac", "td_samples", "td_ps", "gamma_s", "gamma_l",
                             "n_bounce") if k in p}
     return P.multi_reflection(x, grid=grid, **kw)
 
 
-def _op_crosstalk(x, p, rng, grid):
-    aggr = _op_carrier(None, {"kind": "nrz", **p.get("aggressor", {"n_ui": 32, "seed": 7})},
-                       rng, grid)
+def _op_crosstalk(x, p, streams, grid, idx):
+    aggr = _carrier({"kind": "nrz", **p.get("aggressor", {"n_ui": 32, "seed": 7})},
+                    streams, grid, f"xtalk{idx}")
     return P.crosstalk(x, aggr, coupling=p.get("coupling", 0.1),
                        kind=p.get("kind", "fext"), td_frac=p.get("td_frac", 0.05))
 
 
-def _op_ac_couple(x, p, rng, grid):
+def _op_ac_couple(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("fc_frac", "fc_hz") if k in p}
     return P.ac_couple(x, grid=grid, **kw)
 
 
-def _op_digitize(x, p, rng, grid):
+def _op_digitize(x, p, streams, grid, idx):
     n_out = p.get("n_out")
     if n_out and n_out != len(x):
         x = resample_poly(x, n_out, len(x))
     span = float(np.ptp(x)) + 1e-9
-    if "snr_db" in p:
-        x = x + rng.normal(0.0, span / 10 ** (p["snr_db"] / 20), len(x))
+    if "noise_rms" in p:                      # absolute noise floor (signal-independent)
+        x = x + streams.role(f"noise/{idx}").normal(0.0, p["noise_rms"], len(x))
+    elif "snr_db" in p:                       # noise relative to the signal span
+        x = x + streams.role(f"noise/{idx}").normal(0.0, span / 10 ** (p["snr_db"] / 20), len(x))
     if p.get("interleave"):
-        x = INST.interleave_adc(x, rng=rng, **p["interleave"])
+        x = INST.interleave_adc(x, rng=streams.role(f"interleave/{idx}"), **p["interleave"])
     if "enob" in p:
         lsb = span / 2 ** p["enob"]
         x = lsb * np.round(x / lsb)
@@ -127,18 +137,44 @@ class Signal:
         return self._add("ac_couple", **params)
 
     def digitize(self, **params):
-        """Scope digitization. params: n_out, snr_db, enob, interleave=dict(m_cores, gain_mm, ...)."""
+        """Scope digitization. params: n_out, snr_db (noise vs signal span) | noise_rms
+        (absolute noise floor), enob, interleave=dict(m_cores, gain_mm, ...)."""
         return self._add("digitize", **params)
 
-    def waveform(self):
-        """Execute the recipe -> samples. Deterministic given (seed, ops, grid)."""
-        rng = np.random.default_rng(self.seed)
+    def waveform(self, streams=None):
+        """Execute the recipe -> samples. Deterministic given (seed, ops, grid). Pass a
+        `Streams` (e.g. from `Streams(seed).reroll(...)`) to re-roll selected factors
+        while holding all others bit-identical — `contrast()` wraps the common case."""
+        st = streams if streams is not None else Streams(self.seed)
         x = None
-        for op in self.ops:
-            x = _EXEC[op["op"]](x, op, rng, self.grid)
+        for i, op in enumerate(self.ops):
+            x = _EXEC[op["op"]](x, op, st, self.grid, i)
         if x is None:
             raise ValueError("empty Signal: add a carrier first")
         return x
+
+    def roles(self):
+        """The re-rollable random factors in this signal, as role names — the valid
+        arguments to `contrast()`. Deterministic channel/reflection ops draw no
+        randomness and so contribute none."""
+        out = []
+        for i, op in enumerate(self.ops):
+            if op["op"] == "carrier" and op.get("jitter"):
+                out.append(f"jitter/{i}")
+            elif op["op"] == "crosstalk":
+                out.append(f"jitter/xtalk{i}")
+            elif op["op"] == "digitize":
+                if "snr_db" in op or "noise_rms" in op:
+                    out.append(f"noise/{i}")
+                if op.get("interleave"):
+                    out.append(f"interleave/{i}")
+        return out
+
+    def contrast(self, *factors, seed=None):
+        """A sibling waveform with ONLY the named factors re-rolled and every other
+        factor bit-identical — a valid contrastive pair / clean ablation. `factors` are
+        role names from `roles()`; `seed` makes the re-roll reproducible."""
+        return self.waveform(streams=Streams(self.seed).reroll(*factors, seed=seed))
 
     def recipe(self):
         """A JSON-serializable dict: engine version, seed, grid, and the ordered ops
