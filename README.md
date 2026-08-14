@@ -128,6 +128,18 @@ recs = hold_constant(build, "gamma", [0.05,0.15,0.25,0.35], "eye", target,
 recs, corr, names = realized_table(build, sets, g, attributes)   # realized labels + leak matrix
 ```
 
+## Ground truth as measured
+Labels are **measured from the output**, not read off the knobs. Eye height comes in two
+named definitions (they diverge under deterministic ISI), and per-symbol labels carry the
+realized integer-symbol alignment (a causal channel has group delay).
+
+```python
+gt = sig.ground_truth()
+# {eye_contour, eye_sigma, best_phase, align_offset, align_corr, align_corr_at_zero, ...}
+ws.eye_height(x, g, defn="contour")   # measured opening
+ws.eye_height(x, g, defn="sigma")     # 3-sigma construction
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

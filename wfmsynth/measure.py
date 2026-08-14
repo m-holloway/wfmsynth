@@ -80,6 +80,43 @@ def best_phase(x, grid, levels=4, defn="contour", n_phases=32):
                                        for ph in phases]))])
 
 
+def align_symbols(x, grid, tx, levels=4, defn="contour", n_phases=32):
+    """Realized integer-symbol alignment between the transmitted stream ``tx`` and the
+    sampled output. A minimum-phase (causal) channel has group delay, so the sampled
+    output symbol *k* corresponds to transmitted symbol *k - offset*; any per-symbol
+    statistic needs this realignment or it silently compares the wrong pairs.
+
+    Returns ``(offset, corr_aligned, corr_zero)``: the best integer offset, the normalized
+    tx/output correlation at that offset, and the correlation at zero offset (skipping the
+    realignment) — so the cost of ignoring the delay is visible."""
+    spb = grid.samples_per_ui
+    y = sample_at_phase(x, spb, best_phase(x, grid, levels, defn, n_phases))
+    m = min(len(y), len(tx))
+    yc = y[:m] - y[:m].mean()
+    sc = np.asarray(tx[:m], float) - np.asarray(tx[:m], float).mean()
+    denom = np.sqrt((yc ** 2).sum() * (sc ** 2).sum()) + 1e-12
+    corr = np.correlate(yc, sc, mode="full") / denom
+    lags = np.arange(-m + 1, m)
+    k = int(np.argmax(corr))
+    corr_zero = float(corr[lags.tolist().index(0)])
+    return int(lags[k]), float(corr[k]), corr_zero
+
+
+def ground_truth(x, grid, tx=None, levels=4):
+    """Consolidated ground-truth labels MEASURED from ``x`` (never computed from the knobs):
+    eye height under both named definitions, the realized sampling phase, and — when the
+    transmitted stream ``tx`` is supplied — the realized integer-symbol alignment offset.
+    ``Signal.ground_truth()`` fills ``tx`` in automatically from the recipe."""
+    gt = attributes(x, grid, levels=levels)
+    gt["best_phase"] = best_phase(x, grid, levels=levels)
+    if tx is not None:
+        off, ca, cz = align_symbols(x, grid, tx, levels=levels)
+        gt["align_offset"] = off
+        gt["align_corr"] = ca
+        gt["align_corr_at_zero"] = cz
+    return gt
+
+
 def attributes(x, grid, levels=4):
     """A dict of realized attributes measured from ``x`` — both eye definitions plus basic
     amplitude stats. Use as the ``metrics`` source for realized-vs-requested labelling."""

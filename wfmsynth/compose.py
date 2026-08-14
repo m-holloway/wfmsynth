@@ -176,6 +176,22 @@ class Signal:
         role names from `roles()`; `seed` makes the re-roll reproducible."""
         return self.waveform(streams=Streams(self.seed).reroll(*factors, seed=seed))
 
+    def ground_truth(self, levels=None):
+        """Ground-truth labels MEASURED from this signal's waveform (never read off the
+        knobs): eye height under both definitions, the realized sampling phase, and the
+        realized integer-symbol alignment — reconstructing the transmitted stream from the
+        recipe so per-symbol statistics compare the right pairs across a channel's group
+        delay. `levels` defaults from the carrier (2 for NRZ, 4 for PAM4)."""
+        from .measure import ground_truth as _gt
+        car = next((o for o in self.ops if o["op"] == "carrier"), None)
+        tx = None
+        if car is not None:
+            tx = P.carrier_symbols(car["kind"], car.get("n_ui", 32),
+                                   car.get("seed", 1), car.get("pattern", "legacy"))
+            if levels is None:
+                levels = 4 if car["kind"] == "pam4" else 2
+        return _gt(self.waveform(), self.grid, tx=tx, levels=levels or 4)
+
     def recipe(self):
         """A JSON-serializable dict: engine version, seed, grid, and the ordered ops
         with their exact knob values. This IS the ground truth for the waveform."""
