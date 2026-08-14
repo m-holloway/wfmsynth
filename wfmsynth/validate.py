@@ -545,6 +545,16 @@ check("a fully-causal composed chain (causal shaping + causal channel) has ~zero
 check("the hazard is real: zero-phase edge shaping leaks pre-cursor behind a causal channel",
       _rz18 > 10 * _rc18 and _rz18 > 0.005, f"zero-phase pre/post = {_rz18:.4f} vs causal {_rc18:.4f}")
 
+print("== pattern lock-ability: a standard pattern autocorrelates to a single sharp peak ==")
+from wfmsynth.measure import pattern_period as _pp
+_syms19 = P.carrier_symbols("pam4", 2 * 8191, 1, "prbs13q")     # two full PRBS13Q periods
+_lag19, _peak19, _ac19 = _pp(_syms19, max_lag=9000)
+_m19 = np.ones(9001, bool); _m19[max(1, _lag19 - 20):_lag19 + 20] = False; _m19[:20] = False
+_next19 = float(np.max(_ac19[:9001][_m19]))
+check("PRBS13Q symbol sequence locks to a single sharp peak at its declared period (8191)",
+      _lag19 == 8191 and _peak19 > 0.95 and _peak19 > 2 * _next19,
+      f"period={_lag19} peak={_peak19:.3f} next={_next19:.3f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
