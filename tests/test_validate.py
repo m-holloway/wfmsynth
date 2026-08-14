@@ -333,3 +333,54 @@ def test_contrastive_pair_isolates_one_factor():
     N = ws.Streams(7).role("noise/1").normal(0.0, 0.01, len(cA))
     assert np.array_equal(fA, cA + N) and np.array_equal(fB, cB + N)
     assert not np.array_equal(cA, cB)                # ...even though the clean signals differ
+
+
+def test_hold_constant_sweep_pins_measured_metric():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)      # spb = 4
+    n_ui = int(g.n // g.samples_per_ui)
+
+    def build(gamma=0.05, loss_db=2.0):
+        return (ws.Signal(seed=1, grid=g)
+                .carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+                .lossy(loss_db=loss_db, loss_at_ghz=25.0, causal=True)
+                .reflect(td_ps=30.0, gamma_s=gamma, gamma_l=gamma))
+
+    # eye is measured, monotonic in loss (needed for the bisection to be well posed)
+    eyes = [ws.eye_height(build(0.05, l).waveform(), g) for l in (0.0, 2.0, 4.0)]
+    assert eyes[0] > eyes[1] > eyes[2]
+
+    target = ws.eye_height(build(0.05, 2.0).waveform(), g)
+    recs = ws.hold_constant(build, "gamma", [0.05, 0.15, 0.25, 0.35], "eye", target,
+                            "loss_db", (0.0, 4.0), g, ws.eye_height, tol=0.004)
+    realized = [r["realized_eye"] for r in recs]
+    solved = [r["loss_db"] for r in recs]
+    assert max(abs(e - target) for e in realized) <= 0.02            # pin held
+    assert all(solved[i] > solved[i + 1] for i in range(len(solved) - 1))   # compensation moves
+    assert all("realized_eye" in r for r in recs)                   # realized, not requested
+
+
+def test_realized_table_exposes_leak_and_two_eye_definitions():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)
+    n_ui = int(g.n // g.samples_per_ui)
+
+    def build(gamma=0.05, loss_db=1.0):
+        return (ws.Signal(seed=1, grid=g)
+                .carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+                .lossy(loss_db=loss_db, loss_at_ghz=25.0, causal=True)
+                .reflect(td_ps=30.0, gamma_s=gamma, gamma_l=gamma))
+
+    gammas = np.linspace(0.0, 0.4, 6)
+    sets = [dict(gamma=gm, loss_db=1.0) for gm in gammas]
+    recs, corr, names = ws.realized_table(build, sets, g, ws.attributes)
+    assert set(names) == {"eye_contour", "eye_sigma", "ptp", "rms"}
+    assert all(f"realized_{n}" in recs[0] for n in names)
+    # the leak is visible in the realized labels: sweeping reflection alone strongly
+    # anti-correlates with the realized eye opening (so a model could read eye, not ISI).
+    eyes = np.array([r["realized_eye_contour"] for r in recs])
+    assert np.corrcoef(gammas, eyes)[0, 1] < -0.8
+    # both named eye definitions are computable and finite
+    x = build(0.3, 1.0).waveform()
+    assert np.isfinite(ws.eye_height(x, g, defn="sigma"))
+    assert np.isfinite(ws.eye_height(x, g, defn="contour"))

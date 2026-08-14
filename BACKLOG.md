@@ -153,7 +153,15 @@ and any conclusion drawn from it is confounded.
 **Done when:** two waveforms differing in one declared factor are bit-identical
 outside that factor's contribution, asserted in validate.
 
-### 7. Confounder-controlled sweeps, and realized-vs-requested labels
+### 7. Confounder-controlled sweeps, and realized-vs-requested labels — ✅ DONE (v0.5)
+`wfmsynth.measure` measures attributes FROM the output (eye height under two named
+definitions: 'contour' and 'sigma'). `wfmsynth.sweep.hold_constant(...)` sweeps one knob
+while pinning a measured metric by solving a second knob (bisection), returning REALIZED
+values — the caller chooses which two of {swept, solved, pinned} are free. `realized_table`
+emits realized labels + the realized correlation matrix so a leak is visible. validate
+asserts the pin holds within tolerance while the compensation moves monotonically.
+(Alternate-eye-definition divergence and symbol alignment are sharpened in #8.)
+
 The single most valuable addition if the output is training data, and not currently
 anywhere in the roadmap.
 

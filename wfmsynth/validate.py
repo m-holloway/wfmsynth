@@ -376,6 +376,36 @@ check("Signal.contrast(factor) re-rolls only that factor (reproducibly)",
       and not np.array_equal(_cs.contrast("noise/1", seed=1), _cs.waveform())
       and np.array_equal(_cs.contrast("noise/1", seed=1), _cs.contrast("noise/1", seed=1)))
 
+print("== confounder-controlled sweeps: hold a measured metric while sweeping a knob ==")
+from wfmsynth.measure import eye_height as _eye
+from wfmsynth.sweep import hold_constant as _hold
+_g7 = Grid(fs=200e9, baud=50e9, n=1 << 13)          # spb = 4
+_nui = int(_g7.n // _g7.samples_per_ui)
+def _b7(gamma=0.05, loss_db=2.0):
+    return (Signal(seed=1, grid=_g7)
+            .carrier("pam4", n_ui=_nui, pattern="prbs13q", causal=True)
+            .lossy(loss_db=loss_db, loss_at_ghz=25.0, causal=True)
+            .reflect(td_ps=30.0, gamma_s=gamma, gamma_l=gamma))
+# a naive reflection sweep is ALSO an eye-height sweep -> realized labels expose the leak
+_naive = [_eye(_b7(gm, 0.0).waveform(), _g7) for gm in (0.0, 0.15, 0.3, 0.4)]
+check("realized labels expose the confound: reflection alone closes the eye",
+      _naive[0] > _naive[-1] and all(_naive[i] >= _naive[i + 1] for i in range(len(_naive) - 1)),
+      f"eye {_naive[0]:.3f} -> {_naive[-1]:.3f}")
+# hold eye height fixed by solving insertion loss as reflection is swept
+_tgt = _eye(_b7(0.05, 2.0).waveform(), _g7)
+_recs = _hold(_b7, "gamma", [0.05, 0.15, 0.25, 0.35], "eye", _tgt,
+              "loss_db", (0.0, 4.0), _g7, _eye, tol=0.004)
+_real = [r["realized_eye"] for r in _recs]
+_solved = [r["loss_db"] for r in _recs]
+check("hold-constant sweep keeps the pinned metric within tolerance",
+      max(abs(e - _tgt) for e in _real) <= 0.02, f"max dev {max(abs(e - _tgt) for e in _real):.4f}")
+check("...while the swept knob forces a monotonic compensation (the constraint is real)",
+      all(_solved[i] > _solved[i + 1] for i in range(len(_solved) - 1)),
+      f"loss {_solved[0]:.2f} -> {_solved[-1]:.2f} as gamma rises")
+# realized values are returned, not the requested ones
+check("sweep returns REALIZED metric values alongside the request",
+      all("realized_eye" in r and "target_eye" in r for r in _recs))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
