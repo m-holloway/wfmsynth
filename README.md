@@ -115,6 +115,19 @@ b = sig.contrast("noise/1")     # same symbols, same jitter, same channel — on
 sig.roles()                     # -> the re-rollable factors, e.g. ["jitter/0", "noise/1"]
 ```
 
+## Confounder-controlled sweeps & measured labels
+A naive reflection sweep is also an eye-height sweep — hold the shortcut constant so a
+model learns ISI structure, not eye height. Metrics are **measured from the output**.
+
+```python
+from wfmsynth import eye_height, hold_constant, attributes, realized_table
+target = eye_height(build(gamma=0.05, loss_db=2.0).waveform(), g)
+recs = hold_constant(build, "gamma", [0.05,0.15,0.25,0.35], "eye", target,
+                     "loss_db", (0.0,4.0), g, eye_height)   # solve loss to pin the eye
+# each record carries realized_eye; loss must drop as reflection rises (a real constraint)
+recs, corr, names = realized_table(build, sets, g, attributes)   # realized labels + leak matrix
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
