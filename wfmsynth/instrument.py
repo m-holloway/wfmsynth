@@ -16,11 +16,15 @@ from scipy import signal as _sig
 
 
 def interleave_adc(x, m_cores=4, gain_mm=0.0, offset_mm=0.0, skew_mm=0.0,
-                   rng=None, mismatch=None):
+                   rng=None, mismatch=None, offset_v=None):
     """Pass x through an M-way time-interleaved ADC with per-core mismatch.
 
       gain_mm    per-core gain error, std (fractional, e.g. 0.01 = 1%)
       offset_mm  per-core offset, std as a fraction of the signal span
+      offset_v   per-core offset, std in ABSOLUTE amplitude units (volts). A real
+                 converter's offset error is a property of the ADC, not the signal: it
+                 stays put when the signal shrinks (which is when it matters most).
+                 Takes precedence over offset_mm when given.
       skew_mm    per-core sampling-time skew, std in SAMPLES (sub-sample)
 
     Cores are assigned round-robin: sample i is taken by core i % m_cores. Draw the M
@@ -35,7 +39,8 @@ def interleave_adc(x, m_cores=4, gain_mm=0.0, offset_mm=0.0, skew_mm=0.0,
     else:
         rng = rng or np.random.default_rng()
         g = rng.normal(0.0, gain_mm, m_cores)
-        o = rng.normal(0.0, offset_mm, m_cores) * span
+        o_std = offset_v if offset_v is not None else offset_mm * span   # absolute vs fraction
+        o = rng.normal(0.0, o_std, m_cores)
         s = rng.normal(0.0, skew_mm, m_cores)
     y = x.copy()
     if skew_mm > 0 or (mismatch is not None and np.any(s)):
@@ -45,6 +50,58 @@ def interleave_adc(x, m_cores=4, gain_mm=0.0, offset_mm=0.0, skew_mm=0.0,
             y[idx] = np.interp(idx + s[c], xi, x)
     y = y * (1.0 + g[core]) + o[core]              # per-core gain + offset
     return y
+
+
+def quantize_adc(x, enob=6.0, full_scale=None):
+    """Quantise to a finite-ENOB ADC lattice — arguably the single most characteristic
+    thing an ADC does, and previously reachable only inside the full deep_capture pipeline.
+
+      enob        effective number of bits -> ~2**enob levels across the range
+      full_scale  +/- range of the lattice; None takes it from the signal's peak
+
+    Returns the quantised array; each sample moves by at most half an LSB. Pairs with
+    clip_adc (clip first so out-of-range samples land on the top code, not beyond it)."""
+    x = np.asarray(x, float)
+    fs = float(np.max(np.abs(x))) + 1e-12 if full_scale is None else float(full_scale)
+    lsb = 2.0 * fs / 2 ** enob
+    return np.round(x / lsb) * lsb
+
+
+def digitize(x, grid=None, interleave=None, clip_full_scale=None, enob=None,
+             noise_floor=None, rng=None):
+    """Compose the ADC stages in the physically correct order and return ``(y, info)``.
+
+    Order — all of it AFTER the channel and the additive impairment: additive noise floor
+    -> interleave mismatch (at the sampling instant) -> hard clip (at the ADC input) ->
+    quantise (last). Getting this order wrong is silent: quantising before the noise, or
+    clipping after quantising, yields a plausible waveform with the wrong noise floor. It
+    lives here once so a caller cannot get it wrong.
+
+      noise_floor       kwargs for shaped_noise_floor, e.g. {"rms": 1e-3, "shape": "pink"}
+      interleave        kwargs for interleave_adc, e.g. {"m_cores": 4, "offset_v": 1e-3}
+      clip_full_scale   hard-clip level (absolute); None to skip. Also sets the quantiser range.
+      enob              effective bits for the final quantiser; None to skip
+
+    ``info`` records the applied settings and the clipped-sample mask fraction — feeding
+    provenance (#5) and measured ground truth (#8). ``grid`` is accepted for API symmetry;
+    amplitude stages need no rate conversion."""
+    x = np.asarray(x, float)
+    rng = rng or np.random.default_rng()
+    info = {}
+    if noise_floor:
+        x = x + shaped_noise_floor(len(x), rng=rng, **noise_floor)
+        info["noise_floor"] = dict(noise_floor)
+    if interleave:
+        x = interleave_adc(x, rng=rng, **interleave)
+        info["interleave"] = dict(interleave)
+    if clip_full_scale is not None:
+        x, mask = clip_adc(x, clip_full_scale)
+        info["clip_full_scale"] = float(clip_full_scale)
+        info["clipped_fraction"] = float(mask.mean())
+    if enob is not None:
+        x = quantize_adc(x, enob=enob, full_scale=clip_full_scale)
+        info["enob"] = float(enob)
+    return x, info
 
 
 def shaped_noise_floor(n, rms=0.01, shape="pink", rng=None):

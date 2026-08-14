@@ -140,6 +140,18 @@ ws.eye_height(x, g, defn="contour")   # measured opening
 ws.eye_height(x, g, defn="sigma")     # 3-sigma construction
 ```
 
+## Instrument / ADC model
+The ADC stages compose in one place, in the physically correct order — getting it wrong
+is silent (quantising before the noise gives the wrong noise floor).
+
+```python
+from wfmsynth import digitize_adc, quantize_adc
+y, info = digitize_adc(x, noise_floor={"rms":1e-3,"shape":"pink"},
+                       interleave={"m_cores":4,"offset_v":1e-3},   # offset in absolute volts
+                       clip_full_scale=0.7, enob=6)                # -> noise->interleave->clip->quantise
+q = quantize_adc(x, enob=5.8)     # standalone finite-ENOB lattice
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

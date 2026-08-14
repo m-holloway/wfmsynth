@@ -435,6 +435,41 @@ check("ground_truth labels are measured from the output (both eye defs + phase +
 check("carrier_symbols reproduces the transmitted stream used by the carrier",
       np.array_equal(P.carrier_symbols("pam4", _n8, 1, "prbs13q"), P.prbs13q(_n8, 1)))
 
+print("== instrument ADC model: standalone ENOB, absolute offset, correctly-ordered digitize ==")
+from wfmsynth.instrument import (quantize_adc as _q, digitize as _dig,
+                                 interleave_adc as _ila, clip_adc as _clip,
+                                 shaped_noise_floor as _snf)
+# #24 standalone quantiser: ~2^enob distinct codes, moves by at most half an LSB
+_xq = np.linspace(-1, 1, 4000)
+_qq = _q(_xq, enob=6, full_scale=1.0)
+_lsb = 2.0 / 2 ** 6
+check("quantize_adc collapses to ~2^enob codes, sample moves <= half an LSB",
+      abs(len(np.unique(_qq)) - 64) <= 4 and np.max(np.abs(_qq - _xq)) <= 0.5 * _lsb + 1e-12,
+      f"codes={len(np.unique(_qq))} maxmove={np.max(np.abs(_qq - _xq)) / _lsb:.3f} LSB")
+# #26 offset in absolute volts is input-scale invariant; as a fraction it scales with input
+_xo = 0.5 * np.sin(np.linspace(0, 80, 2000))
+def _otone(kw, sc):
+    return float(np.std(_ila(sc * _xo, m_cores=4, gain_mm=0.0, skew_mm=0.0,
+                             rng=np.random.default_rng(0), **kw) - sc * _xo))
+_av = _otone(dict(offset_v=1e-3), 1.0), _otone(dict(offset_v=1e-3), 4.0)
+_fr = _otone(dict(offset_mm=0.05), 1.0), _otone(dict(offset_mm=0.05), 4.0)
+check("interleave offset in volts is invariant to input scale; as a fraction it scales",
+      abs(_av[1] / _av[0] - 1.0) < 0.02 and abs(_fr[1] / _fr[0] - 4.0) < 0.05,
+      f"volts x{_av[1] / _av[0]:.2f}, frac x{_fr[1] / _fr[0]:.2f}")
+# #25 composed digitize matches the manual correct-order pipeline; order genuinely matters
+_mm = (np.array([0.01, -0.005, 0.008, -0.003]), np.array([2e-3, -1e-3, 1.5e-3, -2e-3]), np.zeros(4))
+_yc, _info = _dig(_xo, noise_floor={"rms": 2e-3, "shape": "white"},
+                  interleave={"m_cores": 4, "mismatch": _mm}, clip_full_scale=0.7, enob=6,
+                  rng=np.random.default_rng(3))
+_r = np.random.default_rng(3); _nz = _snf(len(_xo), rng=_r, rms=2e-3, shape="white")
+_ym = _ila(_xo + _nz, m_cores=4, mismatch=_mm)
+_ym, _ = _clip(_ym, 0.7); _ym = _q(_ym, enob=6, full_scale=0.7)
+check("digitize() composes noise->interleave->clip->quantise identically to manual stages",
+      np.array_equal(_yc, _ym) and "clipped_fraction" in _info)
+check("stage order matters: quantise-before-noise != noise-before-quantise",
+      not np.array_equal(_q(_xo + _nz, enob=6, full_scale=0.7),
+                         _q(_xo, enob=6, full_scale=0.7) + _nz))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

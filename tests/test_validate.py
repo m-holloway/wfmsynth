@@ -413,3 +413,40 @@ def test_ground_truth_measured_eye_definitions_and_symbol_alignment():
     # carrier_symbols is the single source of truth for the transmitted stream
     assert np.array_equal(ws.physics.carrier_symbols("pam4", n_ui, 1, "prbs13q"),
                           ws.physics.prbs13q(n_ui, 1))
+
+
+def test_instrument_adc_model_quantise_offset_and_ordered_digitize():
+    from wfmsynth.instrument import (quantize_adc, digitize, interleave_adc, clip_adc,
+                                     shaped_noise_floor)
+    # #24 standalone ENOB quantiser
+    x = np.linspace(-1, 1, 4000)
+    q = quantize_adc(x, enob=6, full_scale=1.0)
+    lsb = 2.0 / 2 ** 6
+    assert abs(len(np.unique(q)) - 64) <= 4
+    assert np.max(np.abs(q - x)) <= 0.5 * lsb + 1e-12
+
+    # #26 absolute-volts offset is input-scale invariant; fractional offset scales with input
+    xo = 0.5 * np.sin(np.linspace(0, 80, 2000))
+
+    def tone(kw, sc):
+        y = interleave_adc(sc * xo, m_cores=4, gain_mm=0.0, skew_mm=0.0,
+                           rng=np.random.default_rng(0), **kw)
+        return float(np.std(y - sc * xo))
+
+    assert abs(tone(dict(offset_v=1e-3), 4.0) / tone(dict(offset_v=1e-3), 1.0) - 1.0) < 0.02
+    assert abs(tone(dict(offset_mm=0.05), 4.0) / tone(dict(offset_mm=0.05), 1.0) - 4.0) < 0.05
+
+    # #25 composed digitize == manual correct-order pipeline; order matters
+    mm = (np.array([0.01, -0.005, 0.008, -0.003]), np.array([2e-3, -1e-3, 1.5e-3, -2e-3]),
+          np.zeros(4))
+    yc, info = digitize(xo, noise_floor={"rms": 2e-3, "shape": "white"},
+                        interleave={"m_cores": 4, "mismatch": mm}, clip_full_scale=0.7,
+                        enob=6, rng=np.random.default_rng(3))
+    r = np.random.default_rng(3)
+    nz = shaped_noise_floor(len(xo), rng=r, rms=2e-3, shape="white")
+    ym = interleave_adc(xo + nz, m_cores=4, mismatch=mm)
+    ym, _ = clip_adc(ym, 0.7)
+    ym = quantize_adc(ym, enob=6, full_scale=0.7)
+    assert np.array_equal(yc, ym) and "clipped_fraction" in info
+    assert not np.array_equal(quantize_adc(xo + nz, enob=6, full_scale=0.7),
+                              quantize_adc(xo, enob=6, full_scale=0.7) + nz)
