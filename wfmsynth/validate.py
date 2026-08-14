@@ -490,6 +490,23 @@ check("...while a character statistic (spectral centroid) moves monotonically",
       all(_ch9[i] > _ch9[i + 1] for i in range(len(_ch9) - 1)),
       f"centroid {_ch9[0]:.0f} -> {_ch9[-1]:.0f}")
 
+print("== intermittent impairments: confined to a gate, per-sample mask as ground truth ==")
+from wfmsynth.impairments import apply_gated as _ag
+_g10 = Grid(fs=200e9, baud=50e9, n=1 << 13)
+_x10 = (Signal(seed=1, grid=_g10)
+        .carrier("pam4", n_ui=int(_g10.n // _g10.samples_per_ui), pattern="prbs13q", causal=True)
+        ).waveform()
+def _glitch(_s):
+    return _s + 0.5 * np.sign(np.sin(np.linspace(0, 300, len(_s))))
+_y10, _mask10 = _ag(_x10, _glitch, [(2000, 180), (6000, 140)])
+_out = _mask10 == 0
+check("intermittent impairment is confined to its gate (zero leakage outside)",
+      np.array_equal(_y10[_out], _x10[_out]), f"duty={100 * (_mask10 > 0).mean():.1f}%")
+check("the defect is present inside the gate and the per-sample mask is emitted",
+      np.max(np.abs((_y10 - _x10)[_mask10 > 0.5])) > 0.1 and _mask10.shape == _x10.shape)
+check("the gate is smooth (raised-cosine onset, not a step that reads as an edge)",
+      np.max(np.abs(np.diff(_mask10))) < 0.3)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

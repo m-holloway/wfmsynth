@@ -231,7 +231,14 @@ character" datasets, and doing it by hand is easy to get wrong at the endpoints.
 **Done when:** validate asserts total impairment RMS is invariant across the mixing
 sweep while a character statistic moves monotonically.
 
-### 10. Time-varying and intermittent impairments
+### 10. Time-varying and intermittent impairments — ✅ DONE (v0.9)
+`impairments.burst_gate(n, intervals, edge_frac)` builds a raised-cosine per-sample gate;
+`impairments.apply_gated(x, impairment, intervals)` applies an impairment (array or
+callable) only within the gate and returns `(y, mask)`. The gate is exact — `y` is
+bit-identical to `x` outside it — and the mask is the ground-truth 'where the defect is
+active'. validate asserts zero leakage outside the gate, the defect present inside, and a
+smooth (non-step) onset. (Ties into #6 masks-as-ground-truth for intermittency.)
+
 `ROADMAP.md` lists "burst/intermittent faults". Worth promoting, because intermittency
 is where stationary analysis genuinely fails rather than merely being imprecise:
 

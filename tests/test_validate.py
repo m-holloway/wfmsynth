@@ -478,3 +478,24 @@ def test_mix_at_constant_power_holds_rms_and_moves_character():
         pass
     else:
         raise AssertionError("negative weights should raise")
+
+
+def test_gated_intermittent_impairment_confined_with_mask():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)
+    x = (ws.Signal(seed=1, grid=g)
+         .carrier("pam4", n_ui=int(g.n // g.samples_per_ui), pattern="prbs13q", causal=True)
+         ).waveform()
+
+    def glitch(s):
+        return s + 0.5 * np.sign(np.sin(np.linspace(0, 300, len(s))))
+
+    y, mask = ws.apply_gated(x, glitch, [(2000, 180), (6000, 140)])
+    out = mask == 0
+    assert np.array_equal(y[out], x[out])                      # zero leakage outside gate
+    assert np.max(np.abs((y - x)[mask > 0.5])) > 0.1           # defect present inside
+    assert mask.shape == x.shape and 0.0 < (mask > 0).mean() < 0.1   # low-duty mask emitted
+    assert np.max(np.abs(np.diff(mask))) < 0.3                 # raised-cosine, not a step
+    # additive-array form also confines exactly
+    y2, m2 = ws.apply_gated(x, np.full_like(x, 5.0), [(100, 50)])
+    assert np.array_equal(y2[m2 == 0], x[m2 == 0])
