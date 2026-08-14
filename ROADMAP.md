@@ -1,5 +1,9 @@
 # wfmsynth — Roadmap / Wishlist
 
+> This file is the **breadth** map: everything the engine could eventually model.
+> For the **prioritized, actionable** next steps — with a rationale and a
+> definition of done for each — see **[BACKLOG.md](BACKLOG.md)**.
+
 v1 is a compact, **validated** physics-synthesis engine: causal channels, reflections,
 crosstalk, decomposed jitter, AC-coupling, NRZ/PAM4/RF carriers, a compositional grammar,
 and realistic segmented deep-memory PAM4 captures. This is where it could go. Nothing here
