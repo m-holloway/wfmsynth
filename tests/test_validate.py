@@ -292,3 +292,44 @@ def test_dataset_records_sampled_knobs_and_reproduces():
         assert 8.0 <= r["ops"][1]["loss_db"] <= 20.0        # the sampled knob is recorded
         w = ws.Signal.from_recipe(r).waveform()
         assert np.array_equal(w, ws.Signal.from_recipe(r).waveform())   # reproducible
+
+
+def test_rng_stream_roles_independent_and_rerollable():
+    import wfmsynth as ws
+    s = ws.Streams(1234)
+    j1 = s.role("jitter").standard_normal(64)
+    n1 = s.role("noise").standard_normal(64)
+    s2 = ws.Streams(1234)                       # draw the same roles in the opposite order
+    n2 = s2.role("noise").standard_normal(64)
+    j2 = s2.role("jitter").standard_normal(64)
+    assert np.array_equal(n1, n2) and np.array_equal(j1, j2)   # order-independent + independent
+    s3 = s.reroll("jitter")                     # re-roll ONE factor
+    assert not np.array_equal(s3.role("jitter").standard_normal(64), j1)
+    assert np.array_equal(s3.role("noise").standard_normal(64), n1)
+
+
+def test_contrastive_pair_isolates_one_factor():
+    import wfmsynth as ws
+    g = ws.Grid(fs=256e9, baud=112e9, n=1 << 12)
+    sig = (ws.Signal(seed=3, grid=g)
+           .carrier("pam4", n_ui=g.n // 8, pattern="prbs13q", jitter=dict(rj=0.5))
+           .digitize(snr_db=28.0))                   # carrier=op0, digitize=op1 -> role noise/1
+    assert set(sig.roles()) == {"jitter/0", "noise/1"}
+    base = sig.waveform()
+    assert not np.array_equal(sig.contrast("noise/1", seed=1), base)   # noise re-rolled
+    assert np.array_equal(sig.contrast("noise/1", seed=1), sig.contrast("noise/1", seed=1))
+
+    # a changed upstream factor (jitter) leaves the downstream noise realization identical
+    def full_and_clean(rj):
+        s = (ws.Signal(seed=7, grid=g)
+             .carrier("pam4", n_ui=g.n // 8, pattern="prbs13q", jitter=dict(rj=rj))
+             .digitize(noise_rms=0.01))
+        q = ws.Signal.from_recipe(s.recipe())
+        q.ops[-1] = {k: v for k, v in q.ops[-1].items() if k != "noise_rms"}
+        return s.waveform(), q.waveform()
+
+    fA, cA = full_and_clean(0.3)
+    fB, cB = full_and_clean(3.0)
+    N = ws.Streams(7).role("noise/1").normal(0.0, 0.01, len(cA))
+    assert np.array_equal(fA, cA + N) and np.array_equal(fB, cB + N)
+    assert not np.array_equal(cA, cB)                # ...even though the clean signals differ

@@ -44,3 +44,9 @@ print(f"\ndataset: {X.shape}, each example labelled to arbitrary depth by its re
 for r in recipes[:3]:
     print("  loss_db=%.1f  reflect_ps=%.1f  gamma_s=%.2f"
           % (r["ops"][1]["loss_db"], r["ops"][2]["td_ps"], r["ops"][2]["gamma_s"]))
+
+# contrastive pairs: re-roll exactly one factor, hold everything else bit-identical
+pair_a = sig.waveform()
+pair_b = sig.contrast("noise/1")          # same symbols/jitter/channel; only the noise differs
+print("\nre-rollable factors:", sig.roles())
+print("contrastive pair differs only in noise:", not np.array_equal(pair_a, pair_b))

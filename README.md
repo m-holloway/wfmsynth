@@ -106,6 +106,15 @@ assert (ws.Signal.from_recipe(recipe).waveform() == x).all()   # bit-for-bit rou
 X, recipes = ws.dataset(build, n=10_000)          # each example labelled to arbitrary depth
 ```
 
+**Contrastive pairs / ablations.** Each random factor is a separate stream, so you can
+re-roll exactly one and hold the rest bit-identical:
+
+```python
+a = sig.waveform()
+b = sig.contrast("noise/1")     # same symbols, same jitter, same channel — only noise differs
+sig.roles()                     # -> the re-rollable factors, e.g. ["jitter/0", "noise/1"]
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

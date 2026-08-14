@@ -129,7 +129,14 @@ The `ROADMAP.md` flagship; the design sketched there is the right shape. Two add
   that makes datasets trustworthy. Stamp the engine version in the recipe and assert
   the round trip in validate.
 
-### 6. RNG stream roles
+### 6. RNG stream roles — ✅ DONE (v0.4)
+`wfmsynth.streams.Streams(seed)` gives each factor (symbols/jitter/noise/per-impairment/
+interleave) an independent stream keyed by `(seed, role-name)` — order-free, so adding a
+role never disturbs existing ones. `Signal.contrast(*factors)` returns a sibling with only
+those factors re-rolled and everything else bit-identical (valid contrastive pairs /
+clean ablations). Also adds an absolute `noise_rms` floor. validate asserts a changed
+upstream factor leaves the downstream noise realization bit-for-bit identical.
+
 Currently a single `rng` threads through generation, so any change to one factor
 re-rolls everything downstream of it. For dataset construction that is a correctness
 problem, not an inconvenience.
