@@ -171,6 +171,15 @@ y, mask = apply_gated(x, glitch_fn, intervals=[(2000,180),(6000,140)])
 # y is bit-identical to x outside the gate; mask marks where the defect is active
 ```
 
+## Tx FFE (pre-emphasis)
+Real transmitters run multi-tap FFE — a deliberate pre-cursor de-emphasizing ISI:
+
+```python
+sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+       .tx_ffe(taps=[-0.15, 1.0, -0.25], pre=1)      # place before the channel
+       .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True))
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
