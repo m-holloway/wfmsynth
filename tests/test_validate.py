@@ -231,7 +231,7 @@ def test_interleave_adc_spurs_and_clip():
 def test_source_jitter_edge_rms_and_independent_noise():
     """BACKLOG #4 done-criteria: source jitter edge-RMS ~ injected; post-channel noise independent."""
     from wfmsynth import physics as P
-    from wfmsynth import Jitter
+    from wfmsynth import Jitter, Grid
     nui = 96
     ref = P.nrz(n_ui=nui, tr_frac=0.1, seed=5)
     jit = P.nrz(n_ui=nui, tr_frac=0.1, seed=5, jitter=Jitter(rj=3.0), rng=np.random.default_rng(0))
@@ -251,5 +251,5 @@ def test_source_jitter_edge_rms_and_independent_noise():
     noise = np.random.default_rng(2).normal(0, 0.05, len(sig))
     assert np.allclose((sig + noise) - sig, noise, atol=1e-12)
     # Jitter.at converts seconds/Hz through a grid
-    g = ws.Grid(fs=256e9, n=4096)
+    g = Grid(fs=256e9, n=4096)
     assert abs(Jitter.at(g, rj_s=3.0 / 256e9).rj - 3.0) < 1e-9
