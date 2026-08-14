@@ -522,3 +522,23 @@ def test_tx_ffe_precursor_and_eye_compensation():
                 .tx_ffe(taps=[-0.15, 1.0, -0.25], pre=1)
                 .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)).waveform()
     assert ws.eye_height(with_ffe, g) > ws.eye_height(no_ffe, g) + 0.02
+
+
+def test_composed_chain_causality():
+    import wfmsynth.physics as P
+    N = P.N
+    tr = 8.0
+    pulse = np.zeros(N)
+    c = N // 2
+    W = int(20 * tr)
+    pulse[c:c + W] = 1.0
+
+    def edge_ratio(shaped_causal):
+        y = P.lossy_channel(P._shape_edges(pulse, tr, causal=shaped_causal),
+                            length_in=12.0, causal=True)
+        w = int(4 * tr)
+        return float(np.sum(y[c - w:c] ** 2) / (np.sum(y[c:c + w] ** 2) + 1e-12))
+
+    rc, rz = edge_ratio(True), edge_ratio(False)
+    assert rc < 0.01                          # fully-causal composed chain: ~zero pre-cursor
+    assert rz > 10 * rc and rz > 0.005        # zero-phase shaping leaks behind a causal channel

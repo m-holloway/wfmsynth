@@ -180,6 +180,16 @@ sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", c
        .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True))
 ```
 
+## Causality hazard (build causal chains end-to-end)
+Each stage can be causal in isolation while the *pipeline* is not: the default zero-phase
+edge shaping reintroduces pre-cursor **after** a causal channel. For an end-to-end causal
+chain, set `causal=True` on the carrier (and any lossy stage):
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True) \
+  .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)   # causal shaping AND causal channel
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
