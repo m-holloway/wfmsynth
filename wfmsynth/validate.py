@@ -292,6 +292,29 @@ check("gain mismatch -> image spur at fs/M - f_in",
 check("zero mismatch -> no interleave spur (ideal ADC transparent)",
       _Yid[_spur] < 1e-6 * _Ymm.max(), f"ideal spur={_Yid[_spur]:.2e}")
 
+print("== source jitter: edges jittered at the transmitter; post-channel noise independent ==")
+from wfmsynth.physics import Jitter
+_nui = 96
+_ref = P.nrz(n_ui=_nui, tr_frac=0.1, seed=5)
+_jit = P.nrz(n_ui=_nui, tr_frac=0.1, seed=5, jitter=Jitter(rj=3.0), rng=np.random.default_rng(0))
+def _cross(y):
+    s = np.sign(y - y.mean()); return np.where(np.diff(s) != 0)[0].astype(float)
+_c0, _c1 = _cross(_ref), _cross(_jit)
+_rms = float(np.std(_c1 - _c0)) if len(_c0) == len(_c1) else -1.0
+check("source Rj: recovered edge-time RMS ~ injected (3 samples)", 1.5 < _rms < 4.5,
+      f"recovered RMS={_rms:.2f} samples ({len(_c0)} crossings)")
+_clean = P.pam4(n_ui=_nui, seed=5, jitter=Jitter(rj=2.0, pj=1.0), rng=np.random.default_rng(1))
+_sigc = P.lossy_channel(_clean, length_in=8.0, causal=True)
+_noise = np.random.default_rng(2).normal(0, 0.05, len(_sigc))
+check("source jitter: post-channel additive noise recovers exactly (uncorrelated)",
+      np.allclose((_sigc + _noise) - _sigc, _noise, atol=1e-12),
+      "noise added after the channel is not itself jittered")
+_wn = P.inject_jitter(_sigc + _noise, sigma_rj=2.0, rng=np.random.default_rng(3))
+_wc = P.inject_jitter(_sigc, sigma_rj=2.0, rng=np.random.default_rng(3))
+check("output-warp jitter corrupts post-hoc noise (why source jitter is the correct model)",
+      not np.allclose(_wn - _wc, _noise, atol=1e-6),
+      "warping the whole waveform jitters the noise too -- unphysical")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

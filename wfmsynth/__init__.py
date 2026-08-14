@@ -15,7 +15,7 @@ Modules / public API:
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
 from . import physics, impairments, grammar, pam4, grid, instrument
-from .physics import N, T
+from .physics import N, T, Jitter
 from .grid import Grid
 from .impairments import IMPAIRMENTS, apply_impairment, domain_randomize
 from .grammar import sample, generate, CARRIERS, ENVELOPES
@@ -25,7 +25,7 @@ from .instrument import interleave_adc, shaped_noise_floor, clip_adc
 __version__ = "0.2.0"
 __all__ = [
     "physics", "impairments", "grammar", "pam4", "grid", "instrument",
-    "N", "T", "Grid", "IMPAIRMENTS", "apply_impairment", "domain_randomize",
+    "N", "T", "Grid", "Jitter", "IMPAIRMENTS", "apply_impairment", "domain_randomize",
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "interleave_adc", "shaped_noise_floor", "clip_adc", "__version__",
 ]
