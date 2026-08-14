@@ -213,7 +213,13 @@ In `ROADMAP.md` under "Ground-truth co-generation". Three sharpenings:
   stream and the sampled output. A consumer that skips it computes closed eyes while
   everything looks reasonable, so the offset belongs in the ground truth.
 
-### 9. Impairment mixing at constant total power
+### 9. Impairment mixing at constant total power — ✅ DONE (v0.8)
+`impairments.mix_at_constant_power(components, weights, total_rms)` combines impairment
+components in declared proportions (powers add in quadrature) and rescales to an exact
+total RMS — separating *how much* impairment from *what kind*. validate asserts total RMS
+is invariant across a mixing sweep while a character statistic (spectral centroid) moves
+monotonically.
+
 A general, reusable primitive: combine several impairment kinds in declared
 proportions while holding **total** impairment power fixed, by summing in quadrature
 with weights `√w_i`. That separates *how much* impairment there is from *what kind* it

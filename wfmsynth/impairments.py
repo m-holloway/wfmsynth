@@ -65,6 +65,31 @@ def apply_impairment(imp, x, rng):
     return x
 
 
+def mix_at_constant_power(components, weights, total_rms):
+    """Combine several impairment components in declared proportions while holding the
+    **total** impairment power fixed — the natural API for "same SNR, different noise
+    character" datasets, which separates *how much* impairment there is from *what kind*.
+
+      components  list of arrays (equal length), each an impairment realization
+      weights     relative power proportion per component (need not sum to 1)
+      total_rms   the RMS the combined result is scaled to, regardless of the mix
+
+    Each component is normalized to unit RMS then scaled by sqrt(w_i) (w normalized to sum
+    1), so the powers add in quadrature; the result is then rescaled to exactly ``total_rms``
+    so total impairment power is invariant across a mixing sweep while the character (which
+    components dominate) moves. Returns the combined array."""
+    comps = [np.asarray(c, float) for c in components]
+    w = np.asarray(weights, float)
+    if w.min() < 0:
+        raise ValueError("weights must be non-negative")
+    w = w / (w.sum() + 1e-300)
+    rms = lambda a: np.sqrt(np.mean(a ** 2)) + 1e-12
+    out = np.zeros_like(comps[0])
+    for c, wi in zip(comps, w):
+        out = out + np.sqrt(wi) * (c / rms(c))                  # unit-power, quadrature weight
+    return total_rms * out / rms(out)                           # exact total power, any mix
+
+
 def domain_randomize(x, rng):
     """Label-preserving capture-condition nuisances: gain, DC, analog bandwidth
     roll-off, AWGN at randomized SNR, 1/f (pink) noise, ambient crosstalk, partial

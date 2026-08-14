@@ -152,6 +152,15 @@ y, info = digitize_adc(x, noise_floor={"rms":1e-3,"shape":"pink"},
 q = quantize_adc(x, enob=5.8)     # standalone finite-ENOB lattice
 ```
 
+## Impairment mixing at constant power
+Separate impairment *magnitude* from *character* — "same SNR, different noise character":
+
+```python
+from wfmsynth import mix_at_constant_power
+y = mix_at_constant_power([white, pink], weights=[1-a, a], total_rms=0.05)
+# total RMS is exactly 0.05 for any a; only the spectral character changes with a
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

@@ -450,3 +450,31 @@ def test_instrument_adc_model_quantise_offset_and_ordered_digitize():
     assert np.array_equal(yc, ym) and "clipped_fraction" in info
     assert not np.array_equal(quantize_adc(xo + nz, enob=6, full_scale=0.7),
                               quantize_adc(xo, enob=6, full_scale=0.7) + nz)
+
+
+def test_mix_at_constant_power_holds_rms_and_moves_character():
+    import wfmsynth as ws
+    rng = np.random.default_rng(0)
+    white = ws.shaped_noise_floor(1 << 13, rms=1.0, shape="white", rng=rng)
+    pink = ws.shaped_noise_floor(1 << 13, rms=1.0, shape="pink", rng=rng)
+
+    def centroid(x):
+        X = np.abs(np.fft.rfft(x))
+        return (np.arange(len(X)) * X).sum() / (X.sum() + 1e-12)
+
+    rmss, cents = [], []
+    for a in np.linspace(0.0, 1.0, 6):
+        y = ws.mix_at_constant_power([white, pink], [1 - a, a], total_rms=0.05)
+        rmss.append(float(np.sqrt(np.mean(y ** 2))))
+        cents.append(centroid(y))
+    assert max(rmss) - min(rmss) < 1e-9                       # total power invariant
+    assert all(cents[i] > cents[i + 1] for i in range(len(cents) - 1))   # character moves
+    # weights need not sum to 1, and negatives are rejected
+    assert abs(np.sqrt(np.mean(ws.mix_at_constant_power([white, pink], [2, 5], 0.1) ** 2))
+               - 0.1) < 1e-9
+    try:
+        ws.mix_at_constant_power([white, pink], [-1, 1], 0.1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("negative weights should raise")
