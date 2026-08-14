@@ -542,3 +542,14 @@ def test_composed_chain_causality():
     rc, rz = edge_ratio(True), edge_ratio(False)
     assert rc < 0.01                          # fully-causal composed chain: ~zero pre-cursor
     assert rz > 10 * rc and rz > 0.005        # zero-phase shaping leaks behind a causal channel
+
+
+def test_pattern_lock_single_sharp_peak_at_declared_period():
+    import wfmsynth as ws
+    syms = ws.physics.carrier_symbols("pam4", 2 * 8191, 1, "prbs13q")
+    lag, peak, ac = ws.pattern_period(syms, max_lag=9000)
+    m = np.ones(9001, bool)
+    m[max(1, lag - 20):lag + 20] = False
+    m[:20] = False
+    nxt = float(np.max(ac[:9001][m]))
+    assert lag == 8191 and peak > 0.95 and peak > 2 * nxt     # single dominant peak at 8191

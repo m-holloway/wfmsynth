@@ -330,7 +330,12 @@ in isolation while the pipeline is not causal end to end.
 **Done when:** validate asserts near-zero pre-cursor energy for a full composed chain,
 not just for `lossy_channel` alone.
 
-### 19. Pattern lock-ability as a validated property
+### 19. Pattern lock-ability as a validated property — ✅ DONE (v0.12)
+`measure.pattern_period(symbols, max_lag)` returns the detected period via an overlap-
+normalized FFT autocorrelation (the peak an analyser pattern-locks onto). validate asserts
+the PRBS13Q symbol sequence locks to a single sharp peak at its declared period (8191),
+dominant over the next off-peak.
+
 PRBS statistics are now asserted, which catches a wrong polynomial. Going further: for
 any carrier claiming a standard pattern, assert the symbol sequence autocorrelates to a
 single sharp peak at the declared period. That is the property an analyser actually

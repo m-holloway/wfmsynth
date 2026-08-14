@@ -80,6 +80,25 @@ def best_phase(x, grid, levels=4, defn="contour", n_phases=32):
                                        for ph in phases]))])
 
 
+def pattern_period(symbols, max_lag=None):
+    """Detect the repetition period of a symbol sequence from its (overlap-normalized)
+    autocorrelation — the lag of the strongest correlation peak beyond lag 0. A carrier
+    claiming a standard pattern must lock to a single sharp peak at its declared period;
+    that peak is what an analyser pattern-locks onto. Returns ``(period, peak, ac)`` where
+    ``ac`` is the normalized autocorrelation (ac[0] == 1). FFT-based, O(n log n)."""
+    s = np.asarray(symbols, float)
+    s = s - s.mean()
+    n = len(s)
+    max_lag = int(max_lag) if max_lag else n // 2
+    v = np.dot(s, s) / n + 1e-12
+    f = np.fft.rfft(s, 2 * n)
+    raw = np.fft.irfft(f * np.conj(f), 2 * n)[:max_lag + 1].real     # linear autocorr, lags 0..max_lag
+    ac = raw / ((n - np.arange(max_lag + 1)) * v)                    # overlap-normalized
+    ac[0] = 1.0
+    lag = int(np.argmax(ac[1:])) + 1
+    return lag, float(ac[lag]), ac
+
+
 def align_symbols(x, grid, tx, levels=4, defn="contour", n_phases=32):
     """Realized integer-symbol alignment between the transmitted stream ``tx`` and the
     sampled output. A minimum-phase (causal) channel has group delay, so the sampled
