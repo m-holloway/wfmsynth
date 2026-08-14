@@ -56,12 +56,36 @@ pip install -e .                 # from a clone
 - **Composition over enumeration.** The grammar spans signal morphologies by composing
   primitives, so a model/tool tested on it generalizes beyond named protocols.
 
-## Roadmap
-See **[ROADMAP.md](ROADMAP.md)**. The flagship next step is **provenance-first composable
-synthesis** — building each signal as a component graph that records every knob value, so a
-generated waveform carries a complete, serializable *recipe* (exact ground truth for
-training, fully reproducible). v1's primitives are the building blocks that layer sits on, so
-it's additive, not a breaking change.
+## Rates and record lengths
+Primitives infer the grid from the array they're given, and generators take an optional
+`n`, so nothing is locked to the default 4096-point grid — a multi-megapoint deep-memory
+record works the same as a 4096-point toy. `N`/`T` remain the defaults, and default-grid
+output is bit-identical to before.
+
+```python
+n = 1 << 20                                                # any record length
+x = P.pam4(n_ui=n // 8, seed=1, n=n, pattern="prbs13q")    # IEEE PRBS13Q
+y = P.multi_reflection(P.lossy_channel(x, length_in=8.0, causal=True),
+                       td_samples=64)                      # absolute, not a fraction
+```
+
+Two notes on fidelity. `pattern="prbs13q"` gives the **IEEE 802.3 Clause 120.5.11.2.1**
+sequence — use it when a capture has to pattern-lock on an instrument, since a
+non-standard degree-13 polynomial has the right level statistics and still will not lock.
+And `causal=True` on the carrier generators uses forward-only edge shaping; the default
+zero-phase shaping is symmetric and therefore adds pre-cursor content, which is worth
+knowing about in a library whose channel model is otherwise strictly causal.
+
+## Roadmap and backlog
+**[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
+flagship next step is **provenance-first composable synthesis**: building each signal as a
+component graph that records every knob value, so a generated waveform carries a complete,
+serializable *recipe* (exact ground truth for training, fully reproducible). v1's
+primitives are the building blocks that layer sits on, so it's additive, not a breaking
+change.
+
+**[BACKLOG.md](BACKLOG.md)** is the prioritized, actionable list — what to build next, why,
+and what "done" looks like for each (a hard assertion in `wfmsynth.validate`).
 
 ## Tests
 ```bash

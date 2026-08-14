@@ -8,6 +8,16 @@ import numpy as np
 from scipy import signal as sp
 from wfmsynth import physics as P
 
+# The validation suite is the "don't fool yourself" gate, so it must be able to
+# RUN everywhere. A stock Windows console is cp1252 and cannot encode the maths
+# glyphs that otherwise appear in the pass/fail detail strings -- the suite died
+# with UnicodeEncodeError partway through, which looks a lot like a hang and hides
+# every check after it. Degrade the encoding rather than the diagnostics.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):       # pragma: no cover - very old/odd stdio
+    pass
+
 N = P.N
 T = P.T
 fails = []
@@ -134,6 +144,69 @@ ch = P.chirp(f0=3, f1=40)
 inst = np.diff(np.unwrap(np.angle(sp.hilbert(ch))))
 check("chirp instantaneous freq rising", inst[:N // 4].mean() < inst[-N // 4:].mean(),
       f"f_start~{inst[:N//4].mean():.4f} f_end~{inst[-N//4:].mean():.4f}")
+
+print("== PRBS13Q: conformance to IEEE 802.3 120.5.11.2.1 published statistics ==")
+b13 = P.prbs(13, 8191 * 3)
+check("PRBS13 is maximal length (period 8191)",
+      np.array_equal(b13[:8191], b13[8191:16382]),
+      f"ones in one period={int(b13[:8191].sum())} (expect 4096)")
+check("PRBS13 has 4096 ones per period", int(b13[:8191].sum()) == 4096)
+check("PRBS13 has no sub-period",
+      all(not np.array_equal(b13[:p], b13[p:2 * p]) for p in (7, 13, 89, 691)))
+
+q = P.prbs13q(8191)
+counts = [int(np.isclose(q, lv).sum()) for lv in (-1.0, -1 / 3, 1 / 3, 1.0)]
+probs = np.array(counts) / 8191.0
+dens = float(np.mean(q[1:] != q[:-1]))
+check("PRBS13Q level probabilities match IEEE 0.2499/0.2500/0.2500/0.2500",
+      np.allclose(probs, [0.2499, 0.2500, 0.2500, 0.2500], atol=5e-4),
+      f"counts={counts}")
+check("PRBS13Q transition density is 0.7501",
+      abs(dens - 0.7501) < 5e-4, f"density={dens:.4f}")
+check("PRBS13Q period is 8191 symbols",
+      np.array_equal(P.prbs13q(8191 * 2)[:8191], P.prbs13q(8191 * 2)[8191:]))
+check("pam4(pattern='prbs13q') yields 4 separated levels",
+      _pam4_levels(P.pam4(n_ui=512, seed=5, pattern="prbs13q")))
+
+print("== rate parameterization: primitives must not be locked to the default grid ==")
+for n in (1024, 4096, 16384):
+    xn = P.pam4(n_ui=64, seed=3, n=n)
+    check(f"pam4 honours n={n}", len(xn) == n, f"got {len(xn)}")
+    yn = P.lossy_channel(xn, length_in=10.0, tand=0.02, causal=True)
+    check(f"causal lossy_channel works at n={n}",
+          len(yn) == n and np.isfinite(yn).all())
+    rn = P.multi_reflection(xn, td_samples=37, gamma_s=0.3, gamma_l=0.4)
+    check(f"multi_reflection works at n={n}", len(rn) == n and np.isfinite(rn).all())
+    jn = P.inject_jitter(xn, sigma_rj=2.0, a_pj=1.0, rng=np.random.default_rng(0))
+    check(f"inject_jitter works at n={n}", len(jn) == n and np.isfinite(jn).all())
+
+check("default-grid output is unchanged by parameterization (regression)",
+      len(P.lossy_channel(P.nrz(seed=3), 12, 0.02, causal=True)) == N)
+
+print("== absolute reflection delay: td_samples is independent of record length ==")
+imp_a = np.zeros(2048); imp_a[100] = 1.0
+imp_b = np.zeros(8192); imp_b[100] = 1.0
+ra = P.multi_reflection(imp_a, td_samples=60, gamma_s=0.5, gamma_l=0.5, n_bounce=1)
+rb = P.multi_reflection(imp_b, td_samples=60, gamma_s=0.5, gamma_l=0.5, n_bounce=1)
+check("echo lands at the same absolute delay regardless of n",
+      int(np.argmax(ra[101:])) == int(np.argmax(rb[101:])) == 119,
+      f"a={int(np.argmax(ra[101:]))} b={int(np.argmax(rb[101:]))} (expect 2*60-1)")
+
+print("== causal edge shaping: opt-in forward-only filter adds no pre-cursor ==")
+step = np.concatenate([np.full(256, -1.0), np.full(256, 1.0)])
+tr = 8.0
+zp = P._shape_edges(step, tr, causal=False)
+cz = P._shape_edges(step, tr, causal=True)
+# measure just BEFORE the transition, away from the record head, so this reflects
+# pre-cursor from the shaping rather than any filter start-up
+pre_zp = float(np.abs(zp[200:256] - (-1.0)).max())
+pre_cz = float(np.abs(cz[200:256] - (-1.0)).max())
+check("zero-phase shaping disturbs samples BEFORE the edge (non-causal)",
+      pre_zp > 1e-3, f"pre-edge deviation={pre_zp:.4f}")
+check("causal shaping leaves pre-edge samples alone",
+      pre_cz < pre_zp / 10, f"zero-phase={pre_zp:.4f} causal={pre_cz:.6f}")
+check("causal shaping has no start-up transient (steady-state init)",
+      abs(cz[0] - (-1.0)) < 1e-6, f"cz[0]={cz[0]:.6f} (expect -1)")
 
 print("== family bank: all finite, non-degenerate, right length ==")
 bank = P.family_bank()
