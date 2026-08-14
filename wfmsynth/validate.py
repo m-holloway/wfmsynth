@@ -315,6 +315,28 @@ check("output-warp jitter corrupts post-hoc noise (why source jitter is the corr
       not np.allclose(_wn - _wc, _noise, atol=1e-6),
       "warping the whole waveform jitters the noise too -- unphysical")
 
+print("== provenance: recipe round-trips bit-for-bit (through JSON); engine version stamped ==")
+import json as _json
+from wfmsynth.compose import Signal
+_gp = Grid(fs=256e9, baud=112e9, n=1 << 13)
+_sig = (Signal(seed=42, grid=_gp)
+        .carrier("pam4", n_ui=_gp.n // 8, pattern="prbs13q", causal=True, jitter=dict(rj=0.4, pj=0.2))
+        .lossy(loss_db=15.0, loss_at_ghz=26.0, causal=True)
+        .reflect(td_ps=55.0, gamma_s=0.4, gamma_l=0.4)
+        .digitize(snr_db=32.0, enob=5.5, interleave=dict(m_cores=4, offset_mm=0.01)))
+_xr = _sig.waveform()
+_rec = _json.loads(_json.dumps(_sig.recipe()))               # must survive JSON
+_xr2 = Signal.from_recipe(_rec).waveform()
+check("recipe reproduces the waveform bit-for-bit through JSON",
+      _xr2.shape == _xr.shape and np.array_equal(_xr2, _xr), f"len={len(_xr)}")
+check("recipe stamps the engine version",
+      bool(_rec.get("wfmsynth_version")), f"version={_rec.get('wfmsynth_version')}")
+# a second seed gives a different waveform but its own exact round-trip (no shared state)
+_sig2 = Signal.from_recipe(_rec); _sig2.seed = 7
+_xa = _sig2.waveform()
+check("different seed -> different waveform, still exactly reproducible",
+      not np.array_equal(_xa, _xr) and np.array_equal(_xa, Signal.from_recipe(_sig2.recipe()).waveform()))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

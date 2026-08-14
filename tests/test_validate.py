@@ -253,3 +253,42 @@ def test_source_jitter_edge_rms_and_independent_noise():
     # Jitter.at converts seconds/Hz through a grid
     g = Grid(fs=256e9, n=4096)
     assert abs(Jitter.at(g, rj_s=3.0 / 256e9).rj - 3.0) < 1e-9
+
+
+def test_provenance_recipe_round_trip():
+    """BACKLOG #5 done-criteria: recipe reproduces bit-for-bit through JSON; version stamped."""
+    import json
+    import wfmsynth as ws
+    g = ws.Grid(fs=256e9, baud=112e9, n=1 << 13)
+    sig = (ws.Signal(seed=42, grid=g)
+           .carrier("pam4", n_ui=g.n // 8, pattern="prbs13q", causal=True, jitter=dict(rj=0.4, pj=0.2))
+           .lossy(loss_db=15.0, loss_at_ghz=26.0, causal=True)
+           .reflect(td_ps=55.0, gamma_s=0.4, gamma_l=0.4)
+           .digitize(snr_db=32.0, enob=5.5, interleave=dict(m_cores=4, offset_mm=0.01)))
+    x = sig.waveform()
+    r = json.loads(json.dumps(sig.recipe()))                 # must be JSON-serializable
+    assert r["wfmsynth_version"]
+    assert np.array_equal(ws.Signal.from_recipe(r).waveform(), x)   # bit-for-bit
+    try:
+        ws.Signal(seed=1).waveform()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("empty Signal should raise")
+
+
+def test_dataset_records_sampled_knobs_and_reproduces():
+    import wfmsynth as ws
+    g = ws.Grid(fs=256e9, baud=112e9, n=1 << 12)
+
+    def build(rng):
+        return (ws.Signal(seed=int(rng.integers(1e9)), grid=g)
+                .carrier("pam4", n_ui=g.n // 8, seed=int(rng.integers(1e6)))
+                .lossy(loss_db=float(rng.uniform(8, 20)), loss_at_ghz=20.0, causal=True))
+
+    X, recipes = ws.dataset(build, 6, seed=0)
+    assert X.shape[0] == 6 and len(recipes) == 6
+    for r in recipes:
+        assert 8.0 <= r["ops"][1]["loss_db"] <= 20.0        # the sampled knob is recorded
+        w = ws.Signal.from_recipe(r).waveform()
+        assert np.array_equal(w, ws.Signal.from_recipe(r).waveform())   # reproducible

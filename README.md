@@ -91,6 +91,21 @@ x = P.multi_reflection(x, td_ps=55.0, grid=g)                                 # 
 x = P.inject_jitter(x, sigma_rj_s=300e-15, f_pj_hz=4e6, grid=g)              # 300 fs Rj + 4 MHz Pj
 ```
 
+## Provenance & reproducible datasets
+Compose a signal as an explicit component graph; every waveform carries a serializable
+**recipe** — exact ground truth, fully reproducible.
+
+```python
+sig = (ws.Signal(seed=42, grid=g)
+       .carrier("pam4", n_ui=g.n // 8, pattern="prbs13q", jitter=dict(rj=0.4))
+       .lossy(loss_db=15.0, loss_at_ghz=26.0, causal=True)
+       .reflect(td_ps=55.0).digitize(snr_db=32.0, enob=5.5, interleave=dict(m_cores=4)))
+x, recipe = sig.waveform(), sig.recipe()          # samples + JSON-able provenance
+assert (ws.Signal.from_recipe(recipe).waveform() == x).all()   # bit-for-bit round-trip
+
+X, recipes = ws.dataset(build, n=10_000)          # each example labelled to arbitrary depth
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
