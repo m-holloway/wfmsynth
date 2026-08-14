@@ -117,7 +117,9 @@ channel is uncorrelated with the injected jitter.
 
 ## P1 — needed for ground-truth-grade datasets
 
-### 5. Provenance-first composable synthesis
+### 5. Provenance-first composable synthesis — ✅ DONE (v0.3)
+`wfmsynth.compose.Signal(seed, grid).carrier(...).lossy(...).reflect(...).digitize(...)` builds a waveform + a JSON-serializable `recipe()` (engine version stamped). `Signal.from_recipe(r).waveform()` reproduces bit-for-bit (asserted in validate). `dataset(build, n)` returns (waveforms, recipes[]) with each sampled knob recorded.
+
 The `ROADMAP.md` flagship; the design sketched there is the right shape. Two additions:
 
 - It becomes materially more valuable after #1, because a recipe in real units is
