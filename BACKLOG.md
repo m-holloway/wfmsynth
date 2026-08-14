@@ -324,6 +324,84 @@ A CI matrix over Linux/macOS/Windows would have caught it.
 
 ---
 
+## Known bugs
+
+*(none open)*
+
+### B1. `main` suite red — missing import in the source-jitter test — ✅ FIXED (PR #17)
+`test_source_jitter_edge_rms_and_independent_noise` raised
+`NameError: name 'ws' is not defined` on `ws.Grid(fs=256e9, n=4096)`. It was never a
+physics problem: every physical assertion in the test passed and
+`python -m wfmsynth.validate` passed completely — only the final Grid-conversion
+lines could not run.
+
+Kept as a record for one reason: it reached `main` and sat there red, which is the
+argument for **#23 (CI across platforms)**. A suite that is the declared trust
+anchor has to be verified before merge, or it quietly stops being one. Verified
+green again at v0.3.0 (18 tests + full validate).
+
+---
+
+## P1 (cont.) — gaps found while integrating against the library
+
+### 24. Standalone ENOB quantisation in `instrument`
+`instrument` exposes `clip_adc`, `interleave_adc` and `shaped_noise_floor`, but
+finite-ENOB quantisation exists only *inside* `pam4._digitize`, bundled with
+resampling and thermal noise. So a caller who wants "quantise this waveform to N
+effective bits" — arguably the single most characteristic thing an ADC does — has
+to either reimplement it or accept the whole `deep_capture` pipeline.
+
+```python
+quantize_adc(x, enob=5.8, full_scale=None)   # full_scale=None -> from the signal
+```
+
+Pairs naturally with the existing `clip_adc`, and makes the quantisation grid
+available to anyone comparing synthetic against measured data — where the presence
+or absence of an ADC lattice is one of the most obvious differences.
+
+**Done when:** validate asserts the distinct-value count collapses to ~2^enob
+while the waveform moves by at most half an LSB.
+
+### 25. A composed `digitize()` with the stages in the right order
+The instrument primitives are individually clean but the caller has to know the
+physically correct order, and getting it wrong is silent. Interleave mismatch
+happens at the sampling instant, clipping happens at the ADC input, quantisation
+happens last, and **all** of it follows the channel and the additive impairment.
+Reversing quantisation and clipping, or quantising before adding noise, produces
+a plausible-looking waveform with the wrong noise floor.
+
+```python
+digitize(x, grid=None, interleave=None, clip_full_scale=None, enob=None,
+         noise_floor=None, rng=None)   # -> (y, info)
+```
+
+Returning the applied settings alongside the samples also feeds #5 (provenance)
+and #8 (measured ground truth).
+
+**Done when:** validate asserts the composed path matches the manual stage-by-stage
+application, and that reordering changes the result — i.e. that the order matters
+and is therefore worth fixing in one place.
+
+### 26. `interleave_adc` offset mismatch in absolute units
+`offset_mm` is a standard deviation expressed as a fraction of the signal span,
+so the artifact scales with the input. A real per-core offset error is a property
+of the converter, not of the signal: it stays put when the signal shrinks, which
+is exactly when it matters most. With `Grid` now available, an absolute-volts
+option would be more physical:
+
+```python
+interleave_adc(x, ..., offset_v=1.5e-3, grid=g)   # alongside offset_mm
+```
+
+Same argument applies to `shaped_noise_floor(rms=...)` — an absolute noise floor
+in volts is the specification an instrument datasheet actually gives.
+
+**Done when:** validate asserts the offset-induced tone amplitude is invariant to
+scaling the input when specified in volts, and proportional to it when specified
+as a fraction.
+
+---
+
 ## Explicitly out of scope
 
 Kept out to keep this package *pure synthesis*. From `ROADMAP.md`, plus one addition:
