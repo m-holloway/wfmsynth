@@ -213,6 +213,16 @@ In `ROADMAP.md` under "Ground-truth co-generation". Three sharpenings:
   stream and the sampled output. A consumer that skips it computes closed eyes while
   everything looks reasonable, so the offset belongs in the ground truth.
 
+**Follow-on, from using it:** `eye_height(defn='sigma')` can return a NEGATIVE
+value while `defn='contour'` returns a healthy positive one on the same waveform
+(measured -0.086 vs +0.107). That is not a bug -- it is the definitional
+divergence this item is about, and it is sharper than expected: the two
+definitions can disagree in SIGN, not merely in magnitude, because a sigma
+construction folds deterministic ISI into a Gaussian width and can drive the
+result below zero. Worth stating in the docstring, since a consumer treating
+eye height as necessarily positive will mis-handle it, and worth having
+`ground_truth` carry both definitions side by side rather than a single number.
+
 ### 9. Impairment mixing at constant total power — ✅ DONE (v0.8)
 `impairments.mix_at_constant_power(components, weights, total_rms)` combines impairment
 components in declared proportions (powers add in quadrature) and rescales to an exact
@@ -381,7 +391,46 @@ A CI matrix over Linux/macOS/Windows would have caught it.
 
 ## Known bugs
 
-*(none open)*
+### B2. `tr_frac` is silently ignored at realistic samples-per-UI
+`_shape_edges` is called with `max(tr_frac * spb, 2)` samples. At scope-realistic
+sample rates `spb` is small, so `tr_frac * spb` falls below the floor of 2 and the
+requested rise time has **no effect at all**. Measured at 4.8188 samples/UI:
+
+| `tr_frac` | requested | realized |
+|---|---|---|
+| 0.02 | 0.10 samples | 2.39 samples (0.496 UI) |
+| 0.05 | 0.24 samples | 2.39 samples (0.496 UI) |
+| 0.10 | 0.48 samples | 2.39 samples (0.496 UI) |
+| 0.15 | 0.72 samples | 2.39 samples (0.496 UI) |
+| 0.30 | 1.45 samples | 2.39 samples (0.496 UI) |
+
+A 15x range of the parameter produces byte-identical rise times, with no warning.
+
+**Why this matters more than it looks.** The realized rise time is ~0.5 UI, which
+is an enormous transmitter band limit, and it *dominates the ISI* — so a caller who
+asks for sharp edges and a 3 dB channel gets a waveform whose post-cursor is set by
+the edge shaping instead. Measured on a matched comparison at a requested 3 dB
+insertion loss: first post-cursor tap 0.599 and an essentially closed eye
+(contour eye height 8e-06), where the same requested loss with near-ideal edges
+gives a post-cursor of ~1e-04. The channel model is being swamped by an artifact of
+the shaping stage.
+
+It also interacts badly with **#2**: making non-integer and low samples-per-UI a
+first-class case is exactly what pushes `tr_frac * spb` under the floor, so the two
+features fight each other.
+
+The floor itself is legitimate — a 0.1-sample rise time is not realizable. The
+problems are that it is **silent**, and that the parameter has a large dead range
+whose extent depends on `samples_per_ui` with no feedback to the caller.
+
+**Suggested shape of a fix:** express rise time in absolute units via `Grid`
+(`tr_ps=`), clamp explicitly rather than implicitly, and **report the realized rise
+time** — in the return value or the `#5` provenance recipe — so a caller can see
+that the request was not honoured. A `validate` assertion that realized rise time
+tracks the request over the usable range, and that clamping is visible outside it,
+would have caught this.
+
+### B1. `main` suite red — missing import in the source-jitter test — ✅ FIXED (PR #17)
 
 ### B1. `main` suite red — missing import in the source-jitter test — ✅ FIXED (PR #17)
 `test_source_jitter_edge_rms_and_independent_noise` raised
