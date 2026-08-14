@@ -252,6 +252,30 @@ check("AC-coupling corner in Hz == equivalent fraction-of-Nyquist",
                   P.ac_couple(_sq, fc_frac=_g.hz_to_frac_nyquist(_fc_hz)), atol=1e-9),
       f"{_fc_hz/1e6:.1f} MHz -> frac {_g.hz_to_frac_nyquist(_fc_hz):.2e}")
 
+print("== non-integer samples-per-UI: fractional pattern period; integer assumption drifts ==")
+_g2 = Grid(fs=256e9, baud=112e9, n=4096)
+_sps = _g2.samples_per_ui                                  # 2.2857..., deliberately non-integer
+check("samples-per-UI is non-integer at a realistic grid", abs(_sps - round(_sps)) > 0.1,
+      f"sps={_sps:.4f}")
+_nsym = 2000
+_ntot = int(round(_nsym * _sps))
+_syms = np.random.default_rng(0).integers(0, 4, _nsym)
+_lv = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
+_wav = _lv[_syms[np.clip((np.arange(_ntot) / _sps).astype(int), 0, _nsym - 1)]]  # sample-and-hold at non-int sps
+def _recover(sps_used):
+    pos = np.round(np.arange(_nsym) * sps_used + sps_used / 2).astype(int)
+    pos = pos[pos < _ntot]
+    rec = np.argmin(np.abs(_wav[pos][:, None] - _lv[None, :]), axis=1)
+    return float((rec == _syms[:len(rec)]).mean())
+check("decision sampling at the true fractional sps recovers the symbols",
+      _recover(_sps) > 0.98, f"true-sps recovery={_recover(_sps):.3f}")
+check("assuming an integer sps drifts and recovers wrongly (the failure this prevents)",
+      _recover(round(_sps)) < 0.6, f"integer-sps recovery={_recover(round(_sps)):.3f}")
+_per = _g2.pattern_period_samples(_nsym)
+check("exact fractional pattern period is available and non-integer",
+      abs(_per - round(_per)) > 1e-6 and abs(_per - _nsym * _sps) < 1e-9,
+      f"period={_per:.2f} samples for {_nsym} UI")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

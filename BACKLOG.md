@@ -57,7 +57,9 @@ be specified physically rather than as a fraction of an arbitrary window.
 frequency, and validate asserts the realized values match the requested ones after
 round-tripping through the grid.
 
-### 2. Non-integer samples-per-UI as the norm
+### 2. Non-integer samples-per-UI as the norm — ✅ DONE (v0.2)
+`Grid.pattern_period_samples(n_ui)` gives the exact fractional pattern period; carriers already sample-and-hold correctly at non-integer sps (see `examples/non_integer_sps.py`); `validate` proves the true-sps recovery is exact while an integer-sps assumption drifts.
+
 `pam4.py` uses `SPS_INT = 16` internally and 4 samples/UI at the scope. Real
 acquisitions are almost never an integer number of samples per symbol — the sample
 clock and the symbol clock are unrelated. Tools developed against integer-sps

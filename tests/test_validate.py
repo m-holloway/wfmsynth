@@ -176,3 +176,33 @@ def test_absolute_units_equal_sample_domain_and_require_grid():
         except ValueError:
             continue
         raise AssertionError("absolute-unit kwarg without grid should raise ValueError")
+
+
+def test_non_integer_sps_fractional_period_and_drift():
+    """BACKLOG #2 done-criteria: non-integer sps, exact fractional period, integer drift."""
+    import wfmsynth as ws
+    g = ws.Grid(fs=256e9, baud=112e9, n=4096)
+    sps = g.samples_per_ui
+    assert abs(sps - round(sps)) > 0.1                    # genuinely non-integer
+    per = g.pattern_period_samples(8191)                  # exact fractional period
+    assert abs(per - 8191 * sps) < 1e-9 and abs(per - round(per)) > 1e-6
+    n_sym = 2000
+    n = int(round(n_sym * sps))
+    syms = np.random.default_rng(0).integers(0, 4, n_sym)
+    lv = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
+    wav = lv[syms[np.clip((np.arange(n) / sps).astype(int), 0, n_sym - 1)]]
+
+    def rec(s):
+        pos = np.round(np.arange(n_sym) * s + s / 2).astype(int)
+        pos = pos[pos < n]
+        got = np.argmin(np.abs(wav[pos][:, None] - lv[None, :]), axis=1)
+        return (got == syms[:len(pos)]).mean()
+
+    assert rec(sps) > 0.98                                # true fractional sps recovers
+    assert rec(round(sps)) < 0.6                          # integer assumption drifts
+    try:
+        ws.Grid(fs=1e9).pattern_period_samples(100)       # baud unset -> raises
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("pattern_period_samples without baud should raise")
