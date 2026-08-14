@@ -528,6 +528,23 @@ check("Tx FFE de-emphasis opens a lossy-channel eye vs no FFE",
       _eh(_wffe, _g11) > _eh(_noffe, _g11) + 0.02,
       f"eye {_eh(_noffe, _g11):.3f} -> {_eh(_wffe, _g11):.3f}")
 
+print("== composition-level causality: a FULL composed chain, not just the channel ==")
+# hazard: causality is asserted for lossy_channel alone, but default zero-phase edge
+# shaping reintroduces pre-cursor AFTER the causal channel -- each stage looks fine while
+# the pipeline is not causal end to end.
+_tr18 = 8.0
+_pulse18 = np.zeros(N); _c18 = N // 2; _W18 = int(20 * _tr18); _pulse18[_c18:_c18 + _W18] = 1.0
+def _edge_ratio(shaped_causal):
+    _y = P.lossy_channel(P._shape_edges(_pulse18, _tr18, causal=shaped_causal),
+                         length_in=12.0, causal=True)
+    _w = int(4 * _tr18)
+    return float(np.sum(_y[_c18 - _w:_c18] ** 2) / (np.sum(_y[_c18:_c18 + _w] ** 2) + 1e-12))
+_rc18, _rz18 = _edge_ratio(True), _edge_ratio(False)
+check("a fully-causal composed chain (causal shaping + causal channel) has ~zero pre-cursor",
+      _rc18 < 0.01, f"pre/post energy @ edge = {_rc18:.4f}")
+check("the hazard is real: zero-phase edge shaping leaks pre-cursor behind a causal channel",
+      _rz18 > 10 * _rc18 and _rz18 > 0.005, f"zero-phase pre/post = {_rz18:.4f} vs causal {_rc18:.4f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

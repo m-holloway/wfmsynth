@@ -315,7 +315,13 @@ Non-Gaussian tails, 1/f at low frequency, level-dependent and shot-noise terms. 
 noise is not one flat Gaussian, and anything learning a noise-character axis will key
 on the difference.
 
-### 18. Composition-level causality assertion
+### 18. Composition-level causality assertion — ✅ DONE (v0.11)
+validate now asserts near-zero pre-cursor energy for a FULL composed chain (causal edge
+shaping + causal channel), not just `lossy_channel` alone, and demonstrates the hazard:
+default zero-phase edge shaping leaks pre-cursor behind a causal channel. Build causal
+chains with `causal=True` on the carrier (README notes the hazard).
+
+ORIG:
 Causality is asserted for the channel primitive, but not for a **composed** chain —
 and the default zero-phase edge shaping reintroduces pre-cursor content *after* the
 causal channel has been applied. That is a composition hazard: each stage looks fine
