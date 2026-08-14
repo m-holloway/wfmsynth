@@ -258,7 +258,15 @@ itself read as an edge.
 **Done when:** validate asserts the impairment is confined to its gate (negligible
 leakage outside), and per-sample defect masks are emitted as ground truth.
 
-### 11. Tx FFE / Rx CTLE / DFE
+### 11. Tx FFE / Rx CTLE / DFE — ✅ Tx FFE DONE (v0.10); CTLE/DFE remain
+`physics.tx_ffe(x, taps, spb, pre=)` + `Signal.tx_ffe(taps, pre=)` apply a T-spaced
+transmitter FFE (non-integer spb via fractional delay), placed after the carrier and
+before the channel. Puts a deliberate pre-cursor in the pulse response and de-emphasizes
+post-cursor ISI. validate asserts a pre-cursor appears one UI before the main pulse and
+that FFE opens a lossy-channel eye. Rx CTLE (analog peaking) and DFE (decision feedback)
+still to add — logged as #28.
+
+ORIG:
 In `ROADMAP.md`. Priority note: **Tx FFE is the highest-fidelity one.** Real
 high-speed transmitters almost always run multi-tap FFE, which puts a deliberate
 *pre-cursor* in the pulse response. A synthetic waveform with no pre-emphasis has a
@@ -490,3 +498,14 @@ without touching the provenance/round-trip guarantees.
 
 **Done when:** `Signal.digitize()` calls `instrument.digitize()`; provenance round-trip
 and the #6 contrastive-pair assertions still hold.
+
+### 28. Rx CTLE and DFE (companions to #11 Tx FFE)
+Tx FFE landed in v0.10. Add the receive-side equalizers: **CTLE** (a continuous-time
+linear peaking filter — a zero/pole boost that flattens the channel) and **DFE**
+(decision-feedback — cancels post-cursor ISI using sliced past symbols; nonlinear, and
+should model error propagation). CTLE is linear and composes cleanly before the slicer;
+DFE needs the transmitted/decided symbol stream, so it pairs with `carrier_symbols` and
+the #8 alignment.
+
+**Done when:** validate asserts CTLE peaking opens a lossy-channel
+eye, and DFE removes a discrete post-cursor echo it is tuned to.

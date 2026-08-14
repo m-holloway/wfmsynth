@@ -84,6 +84,13 @@ def _op_ac_couple(x, p, streams, grid, idx):
     return P.ac_couple(x, grid=grid, **kw)
 
 
+def _op_tx_ffe(x, p, streams, grid, idx):
+    spb = grid.samples_per_ui if grid is not None else p.get("spb")
+    if spb is None:
+        raise ValueError("tx_ffe needs a grid (for samples/UI) or an explicit spb=")
+    return P.tx_ffe(x, p["taps"], spb, pre=p.get("pre", 1))
+
+
 def _op_digitize(x, p, streams, grid, idx):
     n_out = p.get("n_out")
     if n_out and n_out != len(x):
@@ -102,7 +109,8 @@ def _op_digitize(x, p, streams, grid, idx):
 
 
 _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
-         "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize}
+         "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
+         "tx_ffe": _op_tx_ffe}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -119,6 +127,12 @@ class Signal:
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
         pattern (pam4), jitter=dict(rj,pj,f_pj,dcd) for source jitter."""
         return self._add("carrier", kind=kind, **params)
+
+    def tx_ffe(self, taps, pre=1, **params):
+        """Transmitter FFE pre-emphasis (place after carrier, before the channel). `taps`
+        are per-UI weights, `pre` the number of pre-cursor taps. Puts a deliberate
+        pre-cursor in the pulse response and de-emphasizes post-cursor ISI."""
+        return self._add("tx_ffe", taps=list(taps), pre=pre, **params)
 
     def lossy(self, **params):
         """Lossy channel. params: length_in, tand, causal, or loss_db+loss_at_ghz (real units)."""

@@ -507,6 +507,27 @@ check("the defect is present inside the gate and the per-sample mask is emitted"
 check("the gate is smooth (raised-cosine onset, not a step that reads as an edge)",
       np.max(np.abs(np.diff(_mask10))) < 0.3)
 
+print("== Tx FFE: a deliberate pre-cursor in the pulse response, de-emphasizes ISI ==")
+_g11 = Grid(fs=200e9, baud=50e9, n=1 << 13)
+_spb = _g11.samples_per_ui
+_n11 = int(_g11.n // _spb)
+# pulse response: a one-UI pulse through FFE gets a pre-cursor one UI before the main peak
+_pulse = np.zeros(_g11.n); _pulse[_g11.n // 2:_g11.n // 2 + int(_spb)] = 1.0
+_yp = P.tx_ffe(_pulse, [-0.2, 1.0, -0.3], _spb, pre=1)
+_peak = int(np.argmax(np.abs(_yp)))
+check("Tx FFE injects a pre-cursor one UI before the main pulse (the real-link shape)",
+      abs(_yp[_peak - int(round(_spb))]) > 0.05 and abs(_yp[_peak] - 1.0) < 1e-6,
+      f"pre-cursor={_yp[_peak - int(round(_spb))]:.2f}")
+# de-emphasis opens a lossy-channel eye relative to no FFE
+_noffe = (Signal(seed=1, grid=_g11).carrier("pam4", n_ui=_n11, pattern="prbs13q", causal=True)
+          .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)).waveform()
+_wffe = (Signal(seed=1, grid=_g11).carrier("pam4", n_ui=_n11, pattern="prbs13q", causal=True)
+         .tx_ffe(taps=[-0.15, 1.0, -0.25], pre=1)
+         .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)).waveform()
+check("Tx FFE de-emphasis opens a lossy-channel eye vs no FFE",
+      _eh(_wffe, _g11) > _eh(_noffe, _g11) + 0.02,
+      f"eye {_eh(_noffe, _g11):.3f} -> {_eh(_wffe, _g11):.3f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

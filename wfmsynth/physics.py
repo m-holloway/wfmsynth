@@ -94,6 +94,23 @@ def crosstalk(x, aggressor, coupling=0.12, kind="fext", td_frac=0.05):
     return x + coupling * (np.ptp(x) + 1e-9) * k
 
 
+def tx_ffe(x, taps, spb, pre=1):
+    """Transmitter feed-forward equalizer (FFE) — the T-spaced pre-emphasis real high-speed
+    transmitters almost always run. Applies per-UI weights `taps` at unit-interval spacing
+    `spb` (samples per UI, may be non-integer -> fractional delay via interpolation), with
+    `pre` leading (pre-cursor) taps. This puts a deliberate PRE-CURSOR in the pulse response
+    — the qualitative shape a real link has and a naive synthetic waveform lacks — and
+    de-emphasizes post-cursor ISI. Apply at the transmitter, BEFORE the channel. Taps are
+    used as given (normalize to sum 1 for unity DC gain, or |taps| for a peak-power budget)."""
+    x = np.asarray(x, float)
+    idx = np.arange(len(x))
+    y = np.zeros_like(x)
+    for k, c in enumerate(taps):
+        d = (k - pre) * spb                        # pre-cursor taps (k<pre) pull from the future
+        y += c * np.interp(idx - d, idx, x, left=0.0, right=0.0)
+    return y
+
+
 def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
     """AC-coupling (series cap) as a 1st-order high-pass -> baseline wander/droop
     that grows with run length. fc_frac is the corner as a fraction of Nyquist.

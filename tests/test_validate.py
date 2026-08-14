@@ -499,3 +499,26 @@ def test_gated_intermittent_impairment_confined_with_mask():
     # additive-array form also confines exactly
     y2, m2 = ws.apply_gated(x, np.full_like(x, 5.0), [(100, 50)])
     assert np.array_equal(y2[m2 == 0], x[m2 == 0])
+
+
+def test_tx_ffe_precursor_and_eye_compensation():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)
+    spb = g.samples_per_ui
+    n_ui = int(g.n // spb)
+
+    # a one-UI pulse gains a pre-cursor one UI ahead of the main peak, equal to the pre tap
+    pulse = np.zeros(g.n)
+    pulse[g.n // 2:g.n // 2 + int(spb)] = 1.0
+    y = ws.tx_ffe(pulse, [-0.2, 1.0, -0.3], spb, pre=1)
+    peak = int(np.argmax(np.abs(y)))
+    assert abs(y[peak] - 1.0) < 1e-6
+    assert abs(y[peak - int(round(spb))] - (-0.2)) < 0.05     # pre-cursor ~ the pre tap
+
+    # FFE de-emphasis opens a lossy-channel eye relative to no FFE
+    no_ffe = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+              .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)).waveform()
+    with_ffe = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+                .tx_ffe(taps=[-0.15, 1.0, -0.25], pre=1)
+                .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)).waveform()
+    assert ws.eye_height(with_ffe, g) > ws.eye_height(no_ffe, g) + 0.02
