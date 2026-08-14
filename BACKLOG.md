@@ -20,7 +20,13 @@ docstring, and add a test that the legacy path is bit-identical.
 
 ## P0 — blocks realistic use
 
-### 1. Absolute units and rate binding
+### 1. Absolute units and rate binding — ✅ DONE (v0.2)
+`wfmsynth.grid.Grid(fs, baud, n, v_full)` binds the abstract grid to real units;
+primitives take it via `grid=` plus an absolute-unit kwarg: `multi_reflection(td_ps=)`,
+`lossy_channel(loss_db=, loss_at_ghz=)`, `inject_jitter(sigma_rj_s=/a_pj_s=/f_pj_hz=/dcd_s=)`,
+`ac_couple(fc_hz=)`. Fraction/sample/cycles-per-record forms remain the defaults
+(bit-identical). `validate` asserts a ps delay and a dB@freq loss realize as requested.
+
 Everything lives on a normalized, unitless grid: amplitudes are ±1, time is [0,1),
 delays are fractions of the record, frequencies are cycles-per-record, and insertion
 loss is expressed as inches × loss tangent. Record length is now parameterizable, but

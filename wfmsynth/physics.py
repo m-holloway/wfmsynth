@@ -45,20 +45,31 @@ def _min_phase_H(Hmag, n=None):
 
 
 def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
-                  skin_k=0.0, causal=False):
+                  skin_k=0.0, causal=False, grid=None, loss_db=None, loss_at_ghz=None):
     """Apply a frequency-dependent SI channel: insertion loss
         IL(f)[dB] = (a_skin*sqrt(f_GHz) + b_diel*f_GHz) * length_in
     with dielectric-loss coefficient b_diel = 2.3*sqrt(eps_r)*tand (dB/in/GHz)
     [KB: All-About-Circuits/Bogatin]. f axis is scaled so the Nyquist bin maps to
     f_nyq_ghz, whatever the record length.
     causal=False: zero-phase magnitude response (legacy). causal=True: physically
-    correct minimum-phase response -> asymmetric post-cursor ISI (real dispersion)."""
+    correct minimum-phase response -> asymmetric post-cursor ISI (real dispersion).
+
+    Absolute units (wfmsynth.grid.Grid): pass grid=Grid(...) to take the real
+    frequency axis (f_nyq_ghz) from the grid's Nyquist. Pass loss_db + loss_at_ghz to
+    request a channel with a stated insertion loss (dB) at a stated frequency (GHz):
+    the skin+dielectric SHAPE is kept and scaled so IL(loss_at_ghz) == loss_db exactly."""
     x = np.asarray(x, float)
     n = len(x)
+    if grid is not None:
+        f_nyq_ghz = grid.f_nyquist / 1e9                  # real frequency axis from the grid
     f_ghz = np.fft.rfftfreq(n) * 2.0 * f_nyq_ghz          # 0..f_nyq_ghz at Nyquist
     b_diel = 2.3 * np.sqrt(eps_r) * tand
     a_skin = skin_k if skin_k > 0 else 0.35               # ~dB/in/sqrt(GHz) typ
     il_db = (a_skin * np.sqrt(f_ghz) + b_diel * f_ghz) * length_in
+    if loss_db is not None and loss_at_ghz is not None:
+        # keep the skin+dielectric SHAPE; scale so IL(loss_at_ghz) == loss_db exactly
+        shape_at = (a_skin * np.sqrt(loss_at_ghz) + b_diel * loss_at_ghz) * length_in
+        il_db = il_db * (loss_db / (shape_at + 1e-12))
     Hmag = 10.0 ** (-il_db / 20.0)
     if causal:
         Hc = _min_phase_H(Hmag, n)                        # full-spectrum complex H
@@ -82,28 +93,37 @@ def crosstalk(x, aggressor, coupling=0.12, kind="fext", td_frac=0.05):
     return x + coupling * (np.ptp(x) + 1e-9) * k
 
 
-def ac_couple(x, fc_frac=0.004):
+def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
     """AC-coupling (series cap) as a 1st-order high-pass -> baseline wander/droop
     that grows with run length. fc_frac is the corner as a fraction of Nyquist.
-    Ubiquitous on real serial links (currently absent)."""
+    Ubiquitous on real serial links. Absolute units: pass fc_hz + grid=Grid(...) to
+    state the corner in Hz (converted to a fraction of the grid's Nyquist)."""
+    if fc_hz is not None:
+        if grid is None:
+            raise ValueError("fc_hz requires grid=Grid(...)")
+        fc_frac = grid.hz_to_frac_nyquist(fc_hz)
     fc = float(np.clip(fc_frac, 1e-4, 0.5))
     sos = signal.butter(1, fc, btype="high", output="sos")
     return signal.sosfiltfilt(sos, np.asarray(x, float))
 
 
 def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
-                     td_samples=None):
+                     td_samples=None, td_ps=None, grid=None):
     """Transmission-line bounce diagram: received = incident + reflected train.
     Each round trip is delayed by 2*td and scaled by (gamma_s*gamma_l)^n. This is
     the lattice/bounce superposition for a mismatched line.
 
     `td_frac` is a fraction of the record, which is convenient on a normalized grid
-    but scales with record length. `td_samples` overrides it with an absolute delay,
-    which is what you want when the record length is set by capture duration rather
-    than by the feature you are modelling -- a via stub is a fixed number of
-    picoseconds away regardless of how long you acquire for."""
+    but scales with record length. `td_samples` overrides it with an absolute delay
+    in samples. `td_ps` (with grid=Grid(...)) states the one-way delay in picoseconds
+    -- a via stub is a fixed number of picoseconds away regardless of how long you
+    acquire for -- and is converted to samples via the grid's sample rate."""
     x = np.asarray(x, float)
     nx = len(x)
+    if td_ps is not None:
+        if grid is None:
+            raise ValueError("td_ps requires grid=Grid(...)")
+        td_samples = round(td_ps * 1e-12 * grid.fs)
     d = int(td_samples) if td_samples is not None else int(td_frac * nx)
     y = x.copy()
     g = gamma_s * gamma_l
@@ -118,17 +138,31 @@ def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
 
 
 # ---------------------------------------------------------------- jitter physics
-def inject_jitter(x, sigma_rj=0.0, a_pj=0.0, f_pj=5.0, dcd=0.0, rng=None):
+def inject_jitter(x, sigma_rj=0.0, a_pj=0.0, f_pj=5.0, dcd=0.0, rng=None,
+                  sigma_rj_s=None, a_pj_s=None, f_pj_hz=None, dcd_s=None, grid=None):
     """Physically decomposed jitter via time-axis warp then resample.
       Rj: BANDLIMITED Gaussian phase noise (smooth, so edges shift COHERENTLY),
           renormalized to RMS = sigma_rj samples. (Per-sample white noise would
           scramble the waveform, not jitter its edges — validated.)
       Pj: sinusoidal A*sin(2*pi*f*t) (samples)
       DCD: polarity-dependent offset (rising +dcd/2, falling -dcd/2)
-    sigma_rj/a_pj/dcd are in SAMPLES of timing displacement."""
+    sigma_rj/a_pj/dcd are in SAMPLES of timing displacement; f_pj in cycles-per-record.
+
+    Absolute units (grid=Grid(...)): sigma_rj_s/a_pj_s/dcd_s state the displacement in
+    SECONDS (converted to samples via fs), and f_pj_hz states the periodic-jitter tone
+    in Hz (converted to cycles-per-record). Real jitter is quoted in fs/ps and Hz."""
     rng = rng or np.random.default_rng()
     x = np.asarray(x, float)
     n = len(x)
+    if grid is not None:
+        if sigma_rj_s is not None:
+            sigma_rj = grid.to_samples(sigma_rj_s)
+        if a_pj_s is not None:
+            a_pj = grid.to_samples(a_pj_s)
+        if dcd_s is not None:
+            dcd = grid.to_samples(dcd_s)
+        if f_pj_hz is not None:
+            f_pj = grid.hz_to_cycles_per_record(f_pj_hz)
     t = np.linspace(0.0, 1.0, n, endpoint=False)
     disp = np.zeros(n)
     if sigma_rj > 0:

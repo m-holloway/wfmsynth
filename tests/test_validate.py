@@ -129,3 +129,50 @@ def test_absolute_reflection_delay_is_record_length_independent():
                                n_bounce=1)
         peaks.append(int(np.argmax(r[101:])))
     assert peaks[0] == peaks[1] == 119      # 2*td - 1 relative to the slice start
+
+
+def test_grid_derived_quantities():
+    import wfmsynth as ws
+    g = ws.Grid(fs=256e9, baud=112e9, n=4096)
+    assert abs(g.dt - 1 / 256e9) < 1e-24
+    assert abs(g.f_nyquist - 128e9) < 1
+    assert abs(g.samples_per_ui - 256e9 / 112e9) < 1e-9
+    assert abs(g.duration - 4096 / 256e9) < 1e-24
+    assert ws.Grid(fs=1e9).baud is None and ws.Grid(fs=1e9).samples_per_ui is None
+
+
+def test_absolute_units_round_trip():
+    """Done-criteria for BACKLOG #1: ps delay and dB@freq loss realize as requested."""
+    import wfmsynth as ws
+    from wfmsynth import physics as P
+    g = ws.Grid(fs=256e9, baud=112e9, n=4096)
+    # reflection delay in ps lands within one sample
+    imp = np.zeros(g.n); imp[100] = 1.0
+    r = P.multi_reflection(imp, td_ps=40.0, grid=g, gamma_s=0.5, gamma_l=0.5, n_bounce=1)
+    realized_ps = (int(np.argmax(r[101:])) + 1) / 2.0 * g.dt * 1e12
+    assert abs(realized_ps - 40.0) <= g.dt * 1e12 + 1e-9
+    # loss in dB at a stated frequency is realized there
+    hi = np.zeros(g.n); hi[0] = 1.0
+    H = np.abs(np.fft.rfft(P.lossy_channel(hi, loss_db=12.0, loss_at_ghz=20.0, grid=g)))
+    k = int(np.argmin(np.abs(np.fft.rfftfreq(g.n) * g.fs / 1e9 - 20.0)))
+    assert abs(-20 * np.log10(H[k] + 1e-12) - 12.0) < 0.5
+
+
+def test_absolute_units_equal_sample_domain_and_require_grid():
+    from wfmsynth import physics as P
+    import wfmsynth as ws
+    g = ws.Grid(fs=256e9, n=4096)
+    x = P.pam4(n_ui=64, seed=3)
+    assert np.allclose(
+        P.inject_jitter(x, sigma_rj_s=2.0 * g.dt, rng=np.random.default_rng(1), grid=g),
+        P.inject_jitter(x, sigma_rj=2.0, rng=np.random.default_rng(1)), atol=1e-9)
+    assert np.allclose(P.ac_couple(x, fc_hz=5e6, grid=g),
+                       P.ac_couple(x, fc_frac=g.hz_to_frac_nyquist(5e6)), atol=1e-9)
+    # absolute-unit kwargs require a grid
+    for call in (lambda: P.multi_reflection(x, td_ps=40.0),
+                 lambda: P.ac_couple(x, fc_hz=5e6)):
+        try:
+            call()
+        except ValueError:
+            continue
+        raise AssertionError("absolute-unit kwarg without grid should raise ValueError")

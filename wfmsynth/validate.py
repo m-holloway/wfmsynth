@@ -216,6 +216,42 @@ for name, fn in bank.items():
     check(f"family {name} finite/nondegenerate/len",
           np.isfinite(y).all() and np.ptp(y) > 1e-6 and len(y) == N)
 
+print("== absolute units (Grid): requested ps/dB/Hz round-trip through the grid ==")
+from wfmsynth.grid import Grid
+_g = Grid(fs=256e9, baud=112e9, n=4096)
+# 1) a reflection requested at a delay in PICOSECONDS lands at that delay (within a sample)
+_imp = np.zeros(_g.n); _imp[100] = 1.0
+_td_ps = 40.0
+_r = P.multi_reflection(_imp, td_ps=_td_ps, grid=_g, gamma_s=0.5, gamma_l=0.5, n_bounce=1)
+_peak = int(np.argmax(_r[101:])) + 1                 # first echo at 2*td samples past the impulse
+_realized_ps = (_peak / 2.0) * _g.dt * 1e12
+check("reflection delay in ps round-trips through the grid",
+      abs(_realized_ps - _td_ps) <= _g.dt * 1e12 + 1e-9,
+      f"requested {_td_ps}ps -> realized {_realized_ps:.2f}ps (dt={_g.dt*1e12:.2f}ps)")
+# 2) a channel loss requested in dB at a stated frequency is realized at that frequency
+_loss_db, _at_ghz = 12.0, 20.0
+_hi = np.zeros(_g.n); _hi[0] = 1.0
+_h = P.lossy_channel(_hi, loss_db=_loss_db, loss_at_ghz=_at_ghz, grid=_g)
+_H = np.abs(np.fft.rfft(_h))
+_f_ghz = np.fft.rfftfreq(_g.n) * _g.fs / 1e9
+_k = int(np.argmin(np.abs(_f_ghz - _at_ghz)))
+_realized_db = -20.0 * np.log10(_H[_k] + 1e-12)
+check("channel loss in dB at a stated frequency is realized",
+      abs(_realized_db - _loss_db) < 0.5,
+      f"requested {_loss_db}dB@{_at_ghz}GHz -> realized {_realized_db:.2f}dB")
+# 3) jitter in SECONDS equals the equivalent sample-domain call (exact grid conversion)
+_sq = sp.sosfiltfilt(sp.bessel(4, 0.02, output="sos"), sp.square(2 * np.pi * 20 * T))
+_a = P.inject_jitter(_sq, sigma_rj_s=3.0 * _g.dt, rng=np.random.default_rng(7), grid=_g)
+_b = P.inject_jitter(_sq, sigma_rj=3.0, rng=np.random.default_rng(7))
+check("jitter in seconds == equivalent sample-domain jitter (exact grid conversion)",
+      np.allclose(_a, _b, atol=1e-9), "sigma_rj_s = 3*dt reproduces sigma_rj = 3 samples")
+# 4) AC-coupling corner in Hz maps to the corresponding fraction-of-Nyquist
+_fc_hz = 5e6
+check("AC-coupling corner in Hz == equivalent fraction-of-Nyquist",
+      np.allclose(P.ac_couple(_sq, fc_hz=_fc_hz, grid=_g),
+                  P.ac_couple(_sq, fc_frac=_g.hz_to_frac_nyquist(_fc_hz)), atol=1e-9),
+      f"{_fc_hz/1e6:.1f} MHz -> frac {_g.hz_to_frac_nyquist(_fc_hz):.2e}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
