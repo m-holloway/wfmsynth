@@ -384,3 +384,32 @@ def test_realized_table_exposes_leak_and_two_eye_definitions():
     x = build(0.3, 1.0).waveform()
     assert np.isfinite(ws.eye_height(x, g, defn="sigma"))
     assert np.isfinite(ws.eye_height(x, g, defn="contour"))
+
+
+def test_ground_truth_measured_eye_definitions_and_symbol_alignment():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)
+    n_ui = int(g.n // g.samples_per_ui)
+
+    # named eye definitions: agree under Gaussian noise, diverge under deterministic ISI
+    isi = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+           .reflect(td_ps=40.0, gamma_s=0.45, gamma_l=0.45)).waveform()
+    gau = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+           .digitize(noise_rms=0.06)).waveform()
+    di = abs(ws.eye_height(isi, g, defn="sigma") - ws.eye_height(isi, g, defn="contour"))
+    dg = abs(ws.eye_height(gau, g, defn="sigma") - ws.eye_height(gau, g, defn="contour"))
+    assert dg < 0.02 and di > 0.05 and di > dg + 0.03
+
+    # realized integer-symbol alignment: a causal channel's group delay must be recovered,
+    # and skipping it (offset 0) collapses the tx/output correlation.
+    sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+           .lossy(loss_db=3.0, loss_at_ghz=25.0, causal=True)
+           .reflect(td_ps=40.0, gamma_s=0.3, gamma_l=0.3))
+    gt = sig.ground_truth()
+    assert gt["align_offset"] != 0 and gt["align_corr"] > 0.9
+    assert gt["align_corr"] > gt["align_corr_at_zero"] + 0.4
+    assert all(k in gt for k in ("eye_contour", "eye_sigma", "best_phase", "align_offset"))
+
+    # carrier_symbols is the single source of truth for the transmitted stream
+    assert np.array_equal(ws.physics.carrier_symbols("pam4", n_ui, 1, "prbs13q"),
+                          ws.physics.prbs13q(n_ui, 1))

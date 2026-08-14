@@ -189,7 +189,15 @@ Two capabilities:
 hold-constant sweep keeps its pinned metric within tolerance while the swept attribute
 moves monotonically.
 
-### 8. Ground truth as measured, not as ideal
+### 8. Ground truth as measured, not as ideal — ✅ DONE (v0.6)
+`wfmsynth.measure` emits labels measured FROM the output: eye height under two named
+definitions ('contour' = measured opening, 'sigma' = 3-sigma construction) that agree
+under Gaussian noise and diverge under deterministic ISI; `align_symbols`/`Signal.
+ground_truth()` recover the realized integer-symbol offset (a causal channel has group
+delay) by reconstructing the transmitted stream via `physics.carrier_symbols`. validate
+asserts the definitions diverge under ISI, and that the recovered offset is nonzero and
+essential (skipping it collapses tx/output correlation).
+
 In `ROADMAP.md` under "Ground-truth co-generation". Three sharpenings:
 
 - Emit values **measured from the generated output**, not computed from the knobs.

@@ -308,10 +308,29 @@ def _place_symbols(levels_per_ui, n, spb, jitter=None, rng=None):
     return levels_per_ui[idx]
 
 
+def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
+    """The ideal transmitted symbol levels (one per UI) for a carrier — the reference
+    stream for realized symbol alignment and any per-symbol ground-truth statistic.
+    Deterministic given (kind, n_ui, seed, pattern); the single source of truth that
+    `nrz`/`pam4` shape into a waveform."""
+    n_ui = int(n_ui)
+    if kind == "nrz":
+        return np.where(prbs(7, n_ui, seed) > 0, 1.0, -1.0)
+    if kind == "pam4":
+        levels = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
+        if pattern == "prbs13q":
+            return prbs13q(n_ui, seed)
+        if pattern == "legacy":
+            b0 = prbs(7, n_ui, seed); b1 = prbs(9, n_ui, seed + 3)
+            return levels[np.clip(b0 * 2 + (b0 ^ b1), 0, 3)]
+        raise ValueError(f"unknown pattern {pattern!r}; use 'legacy' or 'prbs13q'")
+    raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz' or 'pam4'")
+
+
 def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=None):
     n = N if n is None else int(n)
     spb = n / n_ui
-    lv = np.where(prbs(7, n_ui, seed) > 0, 1.0, -1.0)
+    lv = carrier_symbols("nrz", n_ui, seed)
     return _shape_edges(_place_symbols(lv, n, spb, jitter, rng), max(tr_frac * spb, 2), causal)
 
 
@@ -328,15 +347,7 @@ def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
     """
     n = N if n is None else int(n)
     spb = n / n_ui
-    levels = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
-    if pattern == "prbs13q":
-        syms = prbs13q(n_ui, seed)
-    elif pattern == "legacy":
-        b0 = prbs(7, n_ui, seed); b1 = prbs(9, n_ui, seed + 3)
-        gray = (b0 * 2 + (b0 ^ b1))                  # simple Gray-ish map -> 0..3
-        syms = levels[np.clip(gray, 0, 3)]
-    else:
-        raise ValueError(f"unknown pattern {pattern!r}; use 'legacy' or 'prbs13q'")
+    syms = carrier_symbols("pam4", n_ui, seed, pattern)
     return _shape_edges(_place_symbols(syms, n, spb, jitter, rng), max(tr_frac * spb, 2), causal)
 
 

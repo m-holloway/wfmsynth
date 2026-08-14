@@ -406,6 +406,35 @@ check("...while the swept knob forces a monotonic compensation (the constraint i
 check("sweep returns REALIZED metric values alongside the request",
       all("realized_eye" in r and "target_eye" in r for r in _recs))
 
+print("== ground truth as measured: named eye definitions + realized symbol alignment ==")
+from wfmsynth.measure import eye_height as _eh
+_g8 = Grid(fs=200e9, baud=50e9, n=1 << 13)
+_n8 = int(_g8.n // _g8.samples_per_ui)
+# the two eye definitions agree under Gaussian noise and diverge under deterministic ISI
+_isi = (Signal(seed=1, grid=_g8).carrier("pam4", n_ui=_n8, pattern="prbs13q", causal=True)
+        .reflect(td_ps=40.0, gamma_s=0.45, gamma_l=0.45)).waveform()
+_gau = (Signal(seed=1, grid=_g8).carrier("pam4", n_ui=_n8, pattern="prbs13q", causal=True)
+        .digitize(noise_rms=0.06)).waveform()
+_di = abs(_eh(_isi, _g8, defn="sigma") - _eh(_isi, _g8, defn="contour"))
+_dg = abs(_eh(_gau, _g8, defn="sigma") - _eh(_gau, _g8, defn="contour"))
+check("named eye definitions agree under Gaussian noise, diverge under deterministic ISI",
+      _dg < 0.02 and _di > 0.05 and _di > _dg + 0.03, f"|diff| ISI={_di:.3f} Gauss={_dg:.3f}")
+# realized integer-symbol alignment: a causal channel's group delay must be recovered
+_sig8 = (Signal(seed=1, grid=_g8).carrier("pam4", n_ui=_n8, pattern="prbs13q", causal=True)
+         .lossy(loss_db=3.0, loss_at_ghz=25.0, causal=True)
+         .reflect(td_ps=40.0, gamma_s=0.3, gamma_l=0.3))
+_gt8 = _sig8.ground_truth()
+check("realized symbol alignment recovers a nonzero group-delay offset",
+      _gt8["align_offset"] != 0 and _gt8["align_corr"] > 0.9, f"offset={_gt8['align_offset']}")
+check("skipping the realignment collapses tx/output correlation (offset matters)",
+      _gt8["align_corr"] > _gt8["align_corr_at_zero"] + 0.4,
+      f"corr {_gt8['align_corr']:.3f} vs @0 {_gt8['align_corr_at_zero']:.3f}")
+check("ground_truth labels are measured from the output (both eye defs + phase + offset)",
+      all(k in _gt8 for k in ("eye_contour", "eye_sigma", "best_phase", "align_offset")))
+# carrier_symbols is the single source of truth for the transmitted stream
+check("carrier_symbols reproduces the transmitted stream used by the carrier",
+      np.array_equal(P.carrier_symbols("pam4", _n8, 1, "prbs13q"), P.prbs13q(_n8, 1)))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
