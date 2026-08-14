@@ -161,6 +161,16 @@ y = mix_at_constant_power([white, pink], weights=[1-a, a], total_rms=0.05)
 # total RMS is exactly 0.05 for any a; only the spectral character changes with a
 ```
 
+## Intermittent impairments (with defect masks)
+Intermittency is where stationary analysis fails — apply a defect on a duty cycle and
+emit the per-sample mask as ground truth:
+
+```python
+from wfmsynth import apply_gated
+y, mask = apply_gated(x, glitch_fn, intervals=[(2000,180),(6000,140)])
+# y is bit-identical to x outside the gate; mask marks where the defect is active
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

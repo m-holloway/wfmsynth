@@ -65,6 +65,39 @@ def apply_impairment(imp, x, rng):
     return x
 
 
+def burst_gate(n, intervals, edge_frac=0.1):
+    """A per-sample gate weight in [0, 1], nonzero only inside the given ``(start, width)``
+    intervals (in samples), with raised-cosine on/off ramps (``edge_frac`` of each width)
+    so the onset/offset do not themselves read as signal edges. This mask IS the
+    ground-truth "where the defect is active" — emit it alongside intermittent defects,
+    which a record-average analysis dilutes by duty cycle and standard decompositions
+    misattribute to the random-noise bucket."""
+    g = np.zeros(int(n))
+    for start, width in intervals:
+        s, w = int(start), int(width)
+        e = max(1, int(edge_frac * w))
+        seg = np.ones(w)
+        ramp = 0.5 * (1.0 - np.cos(np.pi * np.arange(e) / e))    # 0 -> 1 raised cosine
+        seg[:e] = ramp
+        seg[-e:] = ramp[::-1]
+        lo, hi = max(0, s), min(int(n), s + w)
+        if hi > lo:
+            g[lo:hi] = np.maximum(g[lo:hi], seg[lo - s:hi - s])
+    return g
+
+
+def apply_gated(x, impairment, intervals, edge_frac=0.1):
+    """Apply ``impairment`` only within the given time ``intervals``, blended through a
+    raised-cosine gate. ``impairment`` is either an array the same length as ``x`` or a
+    callable ``x -> array``. Returns ``(y, mask)`` where ``mask`` is the per-sample gate
+    weight (ground truth). Outside the intervals ``y`` is bit-identical to ``x`` — the gate
+    is applied exactly, not approximately."""
+    x = np.asarray(x, float)
+    g = burst_gate(len(x), intervals, edge_frac)
+    imp = np.asarray(impairment(x) if callable(impairment) else impairment, float)
+    return x * (1.0 - g) + imp * g, g
+
+
 def mix_at_constant_power(components, weights, total_rms):
     """Combine several impairment components in declared proportions while holding the
     **total** impairment power fixed — the natural API for "same SNR, different noise
