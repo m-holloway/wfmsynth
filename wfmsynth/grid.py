@@ -66,6 +66,15 @@ class Grid:
         """Hz -> cycles per record, e.g. for a periodic-jitter tone."""
         return hz * self.duration
 
+    def pattern_period_samples(self, n_symbols: int) -> float:
+        """Exact (fractional) sample period of a repeating symbol pattern of length
+        `n_symbols` UI. Because samples-per-UI is generally non-integer, this is NOT an
+        integer — anything that folds/averages repetitions must realign to this
+        fractional period sub-sample, or it drifts. Requires baud to be set."""
+        if self.baud is None:
+            raise ValueError("pattern_period_samples requires baud to be set")
+        return n_symbols * self.samples_per_ui
+
     def volts(self, x):
         """Scale a normalized (+/-1) waveform to volts at this grid's full scale."""
         return x * (0.5 * self.v_full)
