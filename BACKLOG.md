@@ -75,7 +75,9 @@ subtly wrong rather than obviously wrong.
 least one worked example, and any emitted ground truth includes the exact fractional
 pattern period.
 
-### 3. Instrument model: time-interleaved ADC artifacts
+### 3. Instrument model: time-interleaved ADC artifacts — ✅ DONE (v0.2)
+`wfmsynth.instrument.interleave_adc(m_cores, gain_mm, offset_mm, skew_mm)` injects per-core mismatch -> spurs at k*fs/M (offset) and images at k*fs/M±f_in (gain/skew); plus `shaped_noise_floor` (coloured floor) and `clip_adc` (saturation + clipped mask). `validate` asserts the spurs appear with mismatch and vanish at zero. (Timebase/trigger jitter: follow-on.)
+
 `pam4._digitize` models thermal noise + finite ENOB. A real high-speed front end is a
 **time-interleaved** ADC, and interleaving is much of what makes a real capture look
 real:

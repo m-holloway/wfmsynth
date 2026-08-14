@@ -276,6 +276,22 @@ check("exact fractional pattern period is available and non-integer",
       abs(_per - round(_per)) > 1e-6 and abs(_per - _nsym * _sps) < 1e-9,
       f"period={_per:.2f} samples for {_nsym} UI")
 
+print("== interleaved ADC: core mismatch -> spurs at fs/M and images; none when mismatch=0 ==")
+from wfmsynth.instrument import interleave_adc
+_nA, _mc, _fin = 4096, 4, 300
+_tone = np.sin(2 * np.pi * _fin * np.linspace(0, 1, _nA, endpoint=False))
+_ymm = interleave_adc(_tone, m_cores=_mc, offset_mm=0.02, gain_mm=0.01, rng=np.random.default_rng(0))
+_yid = interleave_adc(_tone, m_cores=_mc, offset_mm=0.0, gain_mm=0.0, skew_mm=0.0)
+_Ymm = np.abs(np.fft.rfft(_ymm - _ymm.mean()))
+_Yid = np.abs(np.fft.rfft(_yid - _yid.mean()))
+_spur = _nA // _mc                                          # fs/M bin
+check("offset mismatch -> spur at fs/M", _Ymm[_spur] > 50 * (_Yid[_spur] + 1e-9),
+      f"spur@fs/M: mismatch={_Ymm[_spur]:.2f} vs ideal={_Yid[_spur]:.2e}")
+check("gain mismatch -> image spur at fs/M - f_in",
+      _Ymm[_spur - _fin] > 20 * (_Yid[_spur - _fin] + 1e-9))
+check("zero mismatch -> no interleave spur (ideal ADC transparent)",
+      _Yid[_spur] < 1e-6 * _Ymm.max(), f"ideal spur={_Yid[_spur]:.2e}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

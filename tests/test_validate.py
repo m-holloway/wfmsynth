@@ -206,3 +206,23 @@ def test_non_integer_sps_fractional_period_and_drift():
         pass
     else:
         raise AssertionError("pattern_period_samples without baud should raise")
+
+
+def test_interleave_adc_spurs_and_clip():
+    """BACKLOG #3 done-criteria: interleave mismatch -> spurs at fs/M; none at zero."""
+    import wfmsynth as ws
+    n, m, fin = 4096, 4, 300
+    tone = np.sin(2 * np.pi * fin * np.linspace(0, 1, n, endpoint=False))
+    ymm = ws.interleave_adc(tone, m_cores=m, offset_mm=0.02, gain_mm=0.01,
+                            rng=np.random.default_rng(0))
+    yid = ws.interleave_adc(tone, m_cores=m)                 # all mismatch default 0
+    Ymm = np.abs(np.fft.rfft(ymm - ymm.mean()))
+    Yid = np.abs(np.fft.rfft(yid - yid.mean()))
+    spur = n // m
+    assert Ymm[spur] > 50 * (Yid[spur] + 1e-9)              # spur with mismatch
+    assert Yid[spur] < 1e-6 * Ymm.max()                    # none without
+    assert Ymm[spur - fin] > 20 * (Yid[spur - fin] + 1e-9)  # gain image at fs/M - f_in
+    # clip_adc marks saturated samples
+    y, mask = ws.clip_adc(np.array([-2.0, 0.0, 2.0]), full_scale=1.0)
+    assert y.tolist() == [-1.0, 0.0, 1.0]
+    assert mask.tolist() == [True, False, True]
