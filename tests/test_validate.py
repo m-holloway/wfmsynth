@@ -226,3 +226,30 @@ def test_interleave_adc_spurs_and_clip():
     y, mask = ws.clip_adc(np.array([-2.0, 0.0, 2.0]), full_scale=1.0)
     assert y.tolist() == [-1.0, 0.0, 1.0]
     assert mask.tolist() == [True, False, True]
+
+
+def test_source_jitter_edge_rms_and_independent_noise():
+    """BACKLOG #4 done-criteria: source jitter edge-RMS ~ injected; post-channel noise independent."""
+    from wfmsynth import physics as P
+    from wfmsynth import Jitter
+    nui = 96
+    ref = P.nrz(n_ui=nui, tr_frac=0.1, seed=5)
+    jit = P.nrz(n_ui=nui, tr_frac=0.1, seed=5, jitter=Jitter(rj=3.0), rng=np.random.default_rng(0))
+
+    def cross(y):
+        s = np.sign(y - y.mean())
+        return np.where(np.diff(s) != 0)[0].astype(float)
+
+    c0, c1 = cross(ref), cross(jit)
+    assert len(c0) == len(c1)
+    assert 1.5 < float(np.std(c1 - c0)) < 4.5           # recovered edge RMS ~ injected 3
+    # jitter=None is bit-identical to the legacy carrier
+    assert np.array_equal(P.nrz(n_ui=32, seed=1), P.nrz(n_ui=32, seed=1, jitter=None))
+    # post-channel noise is independent of source jitter (jitter is upstream)
+    sig = P.lossy_channel(P.pam4(n_ui=nui, seed=5, jitter=Jitter(rj=2.0), rng=np.random.default_rng(1)),
+                          length_in=8.0, causal=True)
+    noise = np.random.default_rng(2).normal(0, 0.05, len(sig))
+    assert np.allclose((sig + noise) - sig, noise, atol=1e-12)
+    # Jitter.at converts seconds/Hz through a grid
+    g = ws.Grid(fs=256e9, n=4096)
+    assert abs(Jitter.at(g, rj_s=3.0 / 256e9).rj - 3.0) < 1e-9

@@ -12,6 +12,7 @@ normalized, unitless time grid (`N` samples over [0,1)); rate-parameterizable to
 symbol/sample rate downstream. numpy/scipy only.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 import numpy as np
 from scipy import signal
 
@@ -253,22 +254,77 @@ def _shape_edges(x, tr_samples, causal=False):
     return y
 
 
-def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False):
+@dataclass(frozen=True)
+class Jitter:
+    """Transmitter jitter, applied to symbol EDGE TIMES *before* pulse shaping — the
+    physical source of jitter, so DDJ emerges from the channel for free and noise added
+    after the channel is not itself jittered. rj/pj/dcd are in SAMPLES; f_pj in
+    cycles-per-record. Use `Jitter.at(grid, rj_s=, pj_s=, f_pj_hz=, dcd_s=)` to specify
+    in seconds/Hz.
+      rj   random jitter, RMS (bandlimited Gaussian -> coherent edge motion)
+      pj   periodic jitter amplitude at frequency f_pj
+      dcd  duty-cycle distortion (rising edges +dcd/2, falling -dcd/2)"""
+    rj: float = 0.0
+    pj: float = 0.0
+    f_pj: float = 5.0
+    dcd: float = 0.0
+
+    @classmethod
+    def at(cls, grid, rj_s=0.0, pj_s=0.0, f_pj_hz=5e6, dcd_s=0.0):
+        return cls(rj=grid.to_samples(rj_s), pj=grid.to_samples(pj_s),
+                   f_pj=grid.hz_to_cycles_per_record(f_pj_hz), dcd=grid.to_samples(dcd_s))
+
+
+def _edge_disp(levels_per_ui, jitter, rng):
+    """Per-interior-edge time displacement (samples) for a symbol stream."""
+    n_ui = len(levels_per_ui); ne = n_ui - 1
+    disp = np.zeros(max(ne, 0))
+    if ne <= 0:
+        return disp
+    if jitter.rj > 0:
+        w = rng.standard_normal(ne)
+        if ne > 8:
+            w = signal.sosfiltfilt(signal.bessel(2, 0.1, output="sos"), w)   # coherent phase noise
+        disp += w / (w.std() + 1e-9) * jitter.rj
+    if jitter.pj > 0:
+        k = np.arange(1, ne + 1)
+        disp += jitter.pj * np.sin(2 * np.pi * jitter.f_pj * k / n_ui)        # Pj phase at each edge time
+    if jitter.dcd != 0:
+        disp += (jitter.dcd / 2.0) * np.sign(np.diff(levels_per_ui))          # rising +, falling -
+    return disp
+
+
+def _place_symbols(levels_per_ui, n, spb, jitter=None, rng=None):
+    """Map a per-UI symbol-level array onto n samples. jitter=None -> uniform UI
+    boundaries (bit-identical legacy). With a Jitter, the interior symbol EDGES are
+    displaced (source jitter) before the piecewise-constant stream is returned."""
+    n_ui = len(levels_per_ui)
+    if jitter is None:
+        idx = np.clip((np.arange(n) / spb).astype(int), 0, n_ui - 1)
+        return levels_per_ui[idx]
+    rng = rng or np.random.default_rng()
+    edges = np.arange(1, n_ui) * spb + _edge_disp(levels_per_ui, jitter, rng)
+    idx = np.clip(np.searchsorted(edges, np.arange(n), side="right"), 0, n_ui - 1)
+    return levels_per_ui[idx]
+
+
+def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=None):
     n = N if n is None else int(n)
     spb = n / n_ui
-    bits = prbs(7, n_ui, seed)
-    idx = np.clip((np.arange(n) / spb).astype(int), 0, n_ui - 1)
-    x = np.where(bits[idx] > 0, 1.0, -1.0)
-    return _shape_edges(x, max(tr_frac * spb, 2), causal)
+    lv = np.where(prbs(7, n_ui, seed) > 0, 1.0, -1.0)
+    return _shape_edges(_place_symbols(lv, n, spb, jitter, rng), max(tr_frac * spb, 2), causal)
 
 
-def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy"):
+def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
+         jitter=None, rng=None):
     """PAM4 carrier.
 
     pattern="legacy"  the original PRBS7/PRBS9 Gray-ish map. Not a standard
                       sequence -- fine for shape coverage, will NOT pattern-lock.
     pattern="prbs13q" IEEE 802.3 PRBS13Q (8191 symbols). Use this when the capture
                       has to be analysable by an instrument.
+    jitter=Jitter(...) applies transmitter jitter at the symbol edge times (source
+                      jitter) before shaping; rng seeds it.
     """
     n = N if n is None else int(n)
     spb = n / n_ui
@@ -281,8 +337,7 @@ def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy"):
         syms = levels[np.clip(gray, 0, 3)]
     else:
         raise ValueError(f"unknown pattern {pattern!r}; use 'legacy' or 'prbs13q'")
-    idx = np.clip((np.arange(n) / spb).astype(int), 0, n_ui - 1)
-    return _shape_edges(syms[idx], max(tr_frac * spb, 2), causal)
+    return _shape_edges(_place_symbols(syms, n, spb, jitter, rng), max(tr_frac * spb, 2), causal)
 
 
 # ---------------------------------------------------------------- RF / analog

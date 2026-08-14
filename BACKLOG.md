@@ -95,7 +95,9 @@ Cheap to add, large fidelity payoff.
 **Done when:** validate asserts that with `M` cores and injected mismatch, spurs
 appear at the predicted frequencies and vanish when mismatch is zero.
 
-### 4. Apply jitter at the source, not by warping the output
+### 4. Apply jitter at the source, not by warping the output — ✅ DONE (v0.2)
+`physics.Jitter(rj, pj, f_pj, dcd)` (or `Jitter.at(grid, rj_s=, ...)` for seconds/Hz); carriers take `jitter=` and displace the symbol EDGE TIMES before shaping, so DDJ emerges from the channel and post-channel noise is untouched. Legacy `inject_jitter` (output warp) kept for back-compat. `validate` asserts recovered edge-RMS ~ injected AND post-channel noise stays exactly additive (with a contrast showing the output-warp path corrupts it).
+
 `inject_jitter` warps the time axis of an already-generated waveform and resamples.
 Two problems:
 
