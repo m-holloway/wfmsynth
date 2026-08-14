@@ -470,6 +470,26 @@ check("stage order matters: quantise-before-noise != noise-before-quantise",
       not np.array_equal(_q(_xo + _nz, enob=6, full_scale=0.7),
                          _q(_xo, enob=6, full_scale=0.7) + _nz))
 
+print("== impairment mixing at constant total power: magnitude vs character are separable ==")
+from wfmsynth.impairments import mix_at_constant_power as _mix
+from wfmsynth.instrument import shaped_noise_floor as _snf2
+_rng9 = np.random.default_rng(0)
+_white = _snf2(1 << 13, rms=1.0, shape="white", rng=_rng9)
+_pink = _snf2(1 << 13, rms=1.0, shape="pink", rng=_rng9)
+def _cent(x):
+    _X = np.abs(np.fft.rfft(x))
+    return float((np.arange(len(_X)) * _X).sum() / (_X.sum() + 1e-12))
+_rms9, _ch9 = [], []
+for _a in np.linspace(0.0, 1.0, 6):                 # sweep white -> pink at fixed total power
+    _y = _mix([_white, _pink], [1 - _a, _a], total_rms=0.05)
+    _rms9.append(float(np.sqrt(np.mean(_y ** 2))))
+    _ch9.append(_cent(_y))
+check("total impairment RMS is invariant across the mixing sweep",
+      max(_rms9) - min(_rms9) < 1e-9, f"rms in [{min(_rms9):.5f}, {max(_rms9):.5f}]")
+check("...while a character statistic (spectral centroid) moves monotonically",
+      all(_ch9[i] > _ch9[i + 1] for i in range(len(_ch9) - 1)),
+      f"centroid {_ch9[0]:.0f} -> {_ch9[-1]:.0f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
