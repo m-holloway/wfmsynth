@@ -209,6 +209,14 @@ sig = ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", ca
         .sparam(path="thru.s2p")                          # apply S21 as the channel
 ```
 
+## Resonant reflections
+Real discontinuities resonate — frequency-dependent Γ, not a flat mirror:
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True) \
+  .resonant_reflect(td_ps=40.0, f0_ghz=30.0, q=10.0, gamma0=0.4)   # |Γ| peaks at f0
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

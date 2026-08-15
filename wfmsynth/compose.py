@@ -91,6 +91,11 @@ def _op_tx_ffe(x, p, streams, grid, idx):
     return P.tx_ffe(x, p["taps"], spb, pre=p.get("pre", 1))
 
 
+def _op_resonant_reflect(x, p, streams, grid, idx):
+    kw = {k: p[k] for k in ("td_ps", "td_frac", "f0_ghz", "f0_frac", "q", "gamma0") if k in p}
+    return P.resonant_reflection(x, grid=grid, **kw)
+
+
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
     if "path" in p:
@@ -117,7 +122,8 @@ def _op_digitize(x, p, streams, grid, idx):
 
 _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
-         "tx_ffe": _op_tx_ffe, "sparam": _op_sparam}
+         "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
+         "resonant_reflect": _op_resonant_reflect}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -153,6 +159,11 @@ class Signal:
     def reflect(self, **params):
         """Multi-reflection. params: td_frac | td_samples | td_ps, gamma_s, gamma_l, n_bounce."""
         return self._add("reflect", **params)
+
+    def resonant_reflect(self, **params):
+        """A resonant discontinuity (frequency-dependent Γ, a stub/open that resonates).
+        params: td_ps + f0_ghz (with grid) or td_frac + f0_frac, q, gamma0."""
+        return self._add("resonant_reflect", **params)
 
     def crosstalk(self, **params):
         """Crosstalk. params: coupling, kind('fext'|'next'), td_frac, aggressor=dict(carrier spec)."""

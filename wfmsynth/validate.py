@@ -593,6 +593,20 @@ _nb = int(np.argmin(np.abs(_fg13 - 20e9))); _rb = int(np.argmin(np.abs(_fg13 - 1
 check("an S-parameter channel reproduces a resonant notch (the analytic model cannot)",
       _Y13[_nb] / (_Y13[_rb] + 1e-9) < 0.2, f"|Y(20G)|/|Y(10G)|={_Y13[_nb] / (_Y13[_rb] + 1e-9):.3f}")
 
+print("== resonant reflection: frequency-dependent Γ (a stub resonates, not a flat mirror) ==")
+_g14 = Grid(fs=100e9, n=1 << 14)
+_f14 = np.fft.rfftfreq(_g14.n, d=_g14.dt)
+_x14 = np.random.default_rng(0).standard_normal(_g14.n)
+_yr = P.resonant_reflection(_x14, grid=_g14, td_ps=50.0, f0_ghz=25.0, q=12.0, gamma0=0.5)
+_yf = P.multi_reflection(_x14, grid=_g14, td_ps=50.0, gamma_s=0.5, gamma_l=0.0, n_bounce=1)
+_Rr = np.abs(np.fft.rfft(_yr - _x14))                  # the reflection contribution's spectrum
+_b0 = int(np.argmin(np.abs(_f14 - 25e9))); _blo = int(np.argmin(np.abs(_f14 - 5e9)))
+check("resonant Γ peaks the reflected content near f0 (frequency-dependent magnitude)",
+      _Rr[_b0] / (_Rr[_blo] + 1e-9) > 5.0 and abs(_f14[int(np.argmax(_Rr))] - 25e9) < 3e9,
+      f"|refl(25G)|/|refl(5G)|={_Rr[_b0] / (_Rr[_blo] + 1e-9):.1f}, peak@{_f14[int(np.argmax(_Rr))]/1e9:.1f}GHz")
+check("the flat-Γ multi_reflection does NOT concentrate reflection at one frequency",
+      np.abs(np.fft.rfft(_yf - _x14))[_b0] / (np.abs(np.fft.rfft(_yf - _x14))[_blo] + 1e-9) < 3.0)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
