@@ -151,6 +151,35 @@ def resonant_reflection(x, grid=None, td_ps=None, td_frac=0.12, f0_ghz=None, f0_
     return np.fft.irfft(np.fft.rfft(x) * (1.0 + G * np.exp(-1j * phase)), n)
 
 
+def nominal_nonlinearity(x, compression=0.05, level_noise=0.0, rise_fall_ratio=1.0,
+                         a_base=0.4, rng=None):
+    """Nominal, ALWAYS-ON transmitter imperfections — so a "nominal" (unfaulted) waveform is
+    not suspiciously perfect (a too-perfect class is itself a giveaway). Combines three real
+    effects, all small by default:
+
+      compression       soft odd compression (``x - c·sign(x)·x²``): outer levels squish, so
+                        PAM4 level spacing is no longer exactly uniform (RLM < 1).
+      level_noise       additive noise with std ∝ |signal|, so outer levels are noisier.
+      rise_fall_ratio   ≠ 1 gives rising and falling edges different slew (rise/fall-time
+                        asymmetry) via a nonlinear one-pole; ``a_base`` sets the nominal
+                        edge rate that the ratio splits (√-balanced)."""
+    x = np.asarray(x, float)
+    y = x - compression * np.sign(x) * x ** 2
+    if level_noise > 0:
+        rng = rng or np.random.default_rng()
+        y = y + rng.normal(0.0, 1.0, len(y)) * level_noise * np.abs(x)
+    if rise_fall_ratio != 1.0:
+        a_r = min(0.95, a_base * np.sqrt(rise_fall_ratio))
+        a_f = min(0.95, a_base / np.sqrt(rise_fall_ratio))
+        z = np.empty_like(y)
+        z[0] = y[0]
+        for k in range(1, len(y)):
+            d = y[k] - z[k - 1]
+            z[k] = z[k - 1] + (a_r if d > 0 else a_f) * d
+        y = z
+    return y
+
+
 def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
                      td_samples=None, td_ps=None, grid=None):
     """Transmission-line bounce diagram: received = incident + reflected train.

@@ -633,3 +633,27 @@ def test_resonant_reflection_is_frequency_dependent():
     sig = (ws.Signal(seed=1, grid=g2).carrier("pam4", n_ui=g2.n // 4, pattern="prbs13q", causal=True)
            .resonant_reflect(td_ps=40.0, f0_ghz=30.0, q=10.0, gamma0=0.4))
     assert sig.waveform().shape == (g2.n,)
+
+
+def test_nominal_nonlinearity_three_effects():
+    import wfmsynth as ws
+    # compression: PAM4 level spacing non-uniform (RLM<1) but mild
+    lv = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
+    gaps = np.diff(ws.nominal_nonlinearity(lv, compression=0.06))
+    assert 0.85 < gaps.min() / gaps.max() < 0.999
+    # level-dependent noise: outer noisier than inner
+    rng = np.random.default_rng(0)
+    out = ws.nominal_nonlinearity(np.full(20000, 1.0), compression=0.0, level_noise=0.02, rng=rng)
+    inr = ws.nominal_nonlinearity(np.full(20000, 1 / 3), compression=0.0, level_noise=0.02, rng=rng)
+    assert out.std() > 2.0 * inr.std()
+    # rise/fall asymmetry on a step
+    step = np.concatenate([np.zeros(200), np.ones(200), np.zeros(200)]).astype(float)
+    y = ws.nominal_nonlinearity(step, compression=0.0, rise_fall_ratio=2.5)
+    rise = int(np.argmax(y[200:400] >= 0.9))
+    fall = int(np.argmax(y[400:600] <= 0.1))
+    assert rise != fall and rise > 0 and fall > 0
+    # composes fluently with its own noise stream
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    s = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=g.n // 4, pattern="prbs13q", causal=True)
+         .nonlinearity(compression=0.04, level_noise=0.005, rise_fall_ratio=1.3))
+    assert s.waveform().shape == (g.n,)
