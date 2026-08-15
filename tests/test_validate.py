@@ -771,3 +771,53 @@ def test_rx_ctle_opens_eye_and_dfe_cancels_postcursor():
     rx[1:] += 0.35 * syms[:-1]
     assert np.mean(ws.dfe(rx, [0.0])[1] != syms) > 0.1
     assert np.mean(ws.dfe(rx, [0.35])[1] != syms) < 0.01
+
+
+# ---------------------------------------------------------------- BACKLOG B2
+def test_rise_time_clamp_is_visible_not_silent():
+    """tr_frac must not be silently discarded at realistic samples-per-UI.
+
+    The old call sites used ``max(tr_frac * spb, 2)``. At 4.82 samples/UI --
+    an ordinary deep-memory capture, not a corner case -- a requested
+    ``tr_frac=0.02`` asks for 0.096 samples and silently received 2.0, a 20x
+    inflation. Edge shaping then dominates the pulse response and is easily
+    mistaken for channel ISI.
+    """
+    import warnings as _w
+    import pytest
+    from wfmsynth.physics import (TR_NYQUIST_LIMIT_SAMPLES, resolve_rise_time)
+
+    spb = 4.8188
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        tr, clamped = resolve_rise_time(0.02, spb)
+    assert clamped, "a 0.096-sample request must report that it was clamped"
+    assert caught, "clamping must warn; silence is the defect"
+
+    # honoured when the request is above the floor
+    tr, clamped = resolve_rise_time(0.5, spb)
+    assert not clamped
+    assert tr == pytest.approx(0.5 * spb)
+
+    # the floor can be lowered to what the grid physically supports
+    tr, clamped = resolve_rise_time(0.02, spb,
+                                    floor_samples=TR_NYQUIST_LIMIT_SAMPLES)
+    assert tr == pytest.approx(TR_NYQUIST_LIMIT_SAMPLES)
+
+
+def test_rise_time_floor_never_below_the_nyquist_limit():
+    """BW*t_r ~= 0.35 and the shaper saturates at 0.98*Nyquist, so no request can
+    buy an edge faster than ~0.714 samples. Asking for less must not be granted."""
+    from wfmsynth.physics import TR_NYQUIST_LIMIT_SAMPLES, resolve_rise_time
+    tr, _ = resolve_rise_time(1e-6, 4.8188, floor_samples=0.0, warn=False)
+    assert tr >= TR_NYQUIST_LIMIT_SAMPLES
+
+
+def test_default_rise_time_behaviour_is_unchanged():
+    """The default floor stays at 2.0 samples so existing output is bit-identical."""
+    import numpy as np
+    from wfmsynth.physics import pam4
+    a = pam4(n_ui=64, tr_frac=0.02, seed=3, n=512, causal=True)
+    b = pam4(n_ui=64, tr_frac=0.02, seed=3, n=512, causal=True,
+             tr_floor_samples=2.0)
+    assert np.array_equal(a, b)
