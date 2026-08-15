@@ -823,6 +823,35 @@ def test_differential_pair_skew_and_mode_conversion():
     assert ws.eye_height(sig.waveform(), g) < ws.eye_height(x, g) - 0.02
 
 
+def test_supply_coupling_am_and_psij_sidebands():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    g = ws.Grid(fs=200e9, n=1 << 16)
+    t = np.arange(g.n) / g.fs
+    fc, fr = 10e9, 1e9
+    probe = np.cos(2 * np.pi * fc * t)
+    f = np.fft.rfftfreq(g.n, d=g.dt)
+
+    def sb(y):
+        Y = np.abs(np.fft.rfft(y))
+        return Y[int(np.argmin(np.abs(f - (fc + fr))))] / Y[int(np.argmin(np.abs(f - fc)))]
+
+    # AM sideband scales with depth
+    assert sb(P.supply_coupling(probe, g, fr, am_depth=0.10)) > 1.7 * sb(
+        P.supply_coupling(probe, g, fr, am_depth=0.05)) > 0
+    # PSIJ sideband appears vs none
+    assert sb(P.supply_coupling(probe, g, fr, psij_ps=8.0)) > 10 * max(
+        sb(P.supply_coupling(probe, g, fr, am_depth=0.0)), 1e-6)
+    # a supplied (switching-correlated) rail array is honored
+    rail = np.sign(np.sin(2 * np.pi * 2e9 * t))
+    assert not np.array_equal(P.supply_coupling(probe, g, am_depth=0.1, supply=rail), probe)
+    # composes fluently
+    gp = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    s = (ws.Signal(seed=1, grid=gp).carrier("pam4", n_ui=gp.n // 4, pattern="prbs13q", causal=True)
+         .supply_coupling(f_ripple_hz=1e6, am_depth=0.03, psij_ps=2.0))
+    assert s.waveform().shape == (gp.n,)
+
+
 # ---------------------------------------------------------------- BACKLOG B2
 def test_rise_time_clamp_is_visible_not_silent():
     """tr_frac must not be silently discarded at realistic samples-per-UI.

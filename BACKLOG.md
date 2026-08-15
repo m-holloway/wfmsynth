@@ -693,7 +693,14 @@ three.
 **Done when:** validate asserts skew closes the differential eye and generates common-mode energy
 that vanishes at skew=0.
 
-### 33. Power-supply / PDN coupling (AM + PSIJ)
+### 33. Power-supply / PDN coupling (AM + PSIJ) — ✅ DONE (v0.25)
+`physics.supply_coupling(x, grid, f_ripple_hz, am_depth, psij_ps, supply)` + 
+`Signal.supply_coupling()` couple a supply rail onto the signal as BOTH amplitude modulation
+and power-supply-induced jitter from the SAME supply waveform (so the artifacts are
+correlated and attributable to the rail); an optional `supply` array carries switching-
+correlated activity. validate asserts AM and PSIJ each produce a sideband at f_ripple scaling
+with the coupling, and both appear together from the shared rail.
+
 A composable "supply aggressor": a supply rail (ripple tone + switching activity) couples onto the
 signal as BOTH amplitude modulation and power-supply-induced jitter, correlated to switching. We
 only have a PDN-transient *fault* today. A rich, structured, real artifact — and a strong target

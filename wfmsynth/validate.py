@@ -760,6 +760,26 @@ check("gain imbalance converts differential to common-mode, proportional to the 
       and np.sqrt(np.mean(P.common_mode(_pg, _ng) ** 2))
       > 3 * np.sqrt(np.mean(P.common_mode(_p0, _n0) ** 2)))
 
+print("== power-supply / PDN coupling: correlated AM + PSIJ sidebands from a supply rail ==")
+_g33 = Grid(fs=200e9, n=1 << 16); _t33 = np.arange(_g33.n) / _g33.fs
+_fc33, _fr33 = 10e9, 1e9
+_probe33 = np.cos(2 * np.pi * _fc33 * _t33)
+_f33 = np.fft.rfftfreq(_g33.n, d=_g33.dt)
+def _sb33(y):
+    _Y = np.abs(np.fft.rfft(y))
+    return _Y[int(np.argmin(np.abs(_f33 - (_fc33 + _fr33))))] / _Y[int(np.argmin(np.abs(_f33 - _fc33)))]
+_am1 = _sb33(P.supply_coupling(_probe33, _g33, _fr33, am_depth=0.05))
+_am2 = _sb33(P.supply_coupling(_probe33, _g33, _fr33, am_depth=0.10))
+check("supply AM produces a sideband at f_ripple that scales with the coupling depth",
+      _am2 > 1.7 * _am1 and _am1 > 1e-3, f"sideband depth0.05={_am1:.4f} depth0.10={_am2:.4f}")
+_pm0 = _sb33(P.supply_coupling(_probe33, _g33, _fr33, am_depth=0.0))
+_pm1 = _sb33(P.supply_coupling(_probe33, _g33, _fr33, psij_ps=8.0))
+check("supply PSIJ produces a timing (PM) sideband that scales with the coupling",
+      _pm1 > 10 * max(_pm0, 1e-6), f"sideband none={_pm0:.5f} psij8ps={_pm1:.4f}")
+_both = P.supply_coupling(_probe33, _g33, _fr33, am_depth=0.06, psij_ps=6.0)
+check("AM and PSIJ come from the SAME rail (both sidebands present, correlated to f_ripple)",
+      _sb33(_both) > _am1 and _sb33(_both) > _pm0)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

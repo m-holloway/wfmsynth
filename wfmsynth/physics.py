@@ -113,6 +113,33 @@ def tx_ffe(x, taps, spb, pre=1):
     return y
 
 
+def supply_coupling(x, grid, f_ripple_hz=1e6, am_depth=0.0, psij_ps=0.0, supply=None):
+    """Couple a power-supply / PDN rail onto the signal as BOTH amplitude modulation and
+    power-supply-induced jitter (PSIJ), from the SAME supply waveform — so the two artifacts
+    are correlated and a downstream tool can attribute them to the rail.
+
+      f_ripple_hz  frequency of the supply ripple tone (e.g. a switching regulator)
+      am_depth     fractional amplitude modulation by the supply
+      psij_ps      peak timing deviation in ps induced by the supply (PM/jitter)
+      supply       optional supply waveform (same length as x) to use instead of a pure tone
+                   — e.g. switching-activity-correlated ripple for a realistic scenario
+
+    Real signals carry structured supply coupling (we otherwise model only a PDN-transient
+    fault); this is the composable primitive for it."""
+    x = np.asarray(x, float)
+    n = len(x)
+    if supply is None:
+        s = np.sin(2 * np.pi * f_ripple_hz * (np.arange(n) / grid.fs))
+    else:
+        s = np.asarray(supply, float)
+    y = x * (1.0 + am_depth * s)                              # amplitude modulation
+    if psij_ps:
+        dev = (psij_ps * 1e-12 * grid.fs) * s                # timing deviation (samples) ∝ supply
+        idx = np.arange(n)
+        y = np.interp(idx - dev, idx, y, left=y[0], right=y[-1])
+    return y
+
+
 def differential_pair(x, grid=None, skew_ps=0.0, skew_samples=None, gain_imbalance=0.0, cm=0.0):
     """Split a single-ended data waveform into a DIFFERENTIAL pair ``(p, n)`` with real
     non-idealities. p carries +½·data, n carries −½·data; ``differential_mode(p,n) = p−n``
