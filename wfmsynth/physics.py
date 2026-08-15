@@ -111,6 +111,34 @@ def tx_ffe(x, taps, spb, pre=1):
     return y
 
 
+def crosstalk_matrix(x, grid, couplings, baud_offsets=None, seeds=None, kind="fext",
+                     synchronous=False):
+    """Add crosstalk from MULTIPLE aggressors weighted by a coupling vector (one entry per
+    aggressor — a column of the coupling matrix for this victim). Aggressors are ASYNCHRONOUS
+    by default: each runs at a slightly offset baud so its timing is not locked to the victim
+    clock. That matters — a synchronous aggressor's interference is locked to the victim's
+    clock, which a receiver's CDR partly tracks out and which then looks like ISI rather than
+    crosstalk, so a synchronous default quietly makes crosstalk easier to detect than it is.
+    Pass ``synchronous=True`` (or explicit ``baud_offsets``) for the locked case. Returns the
+    victim with every aggressor's coupling summed in."""
+    x = np.asarray(x, float)
+    n = len(x)
+    m = len(couplings)
+    if grid is None or grid.baud is None:
+        raise ValueError("crosstalk_matrix needs grid=Grid(fs, baud, ...)")
+    if baud_offsets is None:
+        baud_offsets = [0.0] * m if synchronous else [0.017 * (i + 1) for i in range(m)]
+    if seeds is None:
+        seeds = [7 + i for i in range(m)]
+    kinds = kind if isinstance(kind, (list, tuple)) else [kind] * m
+    y = x.copy()
+    for c, off, sd, kd in zip(couplings, baud_offsets, seeds, kinds):
+        n_ui = int(round(n * grid.baud * (1.0 + off) / grid.fs))
+        aggr = nrz(n_ui=n_ui, seed=sd, n=n, causal=True)
+        y = y + (crosstalk(x, aggr, coupling=c, kind=kd) - x)
+    return y
+
+
 def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
     """AC-coupling (series cap) as a 1st-order high-pass -> baseline wander/droop
     that grows with run length. fc_frac is the corner as a fraction of Nyquist.

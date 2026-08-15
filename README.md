@@ -225,6 +225,15 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=T
   .nonlinearity(compression=0.04, level_noise=0.005, rise_fall_ratio=1.3)
 ```
 
+## Multiple aggressors (asynchronous by default)
+Crosstalk from a coupling vector; aggressors run at offset bauds so they are not clock-
+locked to the victim (a synchronous default makes crosstalk artificially easy to detect):
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True) \
+  .crosstalk_matrix(couplings=[0.12, 0.08, 0.05])   # async by default; synchronous=True to lock
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
