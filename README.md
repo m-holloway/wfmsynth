@@ -250,6 +250,16 @@ for block in ws.stream_blocks(x, h, chunk=1<<16):   # never a full-length FFT/ou
     write(block)
 ```
 
+## Sim-to-real separability harness
+Ask whether a trivial classifier can tell synthetic from real — and which feature it uses
+(that names the missing physics):
+
+```python
+rep = ws.separability(synthetic_set, real_set, grid)
+rep["best_feature"], rep["best_auc"]   # e.g. ("hf_fraction", 0.98) -> HF content is wrong
+rep["auc"]                             # AUC per feature = the full diagnosis
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

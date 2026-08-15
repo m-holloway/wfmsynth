@@ -682,6 +682,25 @@ _i20 = slice(2000, _g20.n - 2000)
 check("channel_fir + stream_convolve reproduces a linear channel (chunked deep-memory path)",
       np.corrcoef(_sc(_xt20, _h20c, chunk=4096)[_i20], _apply20(_xt20)[_i20])[0, 1] > 0.999)
 
+print("== sim-to-real separability harness: is the synthetic distinguishable, and by what? ==")
+from wfmsynth.simreal import separability as _sep
+_g21 = Grid(fs=200e9, baud=50e9, n=1 << 12); _nui21 = _g21.n // 4
+def _mk21(seed, noise_rms=0.0):
+    _s = (Signal(seed=seed, grid=_g21).carrier("pam4", n_ui=_nui21, pattern="prbs13q",
+                                               causal=True, seed=seed)
+          .lossy(loss_db=6.0, loss_at_ghz=25.0, causal=True))
+    return (_s.digitize(noise_rms=noise_rms) if noise_rms else _s).waveform()
+_A21 = [_mk21(s) for s in range(60)]
+_B21 = [_mk21(s + 5000) for s in range(60)]
+_same = _sep(_A21, _B21, _g21)
+check("two sets from the same distribution are NOT strongly separable (best AUC ~ chance)",
+      _same["best_auc"] < 0.75, f"best {_same['best_feature']}={_same['best_auc']:.3f}")
+_C21 = [_mk21(s, noise_rms=0.08) for s in range(60)]
+_diff = _sep(_A21, _C21, _g21)
+check("an added-noise difference IS separable and the harness names a culprit feature",
+      _diff["best_auc"] > 0.9 and _diff["best_feature"] in _diff["auc"],
+      f"best {_diff['best_feature']}={_diff['best_auc']:.3f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
