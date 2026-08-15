@@ -701,6 +701,29 @@ check("an added-noise difference IS separable and the harness names a culprit fe
       _diff["best_auc"] > 0.9 and _diff["best_feature"] in _diff["auc"],
       f"best {_diff['best_feature']}={_diff['best_auc']:.3f}")
 
+print("== Rx equalization: CTLE peaks/opens a lossy eye; DFE cancels a post-cursor ==")
+from wfmsynth.rx import ctle as _ctle, dfe as _dfe
+_g28 = Grid(fs=200e9, baud=50e9, n=1 << 13); _nui28 = int(_g28.n // _g28.samples_per_ui)
+_no28 = (Signal(seed=1, grid=_g28).carrier("pam4", n_ui=_nui28, pattern="prbs13q", causal=True)
+         .lossy(loss_db=9.0, loss_at_ghz=25.0, causal=True)).waveform()
+_eq28 = _ctle(_no28, _g28, fz_ghz=6.0, fp1_ghz=22.0, fp2_ghz=45.0, dc_gain=1.0)
+check("CTLE opens a lossy-channel eye (receiver-side high-frequency peaking)",
+      _eh(_eq28, _g28) > _eh(_no28, _g28) + 0.02, f"eye {_eh(_no28,_g28):.3f} -> {_eh(_eq28,_g28):.3f}")
+_wc, _hc = sp.freqz(*sp.bilinear([1 / (2 * np.pi * 6e9), 1.0],
+                                 np.polymul([1 / (2 * np.pi * 22e9), 1.0], [1 / (2 * np.pi * 45e9), 1.0]),
+                                 fs=_g28.fs), worN=2048, fs=_g28.fs)
+check("the CTLE response peaks above its DC gain (it is a high-frequency booster)",
+      np.abs(_hc).max() > 1.5 * np.abs(_hc[0]))
+# DFE cancels a known discrete post-cursor -> symbol errors collapse
+_rng28 = np.random.default_rng(0)
+_syms28 = _rng28.choice([-1.0, -1 / 3, 1 / 3, 1.0], 2000)
+_h1 = 0.35
+_rx28 = _syms28.astype(float).copy(); _rx28[1:] += _h1 * _syms28[:-1]      # 1-tap post-cursor ISI
+_err_no = np.mean(_dfe(_rx28, [0.0])[1] != _syms28)
+_err_dfe = np.mean(_dfe(_rx28, [_h1])[1] != _syms28)
+check("DFE cancels the post-cursor it is tuned to (symbol errors collapse to ~0)",
+      _err_dfe < 0.01 and _err_no > 0.1, f"symbol error {_err_no:.3f} -> {_err_dfe:.3f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

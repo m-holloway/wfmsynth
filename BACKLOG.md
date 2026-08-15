@@ -620,7 +620,13 @@ without touching the provenance/round-trip guarantees.
 **Done when:** `Signal.digitize()` calls `instrument.digitize()`; provenance round-trip
 and the #6 contrastive-pair assertions still hold.
 
-### 28. Rx CTLE and DFE (companions to #11 Tx FFE)
+### 28. Rx CTLE and DFE (companions to #11 Tx FFE) — ✅ DONE (v0.22)
+`wfmsynth.rx`: `ctle(x, grid, fz_ghz, fp1_ghz, fp2_ghz, dc_gain)` — a high-frequency-peaking
+analog EQ (zero below poles) that flattens a lossy channel, composable via `Signal.ctle()`;
+`dfe(samples, taps, levels)` — decision-feedback EQ that cancels post-cursor ISI from sliced
+past symbols. validate asserts CTLE peaks above DC and opens a lossy eye, and DFE cancels a
+discrete post-cursor (symbol errors collapse). Completes the Tx-FFE/Rx-EQ equalization story.
+
 Tx FFE landed in v0.10. Add the receive-side equalizers: **CTLE** (a continuous-time
 linear peaking filter — a zero/pole boost that flattens the channel) and **DFE**
 (decision-feedback — cancels post-cursor ISI using sliced past symbols; nonlinear, and
