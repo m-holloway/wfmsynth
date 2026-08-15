@@ -25,3 +25,12 @@ test = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
 include = ["wfmsynth*"]
+
+[tool.pytest.ini_options]
+# The carrier legitimately warns when samples/UI is low enough that the rise-time floor
+# dominates the pulse (physics.py). Many fast tests intentionally use spb=4, where this is
+# expected and understood — scope it out of the test run so a genuinely new warning stands
+# out. Library USERS still see it (this filter applies only under pytest).
+filterwarnings = [
+    "ignore:rise time clamped:RuntimeWarning",
+]
