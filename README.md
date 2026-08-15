@@ -190,6 +190,16 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=T
   .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)   # causal shaping AND causal channel
 ```
 
+## Clock recovery (what the scope records)
+A scope folds the record by a recovered clock; the CDR tracks out jitter below its loop
+bandwidth. The recorded eye depends on the recovery:
+
+```python
+clock, residual = ws.recover_clock(jitter_phase, baud=50e9, loop_bw=1e6, order=2)
+# residual is the timing jitter the eye actually shows (low-freq wander tracked out)
+ws.tracked_out_fraction(jitter_phase, baud=50e9, loop_bw=1e6)   # 0..1
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
