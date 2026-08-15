@@ -419,7 +419,12 @@ at it, and turns this whole list into an evidence-ordered work queue.
 Listed at P2 only because it needs real captures to be useful. In value terms it
 outranks most of this file.
 
-### 22. Critical sampling — document the hazard
+### 22. Critical sampling — document the hazard — ✅ DONE (v0.20)
+README now has a **Critical sampling** section: if the modelled front-end bandwidth sits at
+or near Nyquist, sub-sample interpolation (needed to realign fractional-period repetitions,
+#2) becomes lossy, so pattern-averaging leaves a residual dominated by leftover signal that
+reads as a mysteriously large noise floor rather than an aliasing problem.
+
 *(Documentation, not code.)* Deserves a README paragraph because it is non-obvious and
 it silently degrades downstream analysis: if the modelled front-end bandwidth sits at
 or near the Nyquist frequency of the sample rate, the capture is **critically
