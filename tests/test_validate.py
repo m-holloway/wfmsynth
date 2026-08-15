@@ -657,3 +657,30 @@ def test_nominal_nonlinearity_three_effects():
     s = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=g.n // 4, pattern="prbs13q", causal=True)
          .nonlinearity(compression=0.04, level_noise=0.005, rise_fall_ratio=1.3))
     assert s.waveform().shape == (g.n,)
+
+
+def test_crosstalk_matrix_async_default_and_superposition():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    g = ws.Grid(fs=400e9, baud=50e9, n=1 << 14)
+    spb = int(g.samples_per_ui)
+    x = P.nrz(n_ui=g.n // spb, seed=1, n=g.n, causal=True)
+
+    def conc(y):
+        c = np.abs(y - x)
+        prof = np.array([c[i::spb][:len(c) // spb].mean() for i in range(spb)])
+        return np.ptp(prof) / (prof.mean() + 1e-12)
+
+    # linear superposition in the coupling vector
+    p1 = np.std(ws.crosstalk_matrix(x, g, [0.1]) - x)
+    p2 = np.std(ws.crosstalk_matrix(x, g, [0.2]) - x)
+    assert abs(p2 / p1 - 2.0) < 0.1
+    assert np.std(ws.crosstalk_matrix(x, g, [0.1, 0.1, 0.1]) - x) > p1
+    # async by default is NOT locked to the victim UI; synchronous IS
+    assert conc(ws.crosstalk_matrix(x, g, [0.15])) < 0.3 * conc(
+        ws.crosstalk_matrix(x, g, [0.15], synchronous=True))
+    # composes fluently
+    g2 = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    sig = (ws.Signal(seed=1, grid=g2).carrier("pam4", n_ui=g2.n // 4, pattern="prbs13q", causal=True)
+           .crosstalk_matrix(couplings=[0.12, 0.08]))
+    assert sig.waveform().shape == (g2.n,)

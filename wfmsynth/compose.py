@@ -91,6 +91,11 @@ def _op_tx_ffe(x, p, streams, grid, idx):
     return P.tx_ffe(x, p["taps"], spb, pre=p.get("pre", 1))
 
 
+def _op_crosstalk_matrix(x, p, streams, grid, idx):
+    kw = {k: p[k] for k in ("baud_offsets", "seeds", "kind", "synchronous") if k in p}
+    return P.crosstalk_matrix(x, grid, p["couplings"], **kw)
+
+
 def _op_nonlinearity(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("compression", "level_noise", "rise_fall_ratio", "a_base") if k in p}
     return P.nominal_nonlinearity(x, rng=streams.role(f"nl_noise/{idx}"), **kw)
@@ -128,7 +133,8 @@ def _op_digitize(x, p, streams, grid, idx):
 _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
-         "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity}
+         "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
+         "crosstalk_matrix": _op_crosstalk_matrix}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -178,6 +184,11 @@ class Signal:
     def crosstalk(self, **params):
         """Crosstalk. params: coupling, kind('fext'|'next'), td_frac, aggressor=dict(carrier spec)."""
         return self._add("crosstalk", **params)
+
+    def crosstalk_matrix(self, **params):
+        """Multiple aggressors from a coupling vector, ASYNCHRONOUS by default. params:
+        couplings=[...], kind, baud_offsets, seeds, synchronous."""
+        return self._add("crosstalk_matrix", **params)
 
     def ac_couple(self, **params):
         """AC-coupling. params: fc_frac | fc_hz."""

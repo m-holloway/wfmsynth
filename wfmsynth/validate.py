@@ -627,6 +627,23 @@ _rise = int(np.argmax(_y15[200:400] >= 0.9)); _fall = int(np.argmax(_y15[400:600
 check("rise/fall-ratio != 1 gives asymmetric rise vs fall times",
       _rise != _fall and _rise > 0 and _fall > 0, f"rise->90%={_rise} fall->10%={_fall} samples")
 
+print("== multi-aggressor crosstalk from a coupling matrix, ASYNCHRONOUS by default ==")
+_g16 = Grid(fs=400e9, baud=50e9, n=1 << 14); _spb16 = int(_g16.samples_per_ui)
+_x16 = P.nrz(n_ui=_g16.n // _spb16, seed=1, n=_g16.n, causal=True)
+def _conc(y):     # how concentrated the crosstalk energy is at a fixed victim-UI phase
+    _c = np.abs(y - _x16)
+    _prof = np.array([_c[i::_spb16][:len(_c) // _spb16].mean() for i in range(_spb16)])
+    return np.ptp(_prof) / (_prof.mean() + 1e-12)
+check("total crosstalk power scales with the coupling vector (linear superposition)",
+      abs(np.std(P.crosstalk_matrix(_x16, _g16, [0.2]) - _x16)
+          / (np.std(P.crosstalk_matrix(_x16, _g16, [0.1]) - _x16) + 1e-12) - 2.0) < 0.1)
+check("aggressors are ASYNCHRONOUS by default: crosstalk not locked to the victim UI",
+      _conc(P.crosstalk_matrix(_x16, _g16, [0.15])) < 0.3 * _conc(P.crosstalk_matrix(_x16, _g16, [0.15], synchronous=True)),
+      f"async={_conc(P.crosstalk_matrix(_x16,_g16,[0.15])):.3f} sync={_conc(P.crosstalk_matrix(_x16,_g16,[0.15],synchronous=True)):.3f}")
+check("more aggressors -> more crosstalk power",
+      np.std(P.crosstalk_matrix(_x16, _g16, [0.1, 0.1, 0.1]) - _x16)
+      > np.std(P.crosstalk_matrix(_x16, _g16, [0.1]) - _x16))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

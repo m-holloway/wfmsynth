@@ -341,7 +341,13 @@ imperfect **always**, not only when faulted. Add nominal level nonlinearity,
 level-dependent noise, and rise/fall asymmetry so "nominal" is not suspiciously
 perfect. A too-perfect nominal class is itself a giveaway.
 
-### 16. Multiple aggressors from a coupling matrix
+### 16. Multiple aggressors from a coupling matrix — ✅ DONE (v0.17)
+`physics.crosstalk_matrix(x, grid, couplings, ...)` + `Signal.crosstalk_matrix()` add
+crosstalk from several aggressors weighted by a coupling vector, ASYNCHRONOUS by default
+(each at a slightly offset baud so its timing isn't locked to the victim clock). Pass
+synchronous=True for the locked case. validate asserts power scales with the coupling
+vector and that the async default is NOT locked to the victim UI while synchronous is.
+
 In `ROADMAP.md`. Add: aggressors should be **asynchronous by default**. A synchronous
 aggressor produces interference locked to the victim's clock, which a receiver's CDR
 partly tracks out and which looks like ISI rather than crosstalk — so a synchronous
