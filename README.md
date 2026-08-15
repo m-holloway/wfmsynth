@@ -260,6 +260,17 @@ rep["best_feature"], rep["best_auc"]   # e.g. ("hf_fraction", 0.98) -> HF conten
 rep["auc"]                             # AUC per feature = the full diagnosis
 ```
 
+## Critical sampling (a non-obvious hazard)
+If the modelled front-end bandwidth sits at or near the **Nyquist frequency** of the sample
+rate, the capture is *critically sampled* and any analysis needing sub-sample interpolation
+becomes lossy. The case that bites: pattern-averaging must realign repetitions onto a common
+grid, and with non-integer samples-per-UI the period is fractional. Sub-sample realignment is
+exact only well below Nyquist, so near critical sampling the deterministic part fails to
+cancel and the residual is dominated by leftover **signal** rather than by the impairment you
+were trying to isolate — which reads as a mysteriously large noise floor rather than as an
+aliasing problem. Keep the front-end bandwidth comfortably below Nyquist (oversample), or
+treat near-Nyquist residuals with suspicion.
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
