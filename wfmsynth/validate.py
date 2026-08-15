@@ -607,6 +607,26 @@ check("resonant Γ peaks the reflected content near f0 (frequency-dependent magn
 check("the flat-Γ multi_reflection does NOT concentrate reflection at one frequency",
       np.abs(np.fft.rfft(_yf - _x14))[_b0] / (np.abs(np.fft.rfft(_yf - _x14))[_blo] + 1e-9) < 3.0)
 
+print("== nominal nonlinearity: an unfaulted transmitter is imperfect, not suspiciously perfect ==")
+# compression makes PAM4 level spacing non-uniform (RLM < 1) but mild (still nominal)
+_lv15 = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
+_gaps15 = np.diff(P.nominal_nonlinearity(_lv15, compression=0.06))
+_rlm15 = _gaps15.min() / _gaps15.max()
+check("nominal compression makes PAM4 level spacing non-uniform (RLM<1) but mild (>0.85)",
+      0.85 < _rlm15 < 0.999, f"RLM={_rlm15:.3f}")
+# level-dependent noise: outer levels noisier than inner
+_rng15 = np.random.default_rng(0)
+_out15 = P.nominal_nonlinearity(np.full(20000, 1.0), compression=0.0, level_noise=0.02, rng=_rng15)
+_in15 = P.nominal_nonlinearity(np.full(20000, 1 / 3), compression=0.0, level_noise=0.02, rng=_rng15)
+check("level-dependent noise makes outer levels noisier than inner",
+      _out15.std() > 2.0 * _in15.std(), f"outer={_out15.std():.4f} inner={_in15.std():.4f}")
+# rise/fall asymmetry: a step's rise time differs from its fall time
+_step15 = np.concatenate([np.zeros(200), np.ones(200), np.zeros(200)]).astype(float)
+_y15 = P.nominal_nonlinearity(_step15, compression=0.0, rise_fall_ratio=2.5)
+_rise = int(np.argmax(_y15[200:400] >= 0.9)); _fall = int(np.argmax(_y15[400:600] <= 0.1))
+check("rise/fall-ratio != 1 gives asymmetric rise vs fall times",
+      _rise != _fall and _rise > 0 and _fall > 0, f"rise->90%={_rise} fall->10%={_fall} samples")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

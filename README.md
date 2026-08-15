@@ -217,6 +217,14 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=T
   .resonant_reflect(td_ps=40.0, f0_ghz=30.0, q=10.0, gamma0=0.4)   # |Γ| peaks at f0
 ```
 
+## Nominal imperfections (no class is perfect)
+Real transmitters are imperfect always — a too-perfect nominal class is a giveaway:
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True) \
+  .nonlinearity(compression=0.04, level_noise=0.005, rise_fall_ratio=1.3)
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

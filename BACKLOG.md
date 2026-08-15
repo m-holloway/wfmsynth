@@ -328,7 +328,13 @@ the flat-Γ multi_reflection. (Interacting multi-discontinuity products still vi
 rather than a mirror. Multiple interacting discontinuities also produce products the
 single-lattice model does not.
 
-### 15. Level nonlinearity in the nominal case
+### 15. Level nonlinearity in the nominal case — ✅ DONE (v0.16)
+`physics.nominal_nonlinearity(x, compression, level_noise, rise_fall_ratio)` +
+`Signal.nonlinearity()` add always-on transmitter imperfections: soft level compression
+(PAM4 spacing non-uniform, RLM<1), level-dependent noise (outer levels noisier), and
+rise/fall-time asymmetry — so the unfaulted class isn't suspiciously perfect. validate
+asserts all three (mild RLM<1, outer>inner noise, rise!=fall).
+
 `deep_capture` has an `rlm_compression` *fault*, but the base carrier is exactly
 linear — level ratios are perfect to numerical precision. Real transmitters are
 imperfect **always**, not only when faulted. Add nominal level nonlinearity,
