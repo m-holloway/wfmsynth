@@ -437,7 +437,12 @@ fails to cancel and the residual is dominated by leftover *signal* rather than b
 impairment you were trying to isolate — which reads as a mysteriously large noise
 floor rather than as an aliasing problem.
 
-### 23. CI across platforms
+### 23. CI across platforms — ✅ DONE (v0.21)
+`.github/workflows/ci.yml` runs pytest + `python -m wfmsynth.validate` on a matrix of
+{ubuntu, macos, windows} × Python {3.9, 3.11, 3.12} on every push/PR. The validate gate is
+the declared trust anchor, so it is proven to run everywhere (the Windows cp1252 glyph issue
+that once hid every check after it is already handled by a UTF-8 stdout reconfigure).
+
 The validation suite is the trust anchor, so it should be proven to run everywhere. It
 previously died partway through on a stock Windows console — cp1252 could not encode a
 maths glyph in a detail string, which looks like a hang and hides every check after it.
