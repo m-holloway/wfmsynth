@@ -579,3 +579,35 @@ def test_clock_recovery_jitter_transfer():
     # clock + residual reconstruct the input (definitional)
     clk, res = ws.recover_clock(lf, baud, BW)
     assert np.allclose(clk + res, lf, atol=1e-9)
+
+
+def test_touchstone_roundtrip_and_resonant_channel(tmp_path):
+    import wfmsynth as ws
+    f = np.linspace(1e8, 40e9, 800)
+    notch = 1 - 0.9 * np.exp(-((f - 20e9) / 1.5e9) ** 2)
+    S = np.zeros((len(f), 2, 2), complex)
+    S[:, 1, 0] = notch * np.exp(-1j * 2 * np.pi * f * 20e-12)
+    S[:, 0, 1] = S[:, 1, 0]
+    S[:, 0, 0] = 0.05
+    S[:, 1, 1] = 0.05
+    p = str(tmp_path / "thru.s2p")
+    # every format round-trips (S21, through the 2-port ordering quirk)
+    for fmt, atol in (("RI", 1e-9), ("MA", 1e-6), ("DB", 1e-4)):
+        ws.write_touchstone(p, f, S, fmt=fmt)
+        fr, Sr = ws.read_touchstone(p)
+        assert np.allclose(f, fr) and np.allclose(S[:, 1, 0], Sr[:, 1, 0], atol=atol)
+        assert Sr.shape == (800, 2, 2)
+    # the channel reproduces the resonant notch a monotonic analytic model can't
+    g = ws.Grid(fs=80e9, n=1 << 14)
+    x = np.random.default_rng(0).standard_normal(g.n)
+    y = ws.touchstone_channel(x, p, grid=g)
+    fg = np.fft.rfftfreq(g.n, d=g.dt)
+    Y = np.abs(np.fft.rfft(y))
+    nb = int(np.argmin(np.abs(fg - 20e9)))
+    rb = int(np.argmin(np.abs(fg - 10e9)))
+    assert Y[nb] / (Y[rb] + 1e-9) < 0.2
+    # composes as a fluent op with provenance
+    g2 = ws.Grid(fs=80e9, baud=20e9, n=1 << 13)
+    sig = (ws.Signal(seed=1, grid=g2)
+           .carrier("pam4", n_ui=g2.n // 4, pattern="prbs13q", causal=True).sparam(path=p))
+    assert sig.waveform().shape == (g2.n,) and sig.recipe()["ops"][-1]["op"] == "sparam"

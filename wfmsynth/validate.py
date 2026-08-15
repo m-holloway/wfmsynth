@@ -572,6 +572,27 @@ check("a 2nd-order (type-2) CDR tracks a frequency offset to ~zero; 1st-order le
       np.mean(np.abs(_r2[_N12 // 2:])) < 0.1 * np.mean(np.abs(_r1[_N12 // 2:])),
       f"ramp residual: order1={np.mean(np.abs(_r1[_N12//2:])):.3f} order2={np.mean(np.abs(_r2[_N12//2:])):.4f}")
 
+print("== measured S-parameter channels: Touchstone round-trip + a resonance the model can't ==")
+import tempfile as _tmp, os as _os
+from wfmsynth.sparam import (read_touchstone as _rts, write_touchstone as _wts,
+                             touchstone_channel as _tsc)
+_f13 = np.linspace(1e8, 40e9, 800)
+_notch = 1 - 0.9 * np.exp(-((_f13 - 20e9) / 1.5e9) ** 2)     # resonant null at 20 GHz
+_S13 = np.zeros((len(_f13), 2, 2), complex)
+_S13[:, 1, 0] = _notch * np.exp(-1j * 2 * np.pi * _f13 * 20e-12); _S13[:, 0, 1] = _S13[:, 1, 0]
+_S13[:, 0, 0] = 0.05; _S13[:, 1, 1] = 0.05
+_p13 = _os.path.join(_tmp.mkdtemp(), "thru.s2p")
+_wts(_p13, _f13, _S13, fmt="RI"); _fr, _Sr = _rts(_p13)
+check("Touchstone .s2p round-trips (freqs + S21, incl. the 2-port ordering quirk)",
+      np.allclose(_f13, _fr) and np.allclose(_S13[:, 1, 0], _Sr[:, 1, 0]) and _Sr.shape == (800, 2, 2))
+_g13 = Grid(fs=80e9, n=1 << 14)
+_x13 = np.random.default_rng(0).standard_normal(_g13.n)
+_y13 = _tsc(_x13, _p13, grid=_g13)
+_fg13 = np.fft.rfftfreq(_g13.n, d=_g13.dt); _Y13 = np.abs(np.fft.rfft(_y13))
+_nb = int(np.argmin(np.abs(_fg13 - 20e9))); _rb = int(np.argmin(np.abs(_fg13 - 10e9)))
+check("an S-parameter channel reproduces a resonant notch (the analytic model cannot)",
+      _Y13[_nb] / (_Y13[_rb] + 1e-9) < 0.2, f"|Y(20G)|/|Y(10G)|={_Y13[_nb] / (_Y13[_rb] + 1e-9):.3f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
