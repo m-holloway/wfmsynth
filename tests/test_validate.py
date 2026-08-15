@@ -801,6 +801,28 @@ def test_spread_spectrum_clocking():
     assert sig.waveform().shape == (g.n,)
 
 
+def test_differential_pair_skew_and_mode_conversion():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)
+    nui = int(g.n // g.samples_per_ui)
+    x = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)).waveform()
+    p0, n0 = ws.differential_pair(x, g)
+    assert np.allclose(ws.differential_mode(p0, n0), x)
+    assert np.sqrt(np.mean(ws.common_mode(p0, n0) ** 2)) < 1e-9
+    # skew closes the differential eye and creates common-mode
+    ps, ns = ws.differential_pair(x, g, skew_ps=6.0)
+    assert ws.eye_height(ws.differential_mode(ps, ns), g) < ws.eye_height(x, g) - 0.02
+    assert np.sqrt(np.mean(ws.common_mode(ps, ns) ** 2)) > 0.01
+    # gain imbalance -> data-correlated common-mode (mode conversion)
+    pg, ng = ws.differential_pair(x, g, gain_imbalance=0.1)
+    assert abs(np.corrcoef(ws.common_mode(pg, ng), x)[0, 1]) > 0.95
+    # composes fluently (differential-mode with skew closes the eye in-chain)
+    sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)
+           .intra_pair_skew(skew_ps=6.0))
+    assert ws.eye_height(sig.waveform(), g) < ws.eye_height(x, g) - 0.02
+
+
 # ---------------------------------------------------------------- BACKLOG B2
 def test_rise_time_clamp_is_visible_not_silent():
     """tr_frac must not be silently discarded at realistic samples-per-UI.

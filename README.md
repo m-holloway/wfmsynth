@@ -289,6 +289,14 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=Tr
   .ssc(f_ssc=32e3, spread=0.005, profile="down")
 ```
 
+## Differential-pair non-idealities
+Split to P/N with intra-pair skew, common-mode and mode conversion (real links are differential):
+
+```python
+p, n = ws.differential_pair(x, grid=g, skew_ps=6.0, gain_imbalance=0.05)
+diff, cm = ws.differential_mode(p, n), ws.common_mode(p, n)   # skew closes diff eye, makes cm
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

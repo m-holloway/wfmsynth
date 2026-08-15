@@ -113,6 +113,42 @@ def tx_ffe(x, taps, spb, pre=1):
     return y
 
 
+def differential_pair(x, grid=None, skew_ps=0.0, skew_samples=None, gain_imbalance=0.0, cm=0.0):
+    """Split a single-ended data waveform into a DIFFERENTIAL pair ``(p, n)`` with real
+    non-idealities. p carries +½·data, n carries −½·data; ``differential_mode(p,n) = p−n``
+    recovers the data and ``common_mode(p,n) = (p+n)/2`` is ideally zero. Non-idealities:
+
+      skew_ps / skew_samples  intra-pair (P/N) skew — n is delayed. Skew closes the
+                              differential eye and converts differential energy to
+                              common-mode at every transition.
+      gain_imbalance          fractional P/N amplitude mismatch — direct differential→
+                              common-mode conversion, proportional to the data.
+      cm                      an added common-mode term (scalar or array), e.g. a supply
+                              tone shared by both legs.
+
+    Real links are differential, so P/N skew, common-mode and mode conversion are first-order
+    effects a differential probe sees; this is the primitive for them."""
+    x = np.asarray(x, float)
+    n = len(x)
+    idx = np.arange(n)
+    if skew_samples is None:
+        skew_samples = (skew_ps * 1e-12 * grid.fs) if grid is not None else 0.0
+    xd = np.interp(idx - skew_samples, idx, x, left=x[0], right=x[-1])
+    p = 0.5 * (1.0 + gain_imbalance) * x + cm
+    nn = -0.5 * (1.0 - gain_imbalance) * xd + cm
+    return p, nn
+
+
+def differential_mode(p, n):
+    """The differential signal ``p - n`` (what a differential receiver slices)."""
+    return np.asarray(p, float) - np.asarray(n, float)
+
+
+def common_mode(p, n):
+    """The common-mode signal ``(p + n)/2`` (ideally zero; nonzero from skew/imbalance/CM)."""
+    return 0.5 * (np.asarray(p, float) + np.asarray(n, float))
+
+
 def crosstalk_matrix(x, grid, couplings, baud_offsets=None, seeds=None, kind="fext",
                      synchronous=False):
     """Add crosstalk from MULTIPLE aggressors weighted by a coupling vector (one entry per

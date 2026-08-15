@@ -743,6 +743,23 @@ _S0 = np.abs(np.fft.rfft(_tone31)); _S1 = np.abs(np.fft.rfft(_w31))
 check("SSC spreads the spectrum (its whole purpose: a tone's energy fans out)",
       np.sum(_S1 > 0.05 * _S1.max()) > 2 * np.sum(_S0 > 0.05 * _S0.max()))
 
+print("== differential pair: intra-pair skew closes the eye and makes common-mode; imbalance converts ==")
+_g32 = Grid(fs=200e9, baud=50e9, n=1 << 13); _nui32 = int(_g32.n // _g32.samples_per_ui)
+_x32 = (Signal(seed=1, grid=_g32).carrier("pam4", n_ui=_nui32, pattern="prbs13q", causal=True)).waveform()
+_p0, _n0 = P.differential_pair(_x32, _g32)              # ideal
+check("ideal differential pair recovers the data with ~zero common-mode",
+      np.allclose(P.differential_mode(_p0, _n0), _x32)
+      and np.sqrt(np.mean(P.common_mode(_p0, _n0) ** 2)) < 1e-9)
+_ps, _ns = P.differential_pair(_x32, _g32, skew_ps=6.0)
+check("intra-pair skew closes the differential eye and generates common-mode (zero at skew=0)",
+      _eh(P.differential_mode(_ps, _ns), _g32) < _eh(P.differential_mode(_p0, _n0), _g32) - 0.02
+      and np.sqrt(np.mean(P.common_mode(_ps, _ns) ** 2)) > 0.01)
+_pg, _ng = P.differential_pair(_x32, _g32, gain_imbalance=0.1)
+check("gain imbalance converts differential to common-mode, proportional to the data",
+      abs(np.corrcoef(P.common_mode(_pg, _ng), _x32)[0, 1]) > 0.95
+      and np.sqrt(np.mean(P.common_mode(_pg, _ng) ** 2))
+      > 3 * np.sqrt(np.mean(P.common_mode(_p0, _n0) ** 2)))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

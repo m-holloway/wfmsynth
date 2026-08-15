@@ -106,6 +106,13 @@ def _op_resonant_reflect(x, p, streams, grid, idx):
     return P.resonant_reflection(x, grid=grid, **kw)
 
 
+def _op_intra_pair_skew(x, p, streams, grid, idx):
+    # the differential-mode signal a receiver sees after intra-pair skew / gain imbalance
+    _p, _n = P.differential_pair(x, grid=grid, skew_ps=p.get("skew_ps", 0.0),
+                                 gain_imbalance=p.get("gain_imbalance", 0.0))
+    return P.differential_mode(_p, _n)
+
+
 def _op_ssc(x, p, streams, grid, idx):
     from . import cdr as CDR
     return CDR.apply_ssc(x, grid.fs, f_ssc=p.get("f_ssc", 32e3),
@@ -145,7 +152,8 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
-         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc}
+         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
+         "intra_pair_skew": _op_intra_pair_skew}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -183,6 +191,12 @@ class Signal:
         """Spread-spectrum clocking — triangular clock-frequency modulation (EMI reduction).
         params: f_ssc (Hz), spread (fraction), profile('down'|'up'|'center')."""
         return self._add("ssc", **params)
+
+    def intra_pair_skew(self, **params):
+        """Differential-mode signal after intra-pair (P/N) skew / gain imbalance — closes the
+        differential eye. params: skew_ps, gain_imbalance. (For the full P/N pair and
+        common-mode, use physics.differential_pair.)"""
+        return self._add("intra_pair_skew", **params)
 
     def lossy(self, **params):
         """Lossy channel. params: length_in, tand, causal, or loss_db+loss_at_ghz (real units)."""
