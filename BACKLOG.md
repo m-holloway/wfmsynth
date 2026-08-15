@@ -679,7 +679,14 @@ stresses the CDR (#12). Compose as a timing-modulation source (#35) feeding the 
 **Done when:** validate asserts the CDR tracks the SSC profile within its loop bandwidth while a
 fixed clock shows the triangular wander, and the spectrum shows the spread.
 
-### 32. Differential-pair primitives (intra-pair skew, common-mode, mode conversion)
+### 32. Differential-pair primitives (intra-pair skew, common-mode, mode conversion) — ✅ DONE (v0.24)
+`physics.differential_pair(x, grid, skew_ps, gain_imbalance, cm)` -> `(p, n)` with
+`differential_mode`/`common_mode` helpers; `Signal.intra_pair_skew()` composes the
+differential-mode closure in-chain. Intra-pair skew closes the differential eye and converts
+energy to common-mode; gain imbalance is direct differential->common-mode conversion. validate
+asserts ideal recovery with ~zero common-mode, skew-induced closure + common-mode (zero at
+skew=0), and imbalance producing data-correlated common-mode.
+
 Real links are differential; we model a single-ended trace. Intra-pair (P/N) skew, a common-mode
 term, and differential↔common-mode conversion are first-order — a real differential probe sees all
 three.
