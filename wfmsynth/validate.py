@@ -644,6 +644,23 @@ check("more aggressors -> more crosstalk power",
       np.std(P.crosstalk_matrix(_x16, _g16, [0.1, 0.1, 0.1]) - _x16)
       > np.std(P.crosstalk_matrix(_x16, _g16, [0.1]) - _x16))
 
+print("== noise realism beyond white Gaussian: heavy tails + 1/f structure ==")
+from wfmsynth.impairments import realistic_noise as _rn
+def _exk(a):
+    a = a - a.mean()
+    return np.mean(a ** 4) / (np.mean(a ** 2) ** 2) - 3.0
+_heavy = _rn(1 << 16, df=5.0, rng=np.random.default_rng(0))
+_gauss = _rn(1 << 16, df=200.0, rng=np.random.default_rng(0))
+check("heavy-tailed noise has clear excess kurtosis; near-Gaussian does not",
+      _exk(_heavy) > 1.0 and abs(_exk(_gauss)) < 0.5, f"exkurt heavy={_exk(_heavy):.2f} gauss={_exk(_gauss):.2f}")
+check("both are scaled to the requested RMS",
+      abs(np.sqrt(np.mean(_heavy ** 2)) - 0.01) < 1e-6 and abs(np.sqrt(np.mean(_gauss ** 2)) - 0.01) < 1e-6)
+_pink17 = _rn(1 << 16, df=200.0, pink_frac=0.85, rng=np.random.default_rng(1))
+_P17 = np.abs(np.fft.rfft(_pink17)) ** 2; _f17 = np.fft.rfftfreq(1 << 16)
+_lo = _P17[(_f17 > 1e-3) & (_f17 < 1e-2)].mean(); _hi = _P17[(_f17 > 0.1) & (_f17 < 0.4)].mean()
+check("a 1/f (pink) fraction puts far more power at low frequency than high",
+      _lo / _hi > 5.0, f"low/high band power = {_lo / _hi:.1f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
