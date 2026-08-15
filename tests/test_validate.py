@@ -611,3 +611,25 @@ def test_touchstone_roundtrip_and_resonant_channel(tmp_path):
     sig = (ws.Signal(seed=1, grid=g2)
            .carrier("pam4", n_ui=g2.n // 4, pattern="prbs13q", causal=True).sparam(path=p))
     assert sig.waveform().shape == (g2.n,) and sig.recipe()["ops"][-1]["op"] == "sparam"
+
+
+def test_resonant_reflection_is_frequency_dependent():
+    import wfmsynth as ws
+    g = ws.Grid(fs=100e9, n=1 << 14)
+    f = np.fft.rfftfreq(g.n, d=g.dt)
+    x = np.random.default_rng(0).standard_normal(g.n)
+    yr = ws.resonant_reflection(x, grid=g, td_ps=50.0, f0_ghz=25.0, q=12.0, gamma0=0.5)
+    yf = ws.physics.multi_reflection(x, grid=g, td_ps=50.0, gamma_s=0.5, gamma_l=0.0, n_bounce=1)
+    Rr = np.abs(np.fft.rfft(yr - x))
+    Rf = np.abs(np.fft.rfft(yf - x))
+    b0 = int(np.argmin(np.abs(f - 25e9)))
+    blo = int(np.argmin(np.abs(f - 5e9)))
+    # resonant Γ concentrates the reflection near f0; flat Γ does not
+    assert Rr[b0] / (Rr[blo] + 1e-9) > 5.0
+    assert abs(f[int(np.argmax(Rr))] - 25e9) < 3e9
+    assert Rf[b0] / (Rf[blo] + 1e-9) < 3.0
+    # composes fluently
+    g2 = ws.Grid(fs=100e9, baud=25e9, n=1 << 13)
+    sig = (ws.Signal(seed=1, grid=g2).carrier("pam4", n_ui=g2.n // 4, pattern="prbs13q", causal=True)
+           .resonant_reflect(td_ps=40.0, f0_ghz=30.0, q=10.0, gamma0=0.4))
+    assert sig.waveform().shape == (g2.n,)

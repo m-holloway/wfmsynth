@@ -125,6 +125,32 @@ def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
     return signal.sosfiltfilt(sos, np.asarray(x, float))
 
 
+def resonant_reflection(x, grid=None, td_ps=None, td_frac=0.12, f0_ghz=None, f0_frac=0.25,
+                        q=10.0, gamma0=0.4):
+    """A single RESONANT discontinuity. `multi_reflection` uses a frequency-flat Γ; real
+    discontinuities (a stub, an open) resonate — their reflection coefficient has
+    frequency-dependent magnitude AND phase, peaking near a resonant frequency. Here Γ(f)
+    is a 2nd-order band-pass shape peaking at f0 with quality `q`, delayed by td.
+
+    Absolute units: pass grid=Grid(...) + td_ps + f0_ghz. Otherwise td_frac (of the record)
+    and f0_frac (of Nyquist) are used. `gamma0` scales the peak reflection."""
+    x = np.asarray(x, float)
+    n = len(x)
+    if grid is not None:
+        if td_ps is None or f0_ghz is None:
+            raise ValueError("grid path needs td_ps and f0_ghz")
+        f = np.fft.rfftfreq(n, d=grid.dt)
+        f0 = f0_ghz * 1e9
+        phase = 2 * np.pi * f * (td_ps * 1e-12)
+    else:
+        f = np.fft.rfftfreq(n, 1.0)                       # cycles/sample, 0..0.5
+        f0 = f0_frac * 0.5
+        phase = 2 * np.pi * f * (td_frac * n)
+    s = 1j * (f / f0)
+    G = gamma0 * (s / q) / (s ** 2 + s / q + 1.0)         # |Γ| peaks at f0, with phase
+    return np.fft.irfft(np.fft.rfft(x) * (1.0 + G * np.exp(-1j * phase)), n)
+
+
 def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
                      td_samples=None, td_ps=None, grid=None):
     """Transmission-line bounce diagram: received = incident + reflected train.

@@ -316,7 +316,13 @@ analytic √f + f loss model cannot produce resonances, fibre-weave periodicity,
 connector structure, or interacting multiple bounces. Real `.sNp` files give all of it.
 Keep the analytic model as the dependency-free default.
 
-### 14. Reflection realism beyond a flat coefficient
+### 14. Reflection realism beyond a flat coefficient — ✅ DONE (v0.15)
+`physics.resonant_reflection(x, grid, td_ps, f0_ghz, q, gamma0)` + `Signal.resonant_reflect()`
+model a discontinuity whose reflection coefficient Γ(f) is frequency-dependent (a 2nd-order
+band-pass magnitude peaking at f0 with quality q, plus phase) — a stub/open that resonates
+rather than mirroring flatly. validate asserts the reflected content peaks near f0, unlike
+the flat-Γ multi_reflection. (Interacting multi-discontinuity products still via #13 S-params.)
+
 `multi_reflection` uses a real, frequency-flat Γ. Real discontinuities are **resonant**
 — frequency-dependent magnitude *and* phase — and a stub behaves like a resonator
 rather than a mirror. Multiple interacting discontinuities also produce products the
