@@ -106,6 +106,11 @@ def _op_resonant_reflect(x, p, streams, grid, idx):
     return P.resonant_reflection(x, grid=grid, **kw)
 
 
+def _op_ctle(x, p, streams, grid, idx):
+    from . import rx as RX
+    return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
+
+
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
     if "path" in p:
@@ -134,7 +139,7 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
-         "crosstalk_matrix": _op_crosstalk_matrix}
+         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -162,6 +167,11 @@ class Signal:
         are per-UI weights, `pre` the number of pre-cursor taps. Puts a deliberate
         pre-cursor in the pulse response and de-emphasizes post-cursor ISI."""
         return self._add("tx_ffe", taps=list(taps), pre=pre, **params)
+
+    def ctle(self, **params):
+        """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.
+        params: fz_ghz, fp1_ghz, fp2_ghz, dc_gain."""
+        return self._add("ctle", **params)
 
     def lossy(self, **params):
         """Lossy channel. params: length_in, tand, causal, or loss_db+loss_at_ghz (real units)."""

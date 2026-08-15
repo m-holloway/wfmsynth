@@ -271,6 +271,15 @@ were trying to isolate — which reads as a mysteriously large noise floor rathe
 aliasing problem. Keep the front-end bandwidth comfortably below Nyquist (oversample), or
 treat near-Nyquist residuals with suspicion.
 
+## Receiver equalization (CTLE + DFE)
+Real receivers equalize before slicing — CTLE (analog peaking) and DFE (decision feedback):
+
+```python
+sig = ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True) \
+        .lossy(loss_db=9, loss_at_ghz=25, causal=True).ctle(fz_ghz=6, fp1_ghz=22, fp2_ghz=45)
+eq, decisions = ws.dfe(per_symbol_samples, taps=[0.35])   # cancel a post-cursor
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

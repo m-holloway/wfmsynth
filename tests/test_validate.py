@@ -749,3 +749,25 @@ def test_simreal_separability_harness():
     C = [mk(s, noise_rms=0.08) for s in range(60)]
     diff = ws.separability(A, C, g)
     assert diff["best_auc"] > 0.9 and diff["best_feature"] in diff["auc"]
+
+
+def test_rx_ctle_opens_eye_and_dfe_cancels_postcursor():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)
+    nui = int(g.n // g.samples_per_ui)
+    no = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)
+          .lossy(loss_db=9.0, loss_at_ghz=25.0, causal=True)).waveform()
+    eq = ws.ctle(no, g, fz_ghz=6.0, fp1_ghz=22.0, fp2_ghz=45.0, dc_gain=1.0)
+    assert ws.eye_height(eq, g) > ws.eye_height(no, g) + 0.02
+    # composes as a fluent op after the channel
+    sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)
+           .lossy(loss_db=9.0, loss_at_ghz=25.0, causal=True)
+           .ctle(fz_ghz=6.0, fp1_ghz=22.0, fp2_ghz=45.0))
+    assert ws.eye_height(sig.waveform(), g) > ws.eye_height(no, g) + 0.02
+    # DFE cancels a known post-cursor
+    rng = np.random.default_rng(0)
+    syms = rng.choice([-1.0, -1 / 3, 1 / 3, 1.0], 2000)
+    rx = syms.astype(float).copy()
+    rx[1:] += 0.35 * syms[:-1]
+    assert np.mean(ws.dfe(rx, [0.0])[1] != syms) > 0.1
+    assert np.mean(ws.dfe(rx, [0.35])[1] != syms) < 0.01
