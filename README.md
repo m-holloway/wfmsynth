@@ -241,6 +241,15 @@ Heavy tails and 1/f structure — real noise is not one flat Gaussian:
 n = ws.realistic_noise(1<<16, rms=1e-3, df=5, pink_frac=0.3)   # heavy tails + some 1/f
 ```
 
+## Streaming (deep-memory records)
+Apply a channel to a multi-megapoint record in bounded memory (overlap-save):
+
+```python
+h = ws.channel_fir(lambda a: ws.physics.lossy_channel(a, length_in=8, causal=True), n_taps=512)
+for block in ws.stream_blocks(x, h, chunk=1<<16):   # never a full-length FFT/output
+    write(block)
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
