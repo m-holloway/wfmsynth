@@ -704,3 +704,24 @@ def test_realistic_noise_heavy_tails_and_pink():
     lo = P[(f > 1e-3) & (f < 1e-2)].mean()
     hi = P[(f > 0.1) & (f < 0.4)].mean()
     assert lo / hi > 5.0
+
+
+def test_streaming_convolution_matches_full_and_is_chunked():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    n = 1 << 18
+    x = np.random.default_rng(0).standard_normal(n)
+    h = np.exp(-((np.arange(65) - 32) / 8.0) ** 2)
+    h /= h.sum()
+    ref = np.convolve(x, h)[:n]
+    assert np.allclose(ws.stream_convolve(x, h, chunk=8192), ref, atol=1e-9)
+    # generator yields the whole record in chunks (>1 block, bounded working set)
+    blocks = list(ws.stream_blocks(x, h, chunk=8192))
+    assert sum(len(b) for b in blocks) == n and len(blocks) > 1
+    # a linear channel applied via its FIR (chunked) matches the direct channel interior
+    g = ws.Grid(fs=100e9, n=1 << 15)
+    apply = lambda a: P.lossy_channel(a, length_in=8.0, tand=0.02, causal=True)
+    hc = ws.channel_fir(apply, n_taps=400)
+    xt = P.nrz(n_ui=g.n // 8, seed=1, n=g.n, causal=True)
+    i = slice(2000, g.n - 2000)
+    assert np.corrcoef(ws.stream_convolve(xt, hc, chunk=4096)[i], apply(xt)[i])[0, 1] > 0.999

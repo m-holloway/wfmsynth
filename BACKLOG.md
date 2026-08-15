@@ -389,7 +389,13 @@ any carrier claiming a standard pattern, assert the symbol sequence autocorrelat
 single sharp peak at the declared period. That is the property an analyser actually
 depends on, and it is cheap to check.
 
-### 20. Streaming / chunked generation
+### 20. Streaming / chunked generation — ✅ DONE (v0.19)
+`wfmsynth.stream`: `stream_convolve(x, h, chunk)` and `stream_blocks(x, h, chunk)` apply a
+channel FIR by overlap-save FFT convolution, holding only ~chunk+len(h) samples live (no
+full-length FFT). `channel_fir(apply_fn, n_taps)` extracts a linear channel's impulse
+response for use with them. validate asserts the streamed result equals the full linear
+convolution, is produced in chunks, and reproduces a lossy channel in the interior.
+
 A multi-megapoint record needs several float64 arrays live at once, and the
 frequency-domain channel needs a full-length FFT — the memory bottleneck. Overlap-add
 or overlap-save convolution plus chunked or memory-mapped output would remove it.

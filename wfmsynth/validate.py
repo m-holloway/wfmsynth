@@ -661,6 +661,27 @@ _lo = _P17[(_f17 > 1e-3) & (_f17 < 1e-2)].mean(); _hi = _P17[(_f17 > 0.1) & (_f1
 check("a 1/f (pink) fraction puts far more power at low frequency than high",
       _lo / _hi > 5.0, f"low/high band power = {_lo / _hi:.1f}")
 
+print("== streaming / chunked convolution: bounded memory, matches the full convolution ==")
+from wfmsynth.stream import (stream_convolve as _sc, stream_blocks as _sb,
+                             channel_fir as _cfir)
+_n20 = 1 << 18
+_x20 = np.random.default_rng(0).standard_normal(_n20)
+_h20 = np.exp(-((np.arange(65) - 32) / 8.0) ** 2); _h20 /= _h20.sum()
+_ref20 = np.convolve(_x20, _h20)[:_n20]
+check("overlap-save stream_convolve equals the full linear convolution (bounded memory)",
+      np.allclose(_sc(_x20, _h20, chunk=8192), _ref20, atol=1e-9),
+      f"max err {np.max(np.abs(_sc(_x20, _h20, chunk=8192) - _ref20)):.1e}")
+check("stream_blocks yields the whole record in chunks (never a full-length output/FFT)",
+      sum(len(_b) for _b in _sb(_x20, _h20, chunk=8192)) == _n20)
+# a linear channel applied via its FIR (chunked) matches the direct channel in the interior
+_g20 = Grid(fs=100e9, n=1 << 15)
+_apply20 = lambda a: P.lossy_channel(a, length_in=8.0, tand=0.02, causal=True)
+_h20c = _cfir(_apply20, n_taps=400)
+_xt20 = P.nrz(n_ui=_g20.n // 8, seed=1, n=_g20.n, causal=True)
+_i20 = slice(2000, _g20.n - 2000)
+check("channel_fir + stream_convolve reproduces a linear channel (chunked deep-memory path)",
+      np.corrcoef(_sc(_xt20, _h20c, chunk=4096)[_i20], _apply20(_xt20)[_i20])[0, 1] > 0.999)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
