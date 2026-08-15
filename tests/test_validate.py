@@ -725,3 +725,27 @@ def test_streaming_convolution_matches_full_and_is_chunked():
     xt = P.nrz(n_ui=g.n // 8, seed=1, n=g.n, causal=True)
     i = slice(2000, g.n - 2000)
     assert np.corrcoef(ws.stream_convolve(xt, hc, chunk=4096)[i], apply(xt)[i])[0, 1] > 0.999
+
+
+def test_simreal_separability_harness():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    nui = g.n // 4
+
+    def mk(seed, noise_rms=0.0):
+        s = (ws.Signal(seed=seed, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q",
+                                                  causal=True, seed=seed)
+             .lossy(loss_db=6.0, loss_at_ghz=25.0, causal=True))
+        return (s.digitize(noise_rms=noise_rms) if noise_rms else s).waveform()
+
+    A = [mk(s) for s in range(60)]
+    B = [mk(s + 5000) for s in range(60)]
+    same = ws.separability(A, B, g)
+    assert same["best_auc"] < 0.75                       # same distribution -> not separable
+    # feature vector is a stable, common dict
+    fv = ws.feature_vector(A[0], g)
+    assert set(same["auc"]) == set(fv) and 0.5 <= same["best_auc"] <= 1.0
+    # an added-noise difference is separable and a culprit feature is named
+    C = [mk(s, noise_rms=0.08) for s in range(60)]
+    diff = ws.separability(A, C, g)
+    assert diff["best_auc"] > 0.9 and diff["best_feature"] in diff["auc"]

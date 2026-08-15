@@ -402,7 +402,14 @@ or overlap-save convolution plus chunked or memory-mapped output would remove it
 Deep-memory captures are the headline use case, so this matters before anyone reaches
 for a hundred-megapoint record.
 
-### 21. Sim-to-real separability harness
+### 21. Sim-to-real separability harness — ✅ DONE (v0.20)
+`wfmsynth.simreal`: `feature_vector(x)` (amplitude/shape/spectral descriptors) and
+`separability(set_a, set_b)` — a trivial per-feature rank-AUC classifier (numpy only, no
+sklearn) that reports whether two sets are distinguishable AND which feature separates them
+(hence the missing physics). validate asserts same-distribution sets are ~indistinguishable
+(best AUC<0.75) while an added-noise difference is separable and a culprit is named. Feed it
+real captures to evidence-order the rest of this backlog.
+
 A tool rather than a physics primitive, but it is what tells you whether any of the
 above matters. Given a set of synthetic waveforms and a set of real captures, compute a
 common feature vector and ask whether a trivial classifier can separate them — and if
