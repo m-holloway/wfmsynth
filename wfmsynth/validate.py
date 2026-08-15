@@ -555,6 +555,23 @@ check("PRBS13Q symbol sequence locks to a single sharp peak at its declared peri
       _lag19 == 8191 and _peak19 > 0.95 and _peak19 > 2 * _next19,
       f"period={_lag19} peak={_peak19:.3f} next={_next19:.3f}")
 
+print("== clock recovery: a CDR tracks out jitter below its loop bandwidth (what a scope shows) ==")
+from wfmsynth.cdr import recover_clock as _rc, tracked_out_fraction as _tof
+_baud12 = 50e9; _N12 = 1 << 16; _t12 = np.arange(_N12) / _baud12; _BW12 = 1e6
+def _jtf(fm, bw=_BW12, order=2):
+    _ph = np.sin(2 * np.pi * fm * _t12)
+    return np.ptp(_rc(_ph, _baud12, bw, order)[1][_N12 // 2:]) / np.ptp(_ph[_N12 // 2:])
+check("CDR jitter transfer is high-pass: low-freq jitter tracked out, high-freq passed",
+      _jtf(1e5) < 0.1 and _jtf(1e7) > 0.9, f"res/in @100kHz={_jtf(1e5):.3f} @10MHz={_jtf(1e7):.3f}")
+check("a wider loop bandwidth tracks out MORE low-frequency jitter",
+      _tof(np.sin(2 * np.pi * 3e5 * _t12), _baud12, 3e6) > _tof(np.sin(2 * np.pi * 3e5 * _t12), _baud12, 3e5) + 0.2,
+      f"tracked-out @300kHz: BW3MHz={_tof(np.sin(2*np.pi*3e5*_t12),_baud12,3e6):.2f} BW300kHz={_tof(np.sin(2*np.pi*3e5*_t12),_baud12,3e5):.2f}")
+_ramp12 = np.arange(_N12) * 2e-4     # a frequency offset (linear phase ramp)
+_r1 = _rc(_ramp12, _baud12, _BW12, 1)[1]; _r2 = _rc(_ramp12, _baud12, _BW12, 2)[1]
+check("a 2nd-order (type-2) CDR tracks a frequency offset to ~zero; 1st-order leaves a lag",
+      np.mean(np.abs(_r2[_N12 // 2:])) < 0.1 * np.mean(np.abs(_r1[_N12 // 2:])),
+      f"ramp residual: order1={np.mean(np.abs(_r1[_N12//2:])):.3f} order2={np.mean(np.abs(_r2[_N12//2:])):.4f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

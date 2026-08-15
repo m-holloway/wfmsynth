@@ -553,3 +553,29 @@ def test_pattern_lock_single_sharp_peak_at_declared_period():
     m[:20] = False
     nxt = float(np.max(ac[:9001][m]))
     assert lag == 8191 and peak > 0.95 and peak > 2 * nxt     # single dominant peak at 8191
+
+
+def test_clock_recovery_jitter_transfer():
+    import wfmsynth as ws
+    baud = 50e9
+    N = 1 << 16
+    t = np.arange(N) / baud
+    BW = 1e6
+
+    def jtf(fm, bw=BW, order=2):
+        ph = np.sin(2 * np.pi * fm * t)
+        return np.ptp(ws.recover_clock(ph, baud, bw, order)[1][N // 2:]) / np.ptp(ph[N // 2:])
+
+    # high-pass jitter transfer: below the loop bandwidth is tracked out, above is passed
+    assert jtf(1e5) < 0.1 and jtf(1e7) > 0.9
+    # a wider loop bandwidth tracks out more low-frequency jitter
+    lf = np.sin(2 * np.pi * 3e5 * t)
+    assert ws.tracked_out_fraction(lf, baud, 3e6) > ws.tracked_out_fraction(lf, baud, 3e5) + 0.2
+    # 2nd-order tracks a frequency offset (phase ramp) to ~zero; 1st-order leaves a lag
+    ramp = np.arange(N) * 2e-4
+    r1 = ws.recover_clock(ramp, baud, BW, order=1)[1]
+    r2 = ws.recover_clock(ramp, baud, BW, order=2)[1]
+    assert np.mean(np.abs(r2[N // 2:])) < 0.1 * np.mean(np.abs(r1[N // 2:]))
+    # clock + residual reconstruct the input (definitional)
+    clk, res = ws.recover_clock(lf, baud, BW)
+    assert np.allclose(clk + res, lf, atol=1e-9)

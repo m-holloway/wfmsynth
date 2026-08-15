@@ -273,7 +273,15 @@ high-speed transmitters almost always run multi-tap FFE, which puts a deliberate
 qualitatively different pulse-response shape from anything on a real link — and pulse
 response is the first thing an engineer looks at.
 
-### 12. Clock recovery as part of "what the scope records"
+### 12. Clock recovery as part of "what the scope records" — ✅ DONE (v0.13)
+`wfmsynth.cdr.recover_clock(phase, baud, loop_bw, order, damping)` is the standard
+linearized-PLL jitter transfer: returns the recovered-clock phase (low-pass) and the
+residual timing the eye actually shows (high-pass, corner ~loop_bw). `jitter_transfer`
+and `tracked_out_fraction` are conveniences. validate asserts the transfer is high-pass
+(sub-BW jitter tracked out, supra-BW passed), a wider loop BW tracks out more, and a
+2nd-order (type-2) loop tracks a frequency offset to ~zero while 1st-order leaves a lag.
+Waveform-level fold/resample-onto-recovered-clock logged as #29.
+
 An instrument does not show you the raw record; it shows you the record folded by a
 recovered clock. The CDR choice — constant-frequency versus first/second/third-order
 PLL, and its loop bandwidth — materially changes what an eye looks like and how much
@@ -520,3 +528,13 @@ the #8 alignment.
 
 **Done when:** validate asserts CTLE peaking opens a lossy-channel
 eye, and DFE removes a discrete post-cursor echo it is tuned to.
+
+### 29. Waveform-level clock-recovery fold (companion to #12)
+#12 delivers the CDR jitter transfer on a per-symbol phase sequence. Add a waveform-level
+`cdr.recover_and_fold(x, grid, loop_bw, order)` that detects per-symbol timing error from
+mid-level crossings, runs it through the clock transfer, and RESAMPLES x onto the recovered
+symbol instants -- the literal 'record folded by the recovered clock' -- so a measured eye
+can be reported alongside the recovery that produced it (ties to #8 ground_truth).
+
+**Done when:** validate asserts the CDR-folded eye of a waveform with low-frequency jitter
+is more open than the fixed-grid eye, and equal for high-frequency jitter.
