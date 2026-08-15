@@ -14,7 +14,7 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.17.0"
+__version__ = "0.18.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, sparam)
@@ -23,7 +23,7 @@ from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, resonant_reflection
 from .grid import Grid
 from .streams import Streams
 from .impairments import (IMPAIRMENTS, apply_impairment, domain_randomize,
-                          mix_at_constant_power, burst_gate, apply_gated)
+                          mix_at_constant_power, burst_gate, apply_gated, realistic_noise)
 from .grammar import sample, generate, CARRIERS, ENVELOPES
 from .pam4 import deep_capture, PATHOLOGIES
 from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_adc,
@@ -43,7 +43,7 @@ __all__ = [
     "N", "T", "Grid", "Jitter", "Streams", "tx_ffe", "carrier_symbols", "resonant_reflection",
     "nominal_nonlinearity", "crosstalk_matrix",
     "IMPAIRMENTS", "apply_impairment", "domain_randomize",
-    "mix_at_constant_power", "burst_gate", "apply_gated",
+    "mix_at_constant_power", "burst_gate", "apply_gated", "realistic_noise",
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "interleave_adc", "shaped_noise_floor", "clip_adc", "quantize_adc", "digitize_adc",
     "Signal", "dataset",

@@ -684,3 +684,23 @@ def test_crosstalk_matrix_async_default_and_superposition():
     sig = (ws.Signal(seed=1, grid=g2).carrier("pam4", n_ui=g2.n // 4, pattern="prbs13q", causal=True)
            .crosstalk_matrix(couplings=[0.12, 0.08]))
     assert sig.waveform().shape == (g2.n,)
+
+
+def test_realistic_noise_heavy_tails_and_pink():
+    import wfmsynth as ws
+
+    def exk(a):
+        a = a - a.mean()
+        return np.mean(a ** 4) / (np.mean(a ** 2) ** 2) - 3.0
+
+    heavy = ws.realistic_noise(1 << 16, df=5.0, rng=np.random.default_rng(0))
+    gauss = ws.realistic_noise(1 << 16, df=200.0, rng=np.random.default_rng(0))
+    assert exk(heavy) > 1.0 and abs(exk(gauss)) < 0.5              # heavy tails vs Gaussian
+    assert abs(np.sqrt(np.mean(heavy ** 2)) - 0.01) < 1e-6         # RMS honored
+    # 1/f fraction concentrates power at low frequency
+    pink = ws.realistic_noise(1 << 16, df=200.0, pink_frac=0.85, rng=np.random.default_rng(1))
+    P = np.abs(np.fft.rfft(pink)) ** 2
+    f = np.fft.rfftfreq(1 << 16)
+    lo = P[(f > 1e-3) & (f < 1e-2)].mean()
+    hi = P[(f > 0.1) & (f < 0.4)].mean()
+    assert lo / hi > 5.0

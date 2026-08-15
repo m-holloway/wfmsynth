@@ -353,7 +353,12 @@ aggressor produces interference locked to the victim's clock, which a receiver's
 partly tracks out and which looks like ISI rather than crosstalk — so a synchronous
 default quietly makes crosstalk easier to detect than it really is.
 
-### 17. Noise realism beyond white Gaussian
+### 17. Noise realism beyond white Gaussian — ✅ DONE (v0.18)
+`impairments.realistic_noise(n, rms, df, pink_frac)` — Student-t HEAVY TAILS (df -> large
+recovers Gaussian) optionally mixed with a 1/f (pink) fraction for low-frequency structure.
+validate asserts clear excess kurtosis vs Gaussian and a 1/f low>>high power split.
+(Level-dependent noise is in physics.nominal_nonlinearity #15; a Poisson shot term logged #30.)
+
 Non-Gaussian tails, 1/f at low frequency, level-dependent and shot-noise terms. Real
 noise is not one flat Gaussian, and anything learning a noise-character axis will key
 on the difference.
@@ -612,3 +617,9 @@ can be reported alongside the recovery that produced it (ties to #8 ground_truth
 
 **Done when:** validate asserts the CDR-folded eye of a waveform with low-frequency jitter
 is more open than the fixed-grid eye, and equal for high-frequency jitter.
+
+### 30. Shot-noise term for realistic_noise (companion to #17)
+#17 covers heavy tails + 1/f. Add a Poisson shot-noise term (discrete arrivals -> skew, and
+variance proportional to rate) as an optional component, for detectors/optical front ends.
+
+**Done when:** validate asserts the shot component is skewed and its variance scales with rate.

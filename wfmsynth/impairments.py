@@ -65,6 +65,27 @@ def apply_impairment(imp, x, rng):
     return x
 
 
+def realistic_noise(n, rms=0.01, df=5.0, pink_frac=0.0, rng=None):
+    """Noise beyond a flat white Gaussian — real front-end noise is not one clean Gaussian,
+    and anything learning a noise-character axis keys on the difference.
+
+      df         Student-t degrees of freedom -> HEAVY TAILS (excess kurtosis); df -> large
+                 recovers Gaussian. Real noise has occasional large excursions a Gaussian lacks.
+      pink_frac  fraction of the power that is 1/f (pink) rather than white -> low-frequency
+                 structure. 0 = purely broadband, 1 = purely 1/f.
+
+    Returns length-``n`` noise scaled to ``rms``. Pairs with the level-dependent term in
+    ``physics.nominal_nonlinearity`` for a full non-ideal noise picture."""
+    rng = rng or np.random.default_rng()
+    w = rng.standard_t(df, n)
+    w = w / (w.std() + 1e-12)
+    if pink_frac > 0:
+        from .instrument import shaped_noise_floor
+        pink = shaped_noise_floor(n, rms=1.0, shape="pink", rng=rng)
+        w = np.sqrt(1.0 - pink_frac) * w + np.sqrt(pink_frac) * pink
+    return rms * w / (w.std() + 1e-12)
+
+
 def burst_gate(n, intervals, edge_frac=0.1):
     """A per-sample gate weight in [0, 1], nonzero only inside the given ``(start, width)``
     intervals (in samples), with raised-cosine on/off ramps (``edge_frac`` of each width)

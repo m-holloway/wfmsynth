@@ -234,6 +234,13 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=T
   .crosstalk_matrix(couplings=[0.12, 0.08, 0.05])   # async by default; synchronous=True to lock
 ```
 
+## Noise beyond white Gaussian
+Heavy tails and 1/f structure — real noise is not one flat Gaussian:
+
+```python
+n = ws.realistic_noise(1<<16, rms=1e-3, df=5, pink_frac=0.3)   # heavy tails + some 1/f
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
