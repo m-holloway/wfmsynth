@@ -106,6 +106,11 @@ def _op_resonant_reflect(x, p, streams, grid, idx):
     return P.resonant_reflection(x, grid=grid, **kw)
 
 
+def _op_supply_coupling(x, p, streams, grid, idx):
+    kw = {k: p[k] for k in ("f_ripple_hz", "am_depth", "psij_ps", "supply") if k in p}
+    return P.supply_coupling(x, grid, **kw)
+
+
 def _op_intra_pair_skew(x, p, streams, grid, idx):
     # the differential-mode signal a receiver sees after intra-pair skew / gain imbalance
     _p, _n = P.differential_pair(x, grid=grid, skew_ps=p.get("skew_ps", 0.0),
@@ -153,7 +158,7 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
-         "intra_pair_skew": _op_intra_pair_skew}
+         "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -191,6 +196,11 @@ class Signal:
         """Spread-spectrum clocking — triangular clock-frequency modulation (EMI reduction).
         params: f_ssc (Hz), spread (fraction), profile('down'|'up'|'center')."""
         return self._add("ssc", **params)
+
+    def supply_coupling(self, **params):
+        """Power-supply / PDN coupling — correlated AM + PSIJ from a supply rail. params:
+        f_ripple_hz, am_depth, psij_ps, supply(optional array)."""
+        return self._add("supply_coupling", **params)
 
     def intra_pair_skew(self, **params):
         """Differential-mode signal after intra-pair (P/N) skew / gain imbalance — closes the

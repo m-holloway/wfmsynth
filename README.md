@@ -297,6 +297,15 @@ p, n = ws.differential_pair(x, grid=g, skew_ps=6.0, gain_imbalance=0.05)
 diff, cm = ws.differential_mode(p, n), ws.common_mode(p, n)   # skew closes diff eye, makes cm
 ```
 
+## Power-supply / PDN coupling
+A supply rail coupling onto the signal as correlated amplitude modulation + supply-induced
+jitter (a rich root-cause target that downstream tools compose):
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True) \
+  .supply_coupling(f_ripple_hz=1e6, am_depth=0.03, psij_ps=2.0)   # AM + PSIJ from one rail
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
