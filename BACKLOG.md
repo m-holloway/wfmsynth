@@ -666,7 +666,13 @@ harness against real captures to re-order against evidence.
 
 ### Tier 1 — near-universal in real links; a synthetic set without them is trivially separable
 
-### 31. Spread-spectrum clocking (SSC)
+### 31. Spread-spectrum clocking (SSC) — ✅ DONE (v0.23)
+`cdr.ssc_phase(n, fs, f_ssc, spread, profile)` produces the triangular clock-timing wander;
+`cdr.apply_ssc(x, fs, ...)` warps a waveform onto the SSC-modulated clock; `Signal.ssc()`
+composes it. validate asserts down-spread deviation stays in [-spread,0] and is periodic at
+f_ssc, a wide-loop CDR tracks the wander out while a narrow one doesn't, and SSC spreads a
+tone's spectrum (its EMI-reduction purpose).
+
 Triangular ~30–33 kHz, ~0.5% down-spread FM of the symbol clock — mandatory/ubiquitous in
 PCIe/USB/SATA/DisplayPort for EMI. A large, structured spectral+timing signature that directly
 stresses the CDR (#12). Compose as a timing-modulation source (#35) feeding the carrier.

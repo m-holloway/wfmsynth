@@ -37,6 +37,37 @@ def _transfer(loop_bw, order, damping):
     raise ValueError(f"order must be 1 or 2 (got {order!r})")
 
 
+def ssc_phase(n, fs, f_ssc=32e3, spread=0.005, profile="down"):
+    """Spread-spectrum-clocking timing phase: the cumulative clock-timing deviation (in
+    SAMPLES) from a triangular ~``f_ssc`` modulation of the clock frequency. SSC is
+    near-universal in PCIe/USB/SATA/DisplayPort for EMI, and it is a large low-frequency
+    wander that a CDR must track. ``spread`` is the fractional frequency deviation (e.g.
+    0.005 = 0.5%); ``profile`` is 'down' (0..−spread, the common case), 'up' (0..+spread) or
+    'center' (−spread..+spread). Feed to a carrier as jitter, or use `apply_ssc` to warp a
+    waveform."""
+    k = np.arange(int(n))
+    tri = 1.0 - np.abs(2.0 * ((k * f_ssc / fs) % 1.0) - 1.0)     # 0..1..0 triangle, period 1/f_ssc
+    if profile == "down":
+        dfrac = -spread * tri
+    elif profile == "up":
+        dfrac = spread * tri
+    elif profile == "center":
+        dfrac = spread * (2.0 * tri - 1.0)
+    else:
+        raise ValueError(f"unknown SSC profile {profile!r} (use 'down', 'up' or 'center')")
+    return np.cumsum(dfrac)
+
+
+def apply_ssc(x, fs, f_ssc=32e3, spread=0.005, profile="down"):
+    """Embed spread-spectrum clocking in a waveform by warping its time base onto the
+    SSC-modulated clock. Spreads the spectrum (the point of SSC) and adds the low-frequency
+    wander a downstream CDR has to track."""
+    x = np.asarray(x, float)
+    n = len(x)
+    cum = ssc_phase(n, fs, f_ssc, spread, profile)
+    return np.interp(np.arange(n) - cum, np.arange(n), x, left=x[0], right=x[-1])
+
+
 def recover_clock(phase, baud, loop_bw, order=2, damping=0.707):
     """Run a CDR over a per-symbol timing ``phase`` sequence. Returns ``(clock, residual)``:
     ``clock`` is the recovered-clock phase (low-pass, the loop follows slow jitter) and

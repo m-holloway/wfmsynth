@@ -724,6 +724,25 @@ _err_dfe = np.mean(_dfe(_rx28, [_h1])[1] != _syms28)
 check("DFE cancels the post-cursor it is tuned to (symbol errors collapse to ~0)",
       _err_dfe < 0.01 and _err_no > 0.1, f"symbol error {_err_no:.3f} -> {_err_dfe:.3f}")
 
+print("== spread-spectrum clocking (SSC): triangular clock FM, tracked by a wide-loop CDR ==")
+from wfmsynth.cdr import ssc_phase as _sscp, apply_ssc as _sscw, recover_clock as _rc2
+_ns31 = 1 << 18; _baud31 = 50e9
+_ph31 = _sscp(_ns31, _baud31, f_ssc=1e6, spread=0.005, profile="down")
+_dfrac31 = np.diff(_ph31)                       # instantaneous fractional frequency deviation
+check("down-spread SSC frequency deviation stays within [-spread, 0] and is periodic at f_ssc",
+      -0.0051 < _dfrac31.min() and _dfrac31.max() < 1e-6
+      and np.argmax(np.abs(np.fft.rfft(_dfrac31 - _dfrac31.mean()))) > 0,
+      f"dev range [{_dfrac31.min():.5f}, {_dfrac31.max():.5f}]")
+_rw31 = np.ptp(_rc2(_ph31, _baud31, 3e6, order=2)[1][_ns31 // 2:])
+_rn31 = np.ptp(_rc2(_ph31, _baud31, 3e4, order=2)[1][_ns31 // 2:])
+check("a wide-loop CDR tracks the SSC wander out; a narrow loop does not",
+      _rw31 < 0.3 * _rn31, f"residual ptp wide={_rw31:.1f} narrow={_rn31:.1f}")
+_fs31 = 200e9; _tone31 = np.sin(2 * np.pi * 10e9 * np.arange(1 << 16) / _fs31)
+_w31 = _sscw(_tone31, _fs31, f_ssc=5e6, spread=0.01)
+_S0 = np.abs(np.fft.rfft(_tone31)); _S1 = np.abs(np.fft.rfft(_w31))
+check("SSC spreads the spectrum (its whole purpose: a tone's energy fans out)",
+      np.sum(_S1 > 0.05 * _S1.max()) > 2 * np.sum(_S0 > 0.05 * _S0.max()))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
