@@ -773,6 +773,34 @@ def test_rx_ctle_opens_eye_and_dfe_cancels_postcursor():
     assert np.mean(ws.dfe(rx, [0.35])[1] != syms) < 0.01
 
 
+def test_spread_spectrum_clocking():
+    import wfmsynth as ws
+    ns, baud = 1 << 18, 50e9
+    ph = ws.ssc_phase(ns, baud, f_ssc=1e6, spread=0.005, profile="down")
+    dfrac = np.diff(ph)
+    # down-spread deviation is within [-spread, 0]
+    assert -0.0051 < dfrac.min() and dfrac.max() < 1e-6
+    # center-spread is symmetric
+    dc = np.diff(ws.ssc_phase(ns, baud, f_ssc=1e6, spread=0.005, profile="center"))
+    assert dc.min() < -0.004 and dc.max() > 0.004
+    # a wide-loop CDR tracks SSC out; a narrow one does not
+    rw = np.ptp(ws.recover_clock(ph, baud, 3e6, order=2)[1][ns // 2:])
+    rn = np.ptp(ws.recover_clock(ph, baud, 3e4, order=2)[1][ns // 2:])
+    assert rw < 0.3 * rn
+    # apply_ssc spreads a tone's spectrum
+    fs = 200e9
+    tone = np.sin(2 * np.pi * 10e9 * np.arange(1 << 16) / fs)
+    w = ws.apply_ssc(tone, fs, f_ssc=5e6, spread=0.01)
+    S0 = np.abs(np.fft.rfft(tone))
+    S1 = np.abs(np.fft.rfft(w))
+    assert np.sum(S1 > 0.05 * S1.max()) > 2 * np.sum(S0 > 0.05 * S0.max())
+    # composes fluently
+    g = ws.Grid(fs=fs, baud=baud, n=1 << 12)
+    sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=g.n // 4, pattern="prbs13q", causal=True)
+           .ssc(f_ssc=1e6, spread=0.005))
+    assert sig.waveform().shape == (g.n,)
+
+
 # ---------------------------------------------------------------- BACKLOG B2
 def test_rise_time_clamp_is_visible_not_silent():
     """tr_frac must not be silently discarded at realistic samples-per-UI.

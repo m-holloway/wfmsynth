@@ -280,6 +280,15 @@ sig = ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", cau
 eq, decisions = ws.dfe(per_symbol_samples, taps=[0.35])   # cancel a post-cursor
 ```
 
+## Spread-spectrum clocking (SSC)
+Triangular clock-frequency modulation (ubiquitous for EMI) — spreads the spectrum and adds
+low-frequency wander a CDR must track:
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True) \
+  .ssc(f_ssc=32e3, spread=0.005, profile="down")
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

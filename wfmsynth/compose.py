@@ -106,6 +106,12 @@ def _op_resonant_reflect(x, p, streams, grid, idx):
     return P.resonant_reflection(x, grid=grid, **kw)
 
 
+def _op_ssc(x, p, streams, grid, idx):
+    from . import cdr as CDR
+    return CDR.apply_ssc(x, grid.fs, f_ssc=p.get("f_ssc", 32e3),
+                         spread=p.get("spread", 0.005), profile=p.get("profile", "down"))
+
+
 def _op_ctle(x, p, streams, grid, idx):
     from . import rx as RX
     return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
@@ -139,7 +145,7 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
-         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle}
+         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -172,6 +178,11 @@ class Signal:
         """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.
         params: fz_ghz, fp1_ghz, fp2_ghz, dc_gain."""
         return self._add("ctle", **params)
+
+    def ssc(self, **params):
+        """Spread-spectrum clocking — triangular clock-frequency modulation (EMI reduction).
+        params: f_ssc (Hz), spread (fraction), profile('down'|'up'|'center')."""
+        return self._add("ssc", **params)
 
     def lossy(self, **params):
         """Lossy channel. params: length_in, tand, causal, or loss_db+loss_at_ghz (real units)."""
