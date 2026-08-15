@@ -303,7 +303,14 @@ alongside the recovery that produced it.
 
 ## P2 — breadth and fidelity
 
-### 13. Measured S-parameter channels (Touchstone)
+### 13. Measured S-parameter channels (Touchstone) — ✅ DONE (v0.14)
+`wfmsynth.sparam`: `read_touchstone`/`write_touchstone` (.sNp, RI/MA/DB, Hz..GHz, the
+2-port ordering quirk handled), `sparam_channel(x, freqs, s21, grid)` and
+`touchstone_channel(x, path, grid)` apply a measured Sij as a frequency-domain channel;
+`Signal.sparam(path=... | freqs=,s21=)` composes it. Reproduces resonances/structure the
+analytic model can't. Analytic model stays the dependency-free default. validate asserts
+a .s2p round-trip and a resonant notch in the channel output.
+
 In `ROADMAP.md`. Largest realism-per-effort item after the instrument model: the
 analytic √f + f loss model cannot produce resonances, fibre-weave periodicity,
 connector structure, or interacting multiple bounces. Real `.sNp` files give all of it.

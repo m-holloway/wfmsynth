@@ -91,6 +91,13 @@ def _op_tx_ffe(x, p, streams, grid, idx):
     return P.tx_ffe(x, p["taps"], spb, pre=p.get("pre", 1))
 
 
+def _op_sparam(x, p, streams, grid, idx):
+    from . import sparam as SP
+    if "path" in p:
+        return SP.touchstone_channel(x, p["path"], grid=grid, ports=tuple(p.get("ports", (2, 1))))
+    return SP.sparam_channel(x, np.asarray(p["freqs"]), np.asarray(p["s21"], complex), grid=grid)
+
+
 def _op_digitize(x, p, streams, grid, idx):
     n_out = p.get("n_out")
     if n_out and n_out != len(x):
@@ -110,7 +117,7 @@ def _op_digitize(x, p, streams, grid, idx):
 
 _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
-         "tx_ffe": _op_tx_ffe}
+         "tx_ffe": _op_tx_ffe, "sparam": _op_sparam}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -137,6 +144,11 @@ class Signal:
     def lossy(self, **params):
         """Lossy channel. params: length_in, tand, causal, or loss_db+loss_at_ghz (real units)."""
         return self._add("lossy", **params)
+
+    def sparam(self, **params):
+        """Measured S-parameter channel. params: path=<.sNp file> (+ ports=(2,1)), or
+        freqs=[Hz] + s21=[complex]. Reproduces resonances/structure the analytic model can't."""
+        return self._add("sparam", **params)
 
     def reflect(self, **params):
         """Multi-reflection. params: td_frac | td_samples | td_ps, gamma_s, gamma_l, n_bounce."""

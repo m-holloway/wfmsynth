@@ -200,6 +200,15 @@ clock, residual = ws.recover_clock(jitter_phase, baud=50e9, loop_bw=1e6, order=2
 ws.tracked_out_fraction(jitter_phase, baud=50e9, loop_bw=1e6)   # 0..1
 ```
 
+## Measured S-parameter channels (Touchstone)
+Drive synthesis through a real `.sNp` channel — resonances the analytic model can't make:
+
+```python
+f, S = ws.read_touchstone("thru.s2p")                     # (nf, n, n) complex
+sig = ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True) \
+        .sparam(path="thru.s2p")                          # apply S21 as the channel
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
