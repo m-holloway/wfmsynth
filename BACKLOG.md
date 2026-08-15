@@ -652,3 +652,106 @@ is more open than the fixed-grid eye, and equal for high-frequency jitter.
 variance proportional to rate) as an optional component, for detectors/optical front ends.
 
 **Done when:** validate asserts the shot component is skewed and its variance scales with rate.
+
+---
+
+## Realism v2 — broaden the composable primitive set
+
+**North-star:** a composable set of primitives that can construct ANY realistic scenario a
+scope might capture — fast optical AND electrical serial, down to slow buses, plus real-world
+design effects (drift, supply coupling, environmental). The library stays pure synthesis:
+analysis / root-cause tooling COMPOSES these primitives, it does not live here. Prioritized by
+ubiquity-in-real-captures × signature size × discriminative value — run the #21 sim-to-real
+harness against real captures to re-order against evidence.
+
+### Tier 1 — near-universal in real links; a synthetic set without them is trivially separable
+
+### 31. Spread-spectrum clocking (SSC)
+Triangular ~30–33 kHz, ~0.5% down-spread FM of the symbol clock — mandatory/ubiquitous in
+PCIe/USB/SATA/DisplayPort for EMI. A large, structured spectral+timing signature that directly
+stresses the CDR (#12). Compose as a timing-modulation source (#35) feeding the carrier.
+**Done when:** validate asserts the CDR tracks the SSC profile within its loop bandwidth while a
+fixed clock shows the triangular wander, and the spectrum shows the spread.
+
+### 32. Differential-pair primitives (intra-pair skew, common-mode, mode conversion)
+Real links are differential; we model a single-ended trace. Intra-pair (P/N) skew, a common-mode
+term, and differential↔common-mode conversion are first-order — a real differential probe sees all
+three.
+**Done when:** validate asserts skew closes the differential eye and generates common-mode energy
+that vanishes at skew=0.
+
+### 33. Power-supply / PDN coupling (AM + PSIJ)
+A composable "supply aggressor": a supply rail (ripple tone + switching activity) couples onto the
+signal as BOTH amplitude modulation and power-supply-induced jitter, correlated to switching. We
+only have a PDN-transient *fault* today. A rich, structured, real artifact — and a strong target
+for downstream root-cause tools (which compose it; it does not live here).
+**Done when:** validate asserts a supply tone appears as correlated AM + PM sidebands scaling with
+the coupling coefficient.
+
+### 34. Optical-link primitives (extinction ratio, RIN, laser chirp, MPI, dispersion)
+Optical PAM4 (400G/800G) is a whole realism dimension: finite extinction ratio (nonzero low level),
+relative intensity noise (RIN), laser chirp (amplitude-dependent phase), multipath interference
+(MPI), and chromatic dispersion. Folds in the logged Poisson shot-noise term (#30).
+**Done when:** validate asserts ER sets the low/high power ratio, RIN scales intensity-proportional
+noise, and dispersion spreads a pulse.
+
+### Composability enablers — what lets these (and anything else) compose into real scenarios
+
+### 35. Timing-modulation source (arbitrary phase into any carrier)
+A composable phase-modulation source that sums SSC (#31) + oscillator phase noise (#37) + long-term
+wander (#38) + Pj/Rj/DCD into one per-symbol timing-phase sequence, injectable into any carrier.
+Today jitter is parametric Rj/Pj/DCD only; arbitrary phase injection is the enabler for realistic
+combined jitter and for exercising the CDR (#12).
+**Done when:** validate asserts a composed phase source (SSC+PN+Pj) reproduces each component in the
+carrier's realized edge timing.
+
+### 36. Multi-signal "scene" composition (shared aggressors / supply / clock)
+Compose MULTIPLE Signals that share correlated sources — a supply rail coupling into several lanes,
+a differential pair as coupled P/N, user-defined aggressors coupling into user-defined victims.
+Today crosstalk aggressors are generated internally; a scene primitive lets arbitrary lanes/rails
+couple, which is what "construct a realistic multi-lane scenario" needs.
+**Done when:** validate asserts a shared supply rail induces correlated artifacts across two lanes,
+and a differential pair's P/N share timing with controlled skew.
+
+### Tier 2 — high value
+
+### 37. Oscillator phase noise (colored jitter spectrum)
+Real clocks have a Leeson-shaped phase-noise profile; jitter measurement and CDR tracking depend on
+the spectrum, not a single Pj tone. Provides a phase-noise source for #35.
+**Done when:** validate asserts the generated jitter PSD follows the requested slope.
+
+### 38. Long-term wander / drift (real-world designs)
+Sub-Hz nonstationarity over the record: thermal drift, VGA/AGC settling, DC-offset drift, laser
+aging. Real long captures are nonstationary; today only intermittent gates (#10) break stationarity.
+**Done when:** validate asserts a slow drift moves a measured attribute monotonically across the
+record while short-window statistics stay ~unchanged.
+
+### 39. Line coding & scrambling (8b/10b, 64b/66b, 128b/130b)
+PRBS is a stand-in; real DC balance and run length depend on the code, which drives baseline-wander
+interaction with AC-coupling.
+**Done when:** validate asserts an 8b/10b stream is DC-balanced with bounded run length vs raw PRBS.
+
+### 40. Acquisition-chain primitives (scope/probe transfer, loading, trigger/timebase jitter)
+Beyond the ADC (#3/#24/#25): the scope's own bandwidth-limiting response (Bessel/Gaussian), probe
+capacitive loading of the DUT, and trigger/timebase jitter — present in every real capture.
+**Done when:** validate asserts the scope bandwidth rolls off HF and timebase jitter smears the eye
+horizontally.
+
+### Tier 3 — breadth / polish
+
+### 41. Low-speed bus signaling primitives
+The range a scope measures extends below serial: I2C (open-drain / wired-AND, ACK), SPI, UART
+(start/stop framing, idle), CAN / RS-485 (differential, arbitration, contention), variable bit rate.
+Primitives for single-ended open-drain, framed slow signaling, and bus contention.
+**Done when:** validate asserts an open-drain wired-AND pulls low when any driver is active and
+floats to the pull-up otherwise.
+
+### 42. Standardized Tx de-emphasis presets
+Extend Tx FFE (#11) with the standardized de-emphasis presets (in dB) real transmitters expose.
+**Done when:** validate asserts a preset yields the specified de-emphasis ratio.
+
+### 43. Electrical-idle / LFPS / training sequences
+Protocol non-data intervals: electrical idle, low-frequency periodic signaling (PCIe/USB LFPS),
+squelch, training patterns. Real full captures contain these between data bursts.
+**Done when:** validate asserts an idle interval carries no data energy and LFPS shows its periodic
+low-frequency burst.
