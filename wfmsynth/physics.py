@@ -14,6 +14,8 @@ symbol/sample rate downstream. numpy/scipy only.
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
+import warnings
+
 from scipy import signal
 
 N = 4096                       # default working grid
@@ -331,6 +333,50 @@ def prbs13q(n_symbols, seed=1):
     return np.tile(base, reps)[:n_symbols]
 
 
+# Rise time cannot be faster than the grid supports. BW * t_r ~= 0.35, and the
+# highest cutoff _shape_edges can realise is 0.98 * Nyquist, so the fastest
+# representable edge is 0.7 / 0.98 ~= 0.714 samples. That is a PHYSICAL limit,
+# derived rather than chosen.
+TR_NYQUIST_LIMIT_SAMPLES = 0.7 / 0.98
+
+# The floor actually applied by default. 2.0 samples is 2.8x more conservative
+# than the grid requires; it is kept as the default only so existing output stays
+# bit-identical. Pass floor_samples=TR_NYQUIST_LIMIT_SAMPLES to get the fastest
+# edge the grid can carry.
+TR_DEFAULT_FLOOR_SAMPLES = 2.0
+
+
+def resolve_rise_time(tr_frac, spb, floor_samples=TR_DEFAULT_FLOOR_SAMPLES,
+                      warn=True):
+    """Rise time in samples from a fraction of a symbol, with the clamp made VISIBLE.
+
+    BACKLOG B2: call sites used ``max(tr_frac * spb, 2)``, which silently discards
+    the requested rise time whenever ``tr_frac * spb < 2``. At realistic
+    samples-per-UI that is the normal case, not an edge case -- at 4.82 samples/UI
+    a requested ``tr_frac=0.02`` asks for 0.096 samples and receives 2.0, a
+    **20x inflation**, with no indication that anything was overridden. Edge
+    shaping then dominates the pulse response and is easily mistaken for channel
+    ISI: measured downstream as a 1 UI post-cursor of 0.93 where the generating
+    model implied 0.06.
+
+    Returns ``(tr_samples, clamped)`` so callers can record whether the value they
+    asked for is the value they got.
+    """
+    requested = tr_frac * spb
+    floor = max(float(floor_samples), TR_NYQUIST_LIMIT_SAMPLES)
+    if requested >= floor:
+        return requested, False
+    if warn:
+        warnings.warn(
+            f"rise time clamped: tr_frac={tr_frac:g} at {spb:g} samples/UI asks "
+            f"for {requested:.3f} samples, floor is {floor:.3f} "
+            f"({floor / requested:.1f}x). Edge shaping will dominate the pulse "
+            f"response. Raise the sample rate, raise tr_frac, or pass "
+            f"floor_samples=TR_NYQUIST_LIMIT_SAMPLES.",
+            RuntimeWarning, stacklevel=3)
+    return floor, True
+
+
 def _shape_edges(x, tr_samples, causal=False):
     """Band-limit a piecewise-constant symbol stream into finite-rise-time edges.
 
@@ -427,14 +473,17 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
     raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz' or 'pam4'")
 
 
-def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=None):
+def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=None,
+        tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES):
     n = N if n is None else int(n)
     spb = n / n_ui
     lv = carrier_symbols("nrz", n_ui, seed)
-    return _shape_edges(_place_symbols(lv, n, spb, jitter, rng), max(tr_frac * spb, 2), causal)
+    tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
+    return _shape_edges(_place_symbols(lv, n, spb, jitter, rng), tr, causal)
 
 
 def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
+         tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES,
          jitter=None, rng=None):
     """PAM4 carrier.
 
@@ -448,7 +497,8 @@ def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
     n = N if n is None else int(n)
     spb = n / n_ui
     syms = carrier_symbols("pam4", n_ui, seed, pattern)
-    return _shape_edges(_place_symbols(syms, n, spb, jitter, rng), max(tr_frac * spb, 2), causal)
+    tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
+    return _shape_edges(_place_symbols(syms, n, spb, jitter, rng), tr, causal)
 
 
 # ---------------------------------------------------------------- RF / analog
