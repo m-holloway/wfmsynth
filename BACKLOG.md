@@ -647,7 +647,9 @@ can be reported alongside the recovery that produced it (ties to #8 ground_truth
 **Done when:** validate asserts the CDR-folded eye of a waveform with low-frequency jitter
 is more open than the fixed-grid eye, and equal for high-frequency jitter.
 
-### 30. Shot-noise term for realistic_noise (companion to #17)
+### 30. Shot-noise term — ✅ DONE (v0.28, folded into #34 optical.shot_noise)
+
+ORIG:
 #17 covers heavy tails + 1/f. Add a Poisson shot-noise term (discrete arrivals -> skew, and
 variance proportional to rate) as an optional component, for detectors/optical front ends.
 
@@ -708,7 +710,13 @@ for downstream root-cause tools (which compose it; it does not live here).
 **Done when:** validate asserts a supply tone appears as correlated AM + PM sidebands scaling with
 the coupling coefficient.
 
-### 34. Optical-link primitives (extinction ratio, RIN, laser chirp, MPI, dispersion)
+### 34. Optical-link primitives (extinction ratio, RIN, laser chirp, MPI, dispersion) — ✅ DONE (v0.28)
+`wfmsynth.optical`: `to_optical(x, er_db)` (bipolar -> intensity with finite extinction ratio),
+`rin_noise` (power-proportional relative intensity noise), `shot_noise` (Poisson, variance ∝
+power — folds #30), `chromatic_dispersion` (pulse spreading), `mpi` (delayed ghost). Composes
+via `Signal.optical(...)` and `Signal.dispersion(...)`. validate asserts ER sets the low/high
+power ratio, RIN/shot scale with power, and dispersion spreads a pulse. (Laser chirp logged #44.)
+
 Optical PAM4 (400G/800G) is a whole realism dimension: finite extinction ratio (nonzero low level),
 relative intensity noise (RIN), laser chirp (amplitude-dependent phase), multipath interference
 (MPI), and chromatic dispersion. Folds in the logged Poisson shot-noise term (#30).
@@ -788,3 +796,10 @@ Protocol non-data intervals: electrical idle, low-frequency periodic signaling (
 squelch, training patterns. Real full captures contain these between data bursts.
 **Done when:** validate asserts an idle interval carries no data energy and LFPS shows its periodic
 low-frequency burst.
+
+### 44. Laser chirp (companion to #34 optical)
+Amplitude-dependent phase (frequency chirp during intensity transitions): alpha-parameter
+transient chirp that, with dispersion, causes transition-dependent pulse distortion.
+
+**Done when:** validate asserts chirp adds a transition-edge frequency excursion scaling with
+the alpha parameter.

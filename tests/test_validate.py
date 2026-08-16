@@ -841,6 +841,31 @@ def test_scene_shared_supply_coupling_and_differential():
     assert np.sqrt(np.mean(ws.common_mode(scc.lane("d_p"), scc.lane("d_n")) ** 2)) > 0.01
 
 
+def test_optical_primitives():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    x = P.nrz(n_ui=1 << 11, seed=1, n=1 << 13, causal=True)
+    Po = ws.to_optical(x, er_db=8.0)
+    assert Po.min() >= 0 and abs(10 * np.log10(Po.max() / Po.min()) - 8.0) < 0.2
+    rng = np.random.default_rng(0)
+    hi = ws.rin_noise(np.full(20000, 1.0), -130, 1e10, rng)
+    lo = ws.rin_noise(np.full(20000, 0.2), -130, 1e10, rng)
+    assert hi.std() > 3 * lo.std()
+    sh1 = ws.shot_noise(np.full(20000, 1.0), 1e3, rng)
+    sh2 = ws.shot_noise(np.full(20000, 0.2), 1e3, rng)
+    assert abs(sh1.var() / sh2.var() - 5.0) < 1.0
+    pulse = np.zeros(1 << 13)
+    pulse[(1 << 12) - 20:(1 << 12) + 20] = 1.0
+    disp = ws.chromatic_dispersion(pulse, strength=60.0)
+    assert np.sum(np.abs(disp) > 0.1 * np.abs(disp).max()) > 2 * np.sum(np.abs(pulse) > 0.1)
+    # composes: optical intensity + RIN, and dispersion, as fluent ops
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    s = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=g.n // 4, pattern="prbs13q", causal=True)
+         .optical(er_db=6.0, rin_db_per_hz=-135, shot=True).dispersion(strength=10.0))
+    y = s.waveform()
+    assert y.shape == (g.n,)
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P
