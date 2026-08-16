@@ -832,6 +832,19 @@ _disp = _cd(_pulse34, strength=60.0)
 check("chromatic dispersion spreads a pulse (frequency-dependent group delay)",
       np.sum(np.abs(_disp) > 0.1 * np.abs(_disp).max()) > 2 * np.sum(np.abs(_pulse34) > 0.1))
 
+print("== oscillator phase noise: a colored jitter spectrum with the requested slope ==")
+from wfmsynth.cdr import phase_noise as _pn
+_g37 = Grid(fs=200e9, n=1 << 16)
+_pns = _pn(_g37.n, _g37, rms_ps=1.0, slope=2.0, rng=np.random.default_rng(0))
+_P37 = np.abs(np.fft.rfft(_pns - _pns.mean())) ** 2
+_f37 = np.arange(len(_P37))
+_band = (_f37 > 30) & (_f37 < 3000)                    # mid band, avoid DC and the noise floor
+_sl = np.polyfit(np.log(_f37[_band]), np.log(_P37[_band] + 1e-30), 1)[0]
+check("phase-noise PSD falls with the requested slope (~ -slope for 1/f**slope)",
+      abs(_sl - (-2.0)) < 0.5, f"fitted PSD slope={_sl:.2f} (want ~-2)")
+check("phase noise is scaled to the requested RMS (in samples)",
+      abs(np.sqrt(np.mean(_pns ** 2)) - 1e-12 * _g37.fs) < 0.2 * 1e-12 * _g37.fs)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

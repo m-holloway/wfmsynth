@@ -866,6 +866,21 @@ def test_optical_primitives():
     assert y.shape == (g.n,)
 
 
+def test_oscillator_phase_noise_slope():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, n=1 << 16)
+    pn = ws.phase_noise(g.n, g, rms_ps=1.0, slope=2.0, rng=np.random.default_rng(0))
+    P = np.abs(np.fft.rfft(pn - pn.mean())) ** 2
+    f = np.arange(len(P))
+    band = (f > 30) & (f < 3000)
+    slope = np.polyfit(np.log(f[band]), np.log(P[band] + 1e-30), 1)[0]
+    assert abs(slope - (-2.0)) < 0.5
+    assert abs(np.sqrt(np.mean(pn ** 2)) - 1e-12 * g.fs) < 0.2 * 1e-12 * g.fs
+    # feeds timing_source
+    ph = ws.timing_source(g.n, g, phase_noise=dict(rms_ps=1.0, slope=2.0), rng=np.random.default_rng(1))
+    assert ph.shape == (g.n,) and ph.std() > 0
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P
