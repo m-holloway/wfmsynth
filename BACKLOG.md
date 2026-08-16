@@ -776,7 +776,13 @@ aging. Real long captures are nonstationary; today only intermittent gates (#10)
 **Done when:** validate asserts a slow drift moves a measured attribute monotonically across the
 record while short-window statistics stay ~unchanged.
 
-### 39. Line coding & scrambling (8b/10b, 64b/66b, 128b/130b)
+### 39. Line coding & scrambling (8b/10b, 64b/66b, 128b/130b) — ✅ DONE (v0.31)
+`wfmsynth.coding`: `dc_balanced(bits, block)` (8b/10b-style running-disparity block inversion
+-> bounded disparity / DC balance), `scramble_64b66b(bits)` (the real x^58+x^39+1 scrambler +
+sync header), `running_disparity`/`max_run` measures. validate asserts dc_balanced keeps
+disparity bounded while raw PRBS random-walks, stays balanced, and the scrambler whitens.
+(Full 8b/10b tables for tight run-length bounding logged #45.)
+
 PRBS is a stand-in; real DC balance and run length depend on the code, which drives baseline-wander
 interaction with AC-coupling.
 **Done when:** validate asserts an 8b/10b stream is DC-balanced with bounded run length vs raw PRBS.
@@ -812,3 +818,12 @@ transient chirp that, with dispersion, causes transition-dependent pulse distort
 
 **Done when:** validate asserts chirp adds a transition-edge frequency excursion scaling with
 the alpha parameter.
+
+### 45. Full 8b/10b tables + carrier arbitrary-symbol input (companion to #39)
+#39 bounds disparity (DC balance) but not run length as tightly as real 8b/10b; add the 5b/6b
++ 3b/4b lookup tables (RLL<=5). Also let the carrier accept an arbitrary symbol/bit sequence
+(`symbols=`) so a coded/scrambled stream can drive synthesis end-to-end (today carrier takes
+seed/pattern only).
+
+**Done when:** validate asserts an 8b/10b stream has max run <=5, and a
+carrier built from coded bits reproduces them.

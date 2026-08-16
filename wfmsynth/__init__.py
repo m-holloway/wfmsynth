@@ -14,10 +14,10 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.30.0"
+__version__ = "0.31.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
-               measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical)
+               measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding)
 from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, resonant_reflection,
                       nominal_nonlinearity, crosstalk_matrix, differential_pair,
                       differential_mode, common_mode, supply_coupling)
@@ -41,10 +41,12 @@ from .simreal import separability, feature_vector
 from .rx import ctle, dfe
 from .scene import Scene
 from .optical import to_optical, rin_noise, shot_noise, chromatic_dispersion, mpi
+from .coding import dc_balanced, scramble_64b66b, running_disparity, max_run
 
 __all__ = [
     "physics", "impairments", "grammar", "pam4", "grid", "instrument", "streams", "compose",
-    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "ctle", "dfe", "Scene",
+    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "ctle", "dfe", "Scene",
+    "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",
     "to_optical", "rin_noise", "shot_noise", "chromatic_dispersion", "mpi",
     "stream_convolve", "stream_blocks", "channel_fir", "separability", "feature_vector",
     "recover_clock", "jitter_transfer", "tracked_out_fraction", "ssc_phase", "apply_ssc",
