@@ -68,6 +68,20 @@ def apply_ssc(x, fs, f_ssc=32e3, spread=0.005, profile="down"):
     return np.interp(np.arange(n) - cum, np.arange(n), x, left=x[0], right=x[-1])
 
 
+def recover_and_fold(x, grid, n_blocks=16, levels=4, defn="contour"):
+    """Fold a waveform onto the clock a CDR recovers from it, and return the recorded eye
+    height — the literal "record folded by the recovered clock". Models the CDR as tracking the
+    local optimal sampling phase across ``n_blocks`` (loop bandwidth ~ n_blocks / record
+    duration): low-frequency timing jitter is tracked out, so the recorded eye is MORE OPEN than
+    a single fixed sampling phase, while high-frequency jitter is not tracked and the two agree.
+    An emitted eye is only meaningful alongside the recovery that produced it; this is that
+    recovery at the waveform level (the phase-domain jitter transfer is `recover_clock`)."""
+    from .measure import eye_height
+    blocks = np.array_split(np.asarray(x, float), int(n_blocks))
+    eyes = [eye_height(b, grid, levels=levels, defn=defn) for b in blocks if len(b) > levels * 10]
+    return float(np.median(eyes)) if eyes else 0.0
+
+
 def phase_noise(n, grid, rms_ps=1.0, slope=2.0, rng=None):
     """Colored oscillator PHASE NOISE as a timing sequence (in samples) whose power spectral
     density falls as 1/f**``slope``. slope≈2 is a free-running oscillator's close-in

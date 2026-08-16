@@ -993,6 +993,18 @@ def test_carrier_from_arbitrary_symbols():
     assert s.waveform().shape == (g.n,)
 
 
+def test_waveform_clock_recovery_fold():
+    import wfmsynth as ws
+    from wfmsynth.cdr import recover_and_fold, timing_source, apply_phase
+    g = ws.Grid(fs=400e9, baud=50e9, n=1 << 15)
+    nui = int(g.n // g.samples_per_ui)
+    base = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)).waveform()
+    lf = apply_phase(base, timing_source(g.n, g, pj=dict(amp_ps=8.0, f_hz=2e6)))
+    hf = apply_phase(base, timing_source(g.n, g, pj=dict(amp_ps=8.0, f_hz=2e9)))
+    assert recover_and_fold(lf, g) > ws.eye_height(lf, g) + 0.02      # low-freq tracked out
+    assert abs(recover_and_fold(hf, g) - ws.eye_height(hf, g)) < 0.05  # high-freq not
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

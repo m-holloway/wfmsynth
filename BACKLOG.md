@@ -637,7 +637,13 @@ the #8 alignment.
 **Done when:** validate asserts CTLE peaking opens a lossy-channel
 eye, and DFE removes a discrete post-cursor echo it is tuned to.
 
-### 29. Waveform-level clock-recovery fold (companion to #12)
+### 29. Waveform-level clock-recovery fold (companion to #12) — ✅ DONE (v0.38)
+`cdr.recover_and_fold(x, grid, n_blocks, levels)` folds a waveform onto the clock a CDR
+recovers from it (tracking the local optimal sampling phase across n_blocks ~ loop bandwidth)
+and returns the recorded eye height. validate asserts the folded eye is more open than the
+fixed-grid eye for low-frequency jitter (tracked out) and ~equal for high-frequency jitter.
+Complements the phase-domain jitter transfer (#12 recover_clock).
+
 #12 delivers the CDR jitter transfer on a per-symbol phase sequence. Add a waveform-level
 `cdr.recover_and_fold(x, grid, loop_bw, order)` that detects per-symbol timing error from
 mid-level crossings, runs it through the clock transfer, and RESAMPLES x onto the recovered

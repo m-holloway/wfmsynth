@@ -14,7 +14,7 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.37.0"
+__version__ = "0.38.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding, bus)
@@ -35,7 +35,7 @@ from .measure import (eye_height, best_phase, attributes, align_symbols, ground_
                       pattern_period)
 from .sweep import hold_constant, realized_table, solve_monotonic
 from .cdr import (recover_clock, jitter_transfer, tracked_out_fraction, ssc_phase,
-                  apply_ssc, timing_source, apply_phase, phase_noise)
+                  apply_ssc, timing_source, apply_phase, phase_noise, recover_and_fold)
 from .sparam import read_touchstone, write_touchstone, sparam_channel, touchstone_channel
 from .stream import stream_convolve, stream_blocks, channel_fir
 from .simreal import separability, feature_vector
@@ -53,7 +53,7 @@ __all__ = [
     "to_optical", "rin_noise", "shot_noise", "chromatic_dispersion", "mpi", "laser_chirp",
     "stream_convolve", "stream_blocks", "channel_fir", "separability", "feature_vector",
     "recover_clock", "jitter_transfer", "tracked_out_fraction", "ssc_phase", "apply_ssc",
-    "timing_source", "apply_phase", "phase_noise",
+    "timing_source", "apply_phase", "phase_noise", "recover_and_fold",
     "read_touchstone", "write_touchstone", "sparam_channel", "touchstone_channel",
     "N", "T", "Grid", "Jitter", "Streams", "tx_ffe", "carrier_symbols", "from_symbols", "resonant_reflection", "de_emphasis_taps",
     "nominal_nonlinearity", "crosstalk_matrix",

@@ -950,6 +950,18 @@ _recov = (_w45[(np.arange(len(_lev45)) * _spb45 + _spb45 / 2).astype(int)] > 0).
 check("a carrier built from an arbitrary (coded) symbol stream reproduces those bits",
       np.array_equal(_recov, _bits45))
 
+print("== waveform-level clock-recovery fold: recovered clock opens a low-freq-jittered eye ==")
+from wfmsynth.cdr import recover_and_fold as _fold, timing_source as _ts2, apply_phase as _ap2
+_g29 = Grid(fs=400e9, baud=50e9, n=1 << 15); _nui29 = int(_g29.n // _g29.samples_per_ui)
+_base29 = (Signal(seed=1, grid=_g29).carrier("pam4", n_ui=_nui29, pattern="prbs13q", causal=True)).waveform()
+_lf29 = _ap2(_base29, _ts2(_g29.n, _g29, pj=dict(amp_ps=8.0, f_hz=2e6)))     # slow wander
+_hf29 = _ap2(_base29, _ts2(_g29.n, _g29, pj=dict(amp_ps=8.0, f_hz=2e9)))     # fast jitter
+check("the CDR-folded eye is more OPEN than the fixed-grid eye for low-frequency jitter",
+      _fold(_lf29, _g29) > _eh(_lf29, _g29) + 0.02,
+      f"fixed {_eh(_lf29,_g29):.3f} -> folded {_fold(_lf29,_g29):.3f}")
+check("high-frequency jitter is NOT tracked out (folded ~ fixed-grid eye)",
+      abs(_fold(_hf29, _g29) - _eh(_hf29, _g29)) < 0.05)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
