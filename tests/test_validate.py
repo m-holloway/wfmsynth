@@ -899,6 +899,18 @@ def test_long_term_drift():
     assert s.waveform().shape == (g.n,)
 
 
+def test_line_coding_dc_balance_and_scrambler():
+    import wfmsynth.physics as P
+    from wfmsynth.coding import dc_balanced, scramble_64b66b, running_disparity, max_run
+    raw = P.prbs(13, 1 << 15, seed=3)
+    cod = dc_balanced(raw, block=8)
+    assert np.max(np.abs(running_disparity(cod))) < 4 * 8
+    assert np.max(np.abs(running_disparity(cod))) < 0.3 * np.max(np.abs(running_disparity(raw)))
+    assert abs(cod.mean() - 0.5) < 0.02 and max_run(cod) <= 3 * 8
+    scr = scramble_64b66b(raw)
+    assert abs(scr.mean() - 0.5) < 0.03 and len(scr) == (len(raw) // 64) * 66
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

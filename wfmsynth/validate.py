@@ -858,6 +858,20 @@ _e0 = np.sqrt(np.mean(_y38[:_w] ** 2)); _e1 = np.sqrt(np.mean(_y38[_w:2 * _w] **
 check("within a short window the drift is negligible (adjacent short windows ~ equal)",
       abs(_e1 / _e0 - 1.0) < 0.05, f"adjacent short-window ratio {_e1 / _e0:.3f}")
 
+print("== line coding: a DC-balanced code bounds running disparity that raw PRBS random-walks ==")
+from wfmsynth.coding import (dc_balanced as _dcb, scramble_64b66b as _scr,
+                             running_disparity as _rd, max_run as _mrun)
+_raw39 = P.prbs(13, 1 << 15, seed=3)
+_cod39 = _dcb(_raw39, block=8)
+check("dc_balanced keeps running disparity bounded while raw PRBS random-walks far",
+      np.max(np.abs(_rd(_cod39))) < 4 * 8 and np.max(np.abs(_rd(_cod39))) < 0.3 * np.max(np.abs(_rd(_raw39))),
+      f"max|disp| coded={np.max(np.abs(_rd(_cod39)))} raw={np.max(np.abs(_rd(_raw39)))}")
+check("the coded stream is balanced (mean ~0.5) with a bounded run length",
+      abs(_cod39.mean() - 0.5) < 0.02 and _mrun(_cod39) <= 3 * 8)
+_scr39 = _scr(_raw39)
+check("64b/66b scrambler whitens to a ~balanced stream at 66/64 the length",
+      abs(_scr39.mean() - 0.5) < 0.03 and len(_scr39) == (len(_raw39) // 64) * 66)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
