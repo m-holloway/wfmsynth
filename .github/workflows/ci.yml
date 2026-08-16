@@ -1,29 +1,55 @@
 name: CI
 
+# Respectful of the free Actions quota (this is a PRIVATE repo, so minutes are metered and
+# macOS bills 10x, Windows 2x). Design:
+#   * Per-PR: ONE cheap Linux job (1x multiplier). Docs-only changes are skipped.
+#   * Cross-platform coverage (the reason #23 exists — catch e.g. the Windows cp1252 issue):
+#     runs only WEEKLY and on manual dispatch, on Linux + Windows (macOS is the dev machine,
+#     covered locally, and its 10x multiplier isn't worth it in CI).
+#   * Merges to main do NOT trigger CI (no push trigger) — the local pytest+validate gate
+#     already runs before every merge, so re-running on push would just double the cost.
+#   * Superseded runs are cancelled, so rapid pushes don't stack.
 on:
-  push:
-    branches: [main]
   pull_request:
+    paths-ignore:
+      - "**.md"
+  schedule:
+    - cron: "0 6 * * 1"      # Mondays 06:00 UTC — weekly cross-platform assurance
+  workflow_dispatch:          # manual full run on demand
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  quick:
+    # Cheap per-PR gate: Linux only, newest Python. 1x multiplier, ~1 minute.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest
+      - run: python -m pytest -q
+      - run: python -m wfmsynth.validate
+
+  cross-platform:
+    # Full matrix ONLY on the weekly schedule or a manual dispatch — never on every PR/push.
+    if: github.event_name != 'pull_request'
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.9", "3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest]   # macOS excluded (dev machine + 10x cost)
+        python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e . pytest
-      - name: Unit tests
-        run: python -m pytest -q
-      - name: Validation gate (physics-property assertions, must run on every platform)
-        run: python -m wfmsynth.validate
+      - run: pip install -e . pytest
+      - run: python -m pytest -q
+      - run: python -m wfmsynth.validate
