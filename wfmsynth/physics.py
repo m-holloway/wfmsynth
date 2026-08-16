@@ -546,6 +546,19 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
     raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz' or 'pam4'")
 
 
+def from_symbols(symbols, n=None, tr_frac=0.15, causal=False, jitter=None, rng=None,
+                 tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES):
+    """Build a carrier from an ARBITRARY per-UI symbol sequence instead of a PRBS pattern, so a
+    line-coded / scrambled / custom stream (see `wfmsynth.coding`) can drive synthesis
+    end-to-end. Same edge-shaping and source-jitter pipeline as `nrz`/`pam4`. ``symbols`` is a
+    1-D array of per-UI levels; the record length ``n`` sets samples/UI."""
+    symbols = np.asarray(symbols, float)
+    n = N if n is None else int(n)
+    spb = n / len(symbols)
+    tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
+    return _shape_edges(_place_symbols(symbols, n, spb, jitter, rng), tr, causal)
+
+
 def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=None,
         tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES):
     n = N if n is None else int(n)

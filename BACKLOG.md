@@ -845,7 +845,12 @@ transient chirp that, with dispersion, causes transition-dependent pulse distort
 **Done when:** validate asserts chirp adds a transition-edge frequency excursion scaling with
 the alpha parameter.
 
-### 45. Full 8b/10b tables + carrier arbitrary-symbol input (companion to #39)
+### 45. Carrier arbitrary-symbol input (companion to #39) — ✅ DONE (v0.37)
+`physics.from_symbols(symbols, n, ...)` + `Signal.symbols(...)` build a carrier from an
+arbitrary per-UI symbol sequence (same edge-shaping/jitter as nrz/pam4), so a line-coded /
+scrambled / custom stream (wfmsynth.coding) drives synthesis end-to-end. validate asserts a
+carrier built from a coded bit stream reproduces those bits. Full 8b/10b lookup tables (tight
+RLL<=5) split to #46.
 #39 bounds disparity (DC balance) but not run length as tightly as real 8b/10b; add the 5b/6b
 + 3b/4b lookup tables (RLL<=5). Also let the carrier accept an arbitrary symbol/bit sequence
 (`symbols=`) so a coded/scrambled stream can drive synthesis end-to-end (today carrier takes
@@ -853,3 +858,11 @@ seed/pattern only).
 
 **Done when:** validate asserts an 8b/10b stream has max run <=5, and a
 carrier built from coded bits reproduces them.
+
+### 46. Full 8b/10b encode tables (companion to #39/#45)
+#39's dc_balanced bounds disparity but not run length to 5; add the real 5b/6b + 3b/4b 8b/10b
+lookup tables with running-disparity selection (and K control characters). Feed the coded
+symbols to the carrier via #45's from_symbols.
+
+**Done when:** validate asserts an 8b/10b
+stream has max run <=5 and is DC-balanced, and decodes back to the input bytes.

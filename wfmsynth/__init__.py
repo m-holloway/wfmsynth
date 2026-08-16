@@ -14,11 +14,11 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.36.0"
+__version__ = "0.37.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding, bus)
-from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, resonant_reflection, de_emphasis_taps,
+from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, differential_pair,
                       differential_mode, common_mode, supply_coupling)
 from .grid import Grid
@@ -55,7 +55,7 @@ __all__ = [
     "recover_clock", "jitter_transfer", "tracked_out_fraction", "ssc_phase", "apply_ssc",
     "timing_source", "apply_phase", "phase_noise",
     "read_touchstone", "write_touchstone", "sparam_channel", "touchstone_channel",
-    "N", "T", "Grid", "Jitter", "Streams", "tx_ffe", "carrier_symbols", "resonant_reflection", "de_emphasis_taps",
+    "N", "T", "Grid", "Jitter", "Streams", "tx_ffe", "carrier_symbols", "from_symbols", "resonant_reflection", "de_emphasis_taps",
     "nominal_nonlinearity", "crosstalk_matrix",
     "differential_pair", "differential_mode", "common_mode", "supply_coupling",
     "IMPAIRMENTS", "apply_impairment", "domain_randomize",

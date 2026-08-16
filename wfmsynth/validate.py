@@ -939,6 +939,17 @@ _wave = _uf(_msg, samples_per_bit=16)
 check("UART framing is idle-high with start/stop bits and decodes back to the bytes",
       _ud(_wave, 16) == _msg and _wave[0] == 0.0 and _wave[9 * 16 + 8] == 1.0)
 
+print("== carrier from arbitrary symbols: a coded/scrambled stream drives synthesis, round-trips ==")
+from wfmsynth.coding import dc_balanced as _dcb2
+_bits45 = _dcb2(P.prbs(7, 512, seed=2), block=8)             # a real coded stream
+_lev45 = 2.0 * _bits45 - 1.0                                 # NRZ levels
+_n45 = len(_lev45) * 16
+_w45 = P.from_symbols(_lev45, n=_n45, causal=True)
+_spb45 = _n45 / len(_lev45)
+_recov = (_w45[(np.arange(len(_lev45)) * _spb45 + _spb45 / 2).astype(int)] > 0).astype(int)
+check("a carrier built from an arbitrary (coded) symbol stream reproduces those bits",
+      np.array_equal(_recov, _bits45))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

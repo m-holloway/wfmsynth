@@ -60,6 +60,14 @@ def _op_carrier(x, p, streams, grid, idx):
     return _carrier(p, streams, grid, idx)
 
 
+def _op_symbols(x, p, streams, grid, idx):
+    j = p.get("jitter")
+    jitter = P.Jitter(**j) if j else None
+    return P.from_symbols(np.asarray(p["symbols"], float), n=_grid_n(grid, p),
+                          tr_frac=p.get("tr_frac", 0.15), causal=p.get("causal", False),
+                          jitter=jitter, rng=streams.role(f"jitter/{idx}"))
+
+
 def _op_lossy(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("length_in", "tand", "eps_r", "skin_k", "causal",
                             "loss_db", "loss_at_ghz") if k in p}
@@ -195,7 +203,7 @@ def _op_digitize(x, p, streams, grid, idx):
     return x
 
 
-_EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
+_EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
@@ -215,6 +223,11 @@ class Signal:
 
     def _add(self, op, **params):
         self.ops.append({"op": op, **params}); return self
+
+    def symbols(self, symbols, **params):
+        """First op: a carrier built from an ARBITRARY per-UI symbol sequence (e.g. a coded /
+        scrambled stream from wfmsynth.coding). params: n, tr_frac, causal, jitter."""
+        return self._add("symbols", symbols=list(symbols), **params)
 
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,

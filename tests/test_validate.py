@@ -976,6 +976,23 @@ def test_low_speed_buses():
     assert wave[0] == 0.0 and wave[9 * 16 + 8] == 1.0        # start bit low, stop bit high
 
 
+def test_carrier_from_arbitrary_symbols():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    from wfmsynth.coding import dc_balanced
+    bits = dc_balanced(P.prbs(7, 512, seed=2), block=8)
+    lev = 2.0 * bits - 1.0
+    n = len(lev) * 16
+    w = P.from_symbols(lev, n=n, causal=True)
+    spb = n / len(lev)
+    recov = (w[(np.arange(len(lev)) * spb + spb / 2).astype(int)] > 0).astype(int)
+    assert np.array_equal(recov, bits)
+    # composes as a fluent op
+    g = ws.Grid(fs=200e9, baud=50e9, n=len(lev) * 16)
+    s = ws.Signal(seed=1, grid=g).symbols(symbols=lev.tolist(), causal=True)
+    assert s.waveform().shape == (g.n,)
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P
