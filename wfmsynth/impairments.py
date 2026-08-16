@@ -86,6 +86,23 @@ def realistic_noise(n, rms=0.01, df=5.0, pink_frac=0.0, rng=None):
     return rms * w / (w.std() + 1e-12)
 
 
+def electrical_idle(x, intervals, grid=None, lfps_hz=None, amp=0.3):
+    """Protocol non-data intervals. Squelches the signal to electrical idle (~0 differential)
+    over each ``(start, width)`` interval (samples); if ``lfps_hz`` + ``grid`` are given, fills
+    those intervals with a Low-Frequency Periodic Signaling burst (PCIe/USB LFPS) instead. Real
+    full captures contain these between data bursts."""
+    y = np.asarray(x, float).copy()
+    for s, w in intervals:
+        s = int(s)
+        e = min(len(y), s + int(w))
+        if lfps_hz and grid is not None:
+            t = np.arange(e - s) / grid.fs
+            y[s:e] = amp * np.sign(np.sin(2 * np.pi * lfps_hz * t))
+        else:
+            y[s:e] = 0.0
+    return y
+
+
 def drift(x, grid=None, kind="gain", amount=0.2, shape="linear"):
     """Slow, sub-record NONSTATIONARITY — thermal drift, VGA/AGC settling, DC-offset drift,
     laser aging. Applies a slowly-varying parameter across the whole record (much slower than

@@ -899,6 +899,20 @@ _steady = _y42[_lo_run + 5 * _spb42 + _spb42 // 2]                 # a mid-run (
 check("de_emphasis_taps(3.5 dB) yields ~3.5 dB transition-to-steady ratio",
       abs(20 * np.log10(_emph / _steady) - 3.5) < 0.3, f"measured {20*np.log10(_emph/_steady):.2f} dB")
 
+print("== electrical idle / LFPS: idle carries no data energy; LFPS is a low-freq burst ==")
+from wfmsynth.impairments import electrical_idle as _eidle
+_g43 = Grid(fs=200e9, baud=50e9, n=1 << 13)
+_x43 = (Signal(seed=1, grid=_g43).carrier("pam4", n_ui=_g43.n // 4, pattern="prbs13q", causal=True)).waveform()
+_iv = [(2000, 3000)]
+_idle = _eidle(_x43, _iv)
+_seg = slice(2200, 4800)
+check("an electrical-idle interval carries ~no data energy vs the active signal",
+      np.sqrt(np.mean(_idle[_seg] ** 2)) < 0.02 * np.sqrt(np.mean(_x43[_seg] ** 2)))
+_lf = _eidle(_x43, _iv, grid=_g43, lfps_hz=500e6, amp=0.3)
+_S = np.abs(np.fft.rfft(_lf[2000:5000])); _fseg = np.fft.rfftfreq(3000, d=_g43.dt)
+check("LFPS fills the idle with a low-frequency periodic burst (peak near f_lfps)",
+      _fseg[int(np.argmax(_S))] < 2e9 and abs(_fseg[int(np.argmax(_S))] - 500e6) < 2e8)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

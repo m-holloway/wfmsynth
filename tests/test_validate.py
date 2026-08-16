@@ -937,6 +937,21 @@ def test_de_emphasis_preset():
     assert abs(20 * np.log10(emph / steady) - 3.5) < 0.3
 
 
+def test_electrical_idle_and_lfps():
+    import wfmsynth as ws
+    from wfmsynth.impairments import electrical_idle
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)
+    x = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=g.n // 4, pattern="prbs13q", causal=True)).waveform()
+    iv = [(2000, 3000)]
+    idle = electrical_idle(x, iv)
+    seg = slice(2200, 4800)
+    assert np.sqrt(np.mean(idle[seg] ** 2)) < 0.02 * np.sqrt(np.mean(x[seg] ** 2))
+    lf = electrical_idle(x, iv, grid=g, lfps_hz=500e6, amp=0.3)
+    S = np.abs(np.fft.rfft(lf[2000:5000]))
+    fseg = np.fft.rfftfreq(3000, d=g.dt)
+    assert fseg[int(np.argmax(S))] < 2e9 and abs(fseg[int(np.argmax(S))] - 500e6) < 2e8
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

@@ -816,7 +816,13 @@ transition-to-steady ratio.
 Extend Tx FFE (#11) with the standardized de-emphasis presets (in dB) real transmitters expose.
 **Done when:** validate asserts a preset yields the specified de-emphasis ratio.
 
-### 43. Electrical-idle / LFPS / training sequences
+### 43. Electrical-idle / LFPS / training sequences — ✅ DONE (v0.34)
+`impairments.electrical_idle(x, intervals, grid, lfps_hz, amp)` squelches the signal to
+electrical idle over the given intervals, or fills them with an LFPS (low-frequency periodic
+signaling) burst. validate asserts an idle interval carries ~no data energy and LFPS shows a
+low-frequency periodic burst near f_lfps. (Training-sequence patterns can compose via #45
+carrier symbols.)
+
 Protocol non-data intervals: electrical idle, low-frequency periodic signaling (PCIe/USB LFPS),
 squelch, training patterns. Real full captures contain these between data bursts.
 **Done when:** validate asserts an idle interval carries no data energy and LFPS shows its periodic
