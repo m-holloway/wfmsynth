@@ -756,7 +756,11 @@ and a differential pair's P/N share timing with controlled skew.
 
 ### Tier 2 — high value
 
-### 37. Oscillator phase noise (colored jitter spectrum)
+### 37. Oscillator phase noise (colored jitter spectrum) — ✅ DONE (v0.29)
+`cdr.phase_noise(n, grid, rms_ps, slope)` generates colored clock phase noise whose PSD falls
+as 1/f**slope (slope~2 = free-running oscillator close-in); it's the phase-noise source for
+`timing_source`. validate asserts the PSD follows the requested slope and the RMS is honored.
+
 Real clocks have a Leeson-shaped phase-noise profile; jitter measurement and CDR tracking depend on
 the spectrum, not a single Pj tone. Provides a phase-noise source for #35.
 **Done when:** validate asserts the generated jitter PSD follows the requested slope.

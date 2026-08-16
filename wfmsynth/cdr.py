@@ -68,6 +68,19 @@ def apply_ssc(x, fs, f_ssc=32e3, spread=0.005, profile="down"):
     return np.interp(np.arange(n) - cum, np.arange(n), x, left=x[0], right=x[-1])
 
 
+def phase_noise(n, grid, rms_ps=1.0, slope=2.0, rng=None):
+    """Colored oscillator PHASE NOISE as a timing sequence (in samples) whose power spectral
+    density falls as 1/f**``slope``. slope≈2 is a free-running oscillator's close-in
+    (−20 dB/dec) profile; real clocks have a spectrum, not the single Pj tone. Scaled to
+    ``rms_ps``. This is the phase-noise source consumed by `timing_source`."""
+    rng = rng or np.random.default_rng()
+    w = rng.standard_normal(int(n))
+    W = np.fft.rfft(w)
+    f = np.arange(len(W), dtype=float); f[0] = 1.0
+    col = np.fft.irfft(W / f ** (slope / 2.0), int(n))
+    return (rms_ps * 1e-12 * grid.fs) * col / (col.std() + 1e-12)
+
+
 def apply_phase(x, phase_samples):
     """Warp a waveform by a per-sample timing deviation (in samples) — the general timing-
     modulation primitive. Feed it a composed phase from `timing_source` (SSC + phase noise +
@@ -102,12 +115,8 @@ def timing_source(n, grid, ssc=None, pj=None, wander=None, rj_ps=0.0, phase_nois
         rng = rng or np.random.default_rng()
         ph += (rj_ps * 1e-12 * grid.fs) * rng.standard_normal(int(n))
     if phase_noise:
-        rng = rng or np.random.default_rng()
-        w = rng.standard_normal(int(n))
-        W = np.fft.rfft(w)
-        f = np.arange(len(W), dtype=float); f[0] = 1.0
-        col = np.fft.irfft(W / f ** (phase_noise.get("slope", 2.0) / 2), int(n))
-        ph += (phase_noise["rms_ps"] * 1e-12 * grid.fs) * col / (col.std() + 1e-12)
+        ph += globals()["phase_noise"](n, grid, phase_noise["rms_ps"],
+                                       phase_noise.get("slope", 2.0), rng=rng)
     return ph
 
 
