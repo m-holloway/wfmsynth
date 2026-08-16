@@ -845,6 +845,19 @@ check("phase-noise PSD falls with the requested slope (~ -slope for 1/f**slope)"
 check("phase noise is scaled to the requested RMS (in samples)",
       abs(np.sqrt(np.mean(_pns ** 2)) - 1e-12 * _g37.fs) < 0.2 * 1e-12 * _g37.fs)
 
+print("== long-term drift: a measured attribute moves across the record; short windows are stable ==")
+from wfmsynth.impairments import drift as _drift
+_x38 = P.nrz(n_ui=1 << 11, seed=1, n=1 << 14, causal=True)
+_y38 = _drift(_x38, kind="gain", amount=0.8, shape="linear")
+_q = np.array_split(np.abs(_y38), 4)
+_rms_q = [float(np.sqrt(np.mean(_qi ** 2))) for _qi in _q]
+check("a slow gain drift moves the measured level monotonically across the record",
+      all(_rms_q[i] < _rms_q[i + 1] for i in range(3)), f"quarter RMS {[round(v,2) for v in _rms_q]}")
+_w = len(_x38) // 64
+_e0 = np.sqrt(np.mean(_y38[:_w] ** 2)); _e1 = np.sqrt(np.mean(_y38[_w:2 * _w] ** 2))
+check("within a short window the drift is negligible (adjacent short windows ~ equal)",
+      abs(_e1 / _e0 - 1.0) < 0.05, f"adjacent short-window ratio {_e1 / _e0:.3f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

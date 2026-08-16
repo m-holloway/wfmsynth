@@ -881,6 +881,24 @@ def test_oscillator_phase_noise_slope():
     assert ph.shape == (g.n,) and ph.std() > 0
 
 
+def test_long_term_drift():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    x = P.nrz(n_ui=1 << 11, seed=1, n=1 << 14, causal=True)
+    y = ws.drift(x, kind="gain", amount=0.8, shape="linear")
+    rms_q = [float(np.sqrt(np.mean(q ** 2))) for q in np.array_split(np.abs(y), 4)]
+    assert all(rms_q[i] < rms_q[i + 1] for i in range(3))            # monotonic across record
+    w = len(x) // 64
+    assert abs(np.sqrt(np.mean(y[w:2 * w] ** 2)) / np.sqrt(np.mean(y[:w] ** 2)) - 1.0) < 0.05
+    # dc drift moves the running mean; composes fluently
+    yd = ws.drift(x, kind="dc", amount=0.5)
+    assert np.mean(yd[-w:]) > np.mean(yd[:w]) + 0.05
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    s = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=g.n // 4, pattern="prbs13q", causal=True)
+         .drift(kind="gain", amount=0.3))
+    assert s.waveform().shape == (g.n,)
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P
