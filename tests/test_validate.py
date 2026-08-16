@@ -925,6 +925,18 @@ def test_acquisition_chain_bandwidth_and_timebase_jitter():
     assert ws.eye_height(tb, g) < ws.eye_height(x, g) - 0.02
 
 
+def test_de_emphasis_preset():
+    import wfmsynth.physics as P
+    spb = 16
+    taps = P.de_emphasis_taps(3.5)
+    sq = np.repeat(np.tile([-1.0, 1.0], 8), spb).astype(float)
+    y = P.tx_ffe(sq, taps, spb, pre=0)
+    start = 8 * spb
+    emph = y[start + spb // 2]
+    steady = y[start + 5 * spb + spb // 2]
+    assert abs(20 * np.log10(emph / steady) - 3.5) < 0.3
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

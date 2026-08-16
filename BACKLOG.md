@@ -808,7 +808,11 @@ Primitives for single-ended open-drain, framed slow signaling, and bus contentio
 **Done when:** validate asserts an open-drain wired-AND pulls low when any driver is active and
 floats to the pull-up otherwise.
 
-### 42. Standardized Tx de-emphasis presets
+### 42. Standardized Tx de-emphasis presets — ✅ DONE (v0.33)
+`physics.de_emphasis_taps(db)` returns the 2-tap FFE weights for a dB de-emphasis preset;
+`Signal.de_emphasis(db=)` composes it. validate asserts a 3.5 dB preset yields ~3.5 dB
+transition-to-steady ratio.
+
 Extend Tx FFE (#11) with the standardized de-emphasis presets (in dB) real transmitters expose.
 **Done when:** validate asserts a preset yields the specified de-emphasis ratio.
 

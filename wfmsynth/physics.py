@@ -96,6 +96,16 @@ def crosstalk(x, aggressor, coupling=0.12, kind="fext", td_frac=0.05):
     return x + coupling * (np.ptp(x) + 1e-9) * k
 
 
+def de_emphasis_taps(db):
+    """2-tap Tx FFE weights ``[main, post]`` realizing a de-emphasis of ``db`` — the
+    standardized preset real transmitters expose. The first bit after a transition is at
+    full amplitude and steady-state bits are reduced, with 20·log10(V_transition/V_steady)
+    = db. Use with `tx_ffe(..., pre=0)`."""
+    r = 10 ** (db / 20.0)
+    a = (r - 1.0) / (r + 1.0)
+    return [1.0, -a]
+
+
 def tx_ffe(x, taps, spb, pre=1):
     """Transmitter feed-forward equalizer (FFE) — the T-spaced pre-emphasis real high-speed
     transmitters almost always run. Applies per-UI weights `taps` at unit-interval spacing

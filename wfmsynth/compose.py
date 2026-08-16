@@ -152,6 +152,11 @@ def _op_dispersion(x, p, streams, grid, idx):
     return OPT.chromatic_dispersion(x, strength=p.get("strength", 20.0))
 
 
+def _op_de_emphasis(x, p, streams, grid, idx):
+    spb = grid.samples_per_ui if grid is not None else p["spb"]
+    return P.tx_ffe(x, P.de_emphasis_taps(p["db"]), spb, pre=0)
+
+
 def _op_scope(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("kind", "order") if k in p}
     return INST.scope_bandwidth(x, grid, p["bw_hz"], **kw)
@@ -197,7 +202,8 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
-         "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase}
+         "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase,
+         "de_emphasis": _op_de_emphasis}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -234,6 +240,10 @@ class Signal:
     def dispersion(self, **params):
         """Chromatic dispersion (pulse spreading). params: strength (~ D*L)."""
         return self._add("dispersion", **params)
+
+    def de_emphasis(self, **params):
+        """Tx de-emphasis preset (dB). params: db."""
+        return self._add("de_emphasis", **params)
 
     def scope(self, **params):
         """Scope acquisition bandwidth (band-limited front end). params: bw_hz, kind, order."""
