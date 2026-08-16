@@ -952,6 +952,18 @@ def test_electrical_idle_and_lfps():
     assert fseg[int(np.argmax(S))] < 2e9 and abs(fseg[int(np.argmax(S))] - 500e6) < 2e8
 
 
+def test_laser_chirp():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    Po = ws.to_optical(P.nrz(n_ui=g.n // 8, seed=1, n=g.n, causal=True), er_db=10.0)
+    c1 = ws.laser_chirp(Po, alpha=2.0, grid=g)
+    c2 = ws.laser_chirp(Po, alpha=4.0, grid=g)
+    edges = np.abs(np.gradient(Po)) > 0.2 * np.abs(np.gradient(Po)).max()
+    assert np.mean(np.abs(c1[edges])) > 5 * np.mean(np.abs(c1[~edges]))
+    assert abs(np.max(np.abs(c2)) / (np.max(np.abs(c1)) + 1e-30) - 2.0) < 0.1
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

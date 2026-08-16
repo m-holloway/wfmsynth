@@ -61,6 +61,17 @@ def chromatic_dispersion(x, strength=20.0):
     return np.fft.irfft(np.fft.rfft(x) * H, n)
 
 
+def laser_chirp(power, alpha=2.0, grid=None):
+    """Transient laser chirp: the instantaneous optical FREQUENCY excursion during intensity
+    transitions, Δf = (alpha/4π)·d(ln P)/dt. It occurs at the edges (zero on a steady level)
+    and scales with the linewidth-enhancement factor ``alpha``; combined with dispersion it
+    causes transition-dependent pulse distortion. Returns the frequency deviation (Hz if a
+    grid is given, else per-sample)."""
+    p = np.clip(np.asarray(power, float), 1e-9, None)
+    dt = grid.dt if grid is not None else 1.0
+    return (alpha / (4 * np.pi)) * np.gradient(np.log(p)) / dt
+
+
 def mpi(power, delay_samples, reflectivity=0.05):
     """Multipath interference: add a delayed, attenuated copy (a double-reflection ghost)."""
     p = np.asarray(power, float)

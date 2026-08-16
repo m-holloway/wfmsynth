@@ -828,7 +828,12 @@ squelch, training patterns. Real full captures contain these between data bursts
 **Done when:** validate asserts an idle interval carries no data energy and LFPS shows its periodic
 low-frequency burst.
 
-### 44. Laser chirp (companion to #34 optical)
+### 44. Laser chirp (companion to #34 optical) — ✅ DONE (v0.35)
+`optical.laser_chirp(power, alpha, grid)` returns the transient chirp -- the instantaneous
+optical frequency excursion during intensity transitions, (alpha/4pi)*d(ln P)/dt -- which
+occurs at edges and scales with alpha; with dispersion it causes transition-dependent
+distortion. validate asserts chirp concentrates at transitions and scales with alpha.
+
 Amplitude-dependent phase (frequency chirp during intensity transitions): alpha-parameter
 transient chirp that, with dispersion, causes transition-dependent pulse distortion.
 

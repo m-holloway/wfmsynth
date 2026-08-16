@@ -14,7 +14,7 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.34.0"
+__version__ = "0.35.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding)
@@ -41,14 +41,14 @@ from .stream import stream_convolve, stream_blocks, channel_fir
 from .simreal import separability, feature_vector
 from .rx import ctle, dfe
 from .scene import Scene
-from .optical import to_optical, rin_noise, shot_noise, chromatic_dispersion, mpi
+from .optical import to_optical, rin_noise, shot_noise, chromatic_dispersion, mpi, laser_chirp
 from .coding import dc_balanced, scramble_64b66b, running_disparity, max_run
 
 __all__ = [
     "physics", "impairments", "grammar", "pam4", "grid", "instrument", "streams", "compose",
     "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "ctle", "dfe", "Scene",
     "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",
-    "to_optical", "rin_noise", "shot_noise", "chromatic_dispersion", "mpi",
+    "to_optical", "rin_noise", "shot_noise", "chromatic_dispersion", "mpi", "laser_chirp",
     "stream_convolve", "stream_blocks", "channel_fir", "separability", "feature_vector",
     "recover_clock", "jitter_transfer", "tracked_out_fraction", "ssc_phase", "apply_ssc",
     "timing_source", "apply_phase", "phase_noise",

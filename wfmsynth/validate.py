@@ -913,6 +913,19 @@ _S = np.abs(np.fft.rfft(_lf[2000:5000])); _fseg = np.fft.rfftfreq(3000, d=_g43.d
 check("LFPS fills the idle with a low-frequency periodic burst (peak near f_lfps)",
       _fseg[int(np.argmax(_S))] < 2e9 and abs(_fseg[int(np.argmax(_S))] - 500e6) < 2e8)
 
+print("== laser chirp: a transition-edge frequency excursion scaling with alpha ==")
+from wfmsynth.optical import to_optical as _to, laser_chirp as _chirp
+_g44 = Grid(fs=200e9, baud=50e9, n=1 << 12)
+_Popt44 = _to(P.nrz(n_ui=_g44.n // 8, seed=1, n=_g44.n, causal=True), er_db=10.0)
+_c1 = _chirp(_Popt44, alpha=2.0, grid=_g44)
+_c2 = _chirp(_Popt44, alpha=4.0, grid=_g44)
+# chirp energy concentrates at transitions (where |dP| is large), not on steady levels
+_edges = np.abs(np.gradient(_Popt44)) > 0.2 * np.abs(np.gradient(_Popt44)).max()
+check("chirp is concentrated at intensity transitions (near-zero on steady levels)",
+      np.mean(np.abs(_c1[_edges])) > 5 * np.mean(np.abs(_c1[~_edges])))
+check("chirp magnitude scales with the alpha (linewidth-enhancement) parameter",
+      abs(np.max(np.abs(_c2)) / (np.max(np.abs(_c1)) + 1e-30) - 2.0) < 0.1)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
