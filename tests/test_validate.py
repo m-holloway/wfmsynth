@@ -929,7 +929,7 @@ def test_de_emphasis_preset():
     import wfmsynth.physics as P
     spb = 16
     taps = P.de_emphasis_taps(3.5)
-    sq = np.repeat(np.tile([-1.0, 1.0], 8), spb).astype(float)
+    sq = np.repeat(np.array([-1.0]*8 + [1.0]*8), spb).astype(float)
     y = P.tx_ffe(sq, taps, spb, pre=0)
     start = 8 * spb
     emph = y[start + spb // 2]

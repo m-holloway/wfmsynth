@@ -891,7 +891,7 @@ check("timebase jitter smears the eye horizontally (closes it)",
 print("== Tx de-emphasis preset: a dB preset yields that transition/steady ratio ==")
 _spb42 = 16
 _taps42 = P.de_emphasis_taps(3.5)
-_sq = np.repeat(np.tile([-1.0, 1.0], 8), _spb42).astype(float)     # 8-UI runs, sharp edges
+_sq = np.repeat(np.array([-1.0]*8 + [1.0]*8), _spb42).astype(float)     # 8-UI runs, sharp edges
 _y42 = P.tx_ffe(_sq, _taps42, _spb42, pre=0)
 _lo_run = 8 * _spb42                                               # index where the high run starts
 _emph = _y42[_lo_run + _spb42 // 2]                                # first UI after the transition
