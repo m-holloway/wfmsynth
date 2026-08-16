@@ -926,6 +926,19 @@ check("chirp is concentrated at intensity transitions (near-zero on steady level
 check("chirp magnitude scales with the alpha (linewidth-enhancement) parameter",
       abs(np.max(np.abs(_c2)) / (np.max(np.abs(_c1)) + 1e-30) - 2.0) < 0.1)
 
+print("== low-speed buses: open-drain wired-AND, UART framing ==")
+from wfmsynth.bus import open_drain as _od, uart_frame as _uf, uart_decode as _ud
+_d1 = np.array([1, 1, 0, 1, 1, 1])
+_d2 = np.array([1, 0, 1, 1, 0, 1])
+_bus = _od([_d1, _d2])
+check("open-drain wired-AND pulls low when ANY driver is active, else floats to the pull-up",
+      np.array_equal(_bus, np.array([1., 0., 0., 1., 0., 1.]))
+      and np.array_equal(_od([np.ones(5), np.ones(5)]), np.ones(5)))
+_msg = [0x55, 0xA3, 0x00, 0xFF]
+_wave = _uf(_msg, samples_per_bit=16)
+check("UART framing is idle-high with start/stop bits and decodes back to the bytes",
+      _ud(_wave, 16) == _msg and _wave[0] == 0.0 and _wave[9 * 16 + 8] == 1.0)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

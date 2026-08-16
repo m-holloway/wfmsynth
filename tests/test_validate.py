@@ -964,6 +964,18 @@ def test_laser_chirp():
     assert abs(np.max(np.abs(c2)) / (np.max(np.abs(c1)) + 1e-30) - 2.0) < 0.1
 
 
+def test_low_speed_buses():
+    from wfmsynth.bus import open_drain, uart_frame, uart_decode
+    d1 = np.array([1, 1, 0, 1, 1, 1])
+    d2 = np.array([1, 0, 1, 1, 0, 1])
+    assert np.array_equal(open_drain([d1, d2]), np.array([1., 0., 0., 1., 0., 1.]))
+    assert np.array_equal(open_drain([np.ones(5), np.ones(5)]), np.ones(5))
+    msg = [0x55, 0xA3, 0x00, 0xFF]
+    wave = uart_frame(msg, samples_per_bit=16)
+    assert uart_decode(wave, 16) == msg
+    assert wave[0] == 0.0 and wave[9 * 16 + 8] == 1.0        # start bit low, stop bit high
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

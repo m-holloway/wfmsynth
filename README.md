@@ -339,6 +339,14 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=Tr
   .scope(bw_hz=33e9).timebase(rms_ps=0.5)   # scope bandwidth + sample-clock jitter
 ```
 
+## Low-speed buses
+Embedded-bus signaling (open-drain wired-AND, UART framing):
+
+```python
+bus = ws.open_drain([driver_a, driver_b])     # low if any driver pulls; else pull-up high
+wave = ws.uart_frame([0x55, 0xA3], samples_per_bit=16)   # idle-high start/stop framing
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

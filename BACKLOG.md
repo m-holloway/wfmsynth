@@ -801,7 +801,12 @@ horizontally.
 
 ### Tier 3 — breadth / polish
 
-### 41. Low-speed bus signaling primitives
+### 41. Low-speed bus signaling primitives — ✅ DONE (v0.36)
+`wfmsynth.bus`: `open_drain(drivers)` (wired-AND -- the line is high unless any driver pulls
+low; bus contention / CAN arbitration fall out of it), `uart_frame(bytes)` / `uart_decode`
+(idle-high start/stop framing). validate asserts the wired-AND truth table and a UART frame
+round-trip. (SPI/CAN-differential compose from these + the differential/channel primitives.)
+
 The range a scope measures extends below serial: I2C (open-drain / wired-AND, ACK), SPI, UART
 (start/stop framing, idle), CAN / RS-485 (differential, arbitration, contention), variable bit rate.
 Primitives for single-ended open-drain, framed slow signaling, and bus contention.

@@ -14,10 +14,10 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.35.0"
+__version__ = "0.36.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
-               measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding)
+               measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding, bus)
 from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, differential_pair,
                       differential_mode, common_mode, supply_coupling)
@@ -43,10 +43,12 @@ from .rx import ctle, dfe
 from .scene import Scene
 from .optical import to_optical, rin_noise, shot_noise, chromatic_dispersion, mpi, laser_chirp
 from .coding import dc_balanced, scramble_64b66b, running_disparity, max_run
+from .bus import open_drain, uart_frame, uart_decode
 
 __all__ = [
     "physics", "impairments", "grammar", "pam4", "grid", "instrument", "streams", "compose",
-    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "ctle", "dfe", "Scene",
+    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "bus", "ctle", "dfe", "Scene",
+    "open_drain", "uart_frame", "uart_decode",
     "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",
     "to_optical", "rin_noise", "shot_noise", "chromatic_dispersion", "mpi", "laser_chirp",
     "stream_convolve", "stream_blocks", "channel_fir", "separability", "feature_vector",
