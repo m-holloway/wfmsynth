@@ -323,6 +323,14 @@ sc = (ws.Scene(g).add("lane0", w0).add("lane1", w1)
       .couple(into="lane1", frm="lane0", coupling=0.08))  # arbitrary lane-to-lane crosstalk
 ```
 
+## Optical-link primitives
+Optical intensity with extinction ratio, RIN, shot noise, and chromatic dispersion:
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True) \
+  .optical(er_db=6.0, rin_db_per_hz=-135, shot=True).dispersion(strength=10.0)
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

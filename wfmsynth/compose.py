@@ -131,6 +131,21 @@ def _op_timing(x, p, streams, grid, idx):
     return CDR.apply_phase(x, ph)
 
 
+def _op_optical(x, p, streams, grid, idx):
+    from . import optical as OPT
+    y = OPT.to_optical(x, er_db=p.get("er_db", 10.0), p_avg=p.get("p_avg", 1.0))
+    if "rin_db_per_hz" in p:
+        y = OPT.rin_noise(y, p["rin_db_per_hz"], p.get("bw_hz", 1e10), rng=streams.role(f"rin/{idx}"))
+    if p.get("shot"):
+        y = OPT.shot_noise(y, p.get("photons_per_unit", 1e4), rng=streams.role(f"shot/{idx}"))
+    return y
+
+
+def _op_dispersion(x, p, streams, grid, idx):
+    from . import optical as OPT
+    return OPT.chromatic_dispersion(x, strength=p.get("strength", 20.0))
+
+
 def _op_ctle(x, p, streams, grid, idx):
     from . import rx as RX
     return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
@@ -166,7 +181,7 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
-         "timing": _op_timing}
+         "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -194,6 +209,15 @@ class Signal:
         are per-UI weights, `pre` the number of pre-cursor taps. Puts a deliberate
         pre-cursor in the pulse response and de-emphasizes post-cursor ISI."""
         return self._add("tx_ffe", taps=list(taps), pre=pre, **params)
+
+    def optical(self, **params):
+        """Map to optical intensity with finite extinction ratio (+ optional RIN / shot noise).
+        params: er_db, p_avg, rin_db_per_hz, bw_hz, shot, photons_per_unit."""
+        return self._add("optical", **params)
+
+    def dispersion(self, **params):
+        """Chromatic dispersion (pulse spreading). params: strength (~ D*L)."""
+        return self._add("dispersion", **params)
 
     def ctle(self, **params):
         """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.

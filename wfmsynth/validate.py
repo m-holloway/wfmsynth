@@ -813,6 +813,25 @@ check("a differential pair splits a lane into P/N that share timing (skew -> com
       "d_p" in _sc36c.lanes() and "d_n" in _sc36c.lanes()
       and np.sqrt(np.mean(P.common_mode(_sc36c.lane("d_p"), _sc36c.lane("d_n")) ** 2)) > 0.01)
 
+print("== optical-link primitives: extinction ratio, RIN, shot noise, chromatic dispersion ==")
+from wfmsynth.optical import (to_optical as _topt, rin_noise as _rin, shot_noise as _shot,
+                              chromatic_dispersion as _cd)
+_x34 = P.nrz(n_ui=1 << 11, seed=1, n=1 << 13, causal=True)
+_Popt = _topt(_x34, er_db=8.0)
+check("to_optical gives non-negative power with the requested extinction ratio",
+      _Popt.min() >= 0 and abs(10 * np.log10(_Popt.max() / _Popt.min()) - 8.0) < 0.2)
+_rng34 = np.random.default_rng(0)
+_hi = _rin(np.full(20000, 1.0), -130, 1e10, _rng34); _lo = _rin(np.full(20000, 0.2), -130, 1e10, _rng34)
+check("RIN noise std is proportional to optical power (high level noisier than low)",
+      _hi.std() > 3 * _lo.std())
+_sh1 = _shot(np.full(20000, 1.0), 1e3, _rng34); _sh2 = _shot(np.full(20000, 0.2), 1e3, _rng34)
+check("shot noise variance is proportional to power (Poisson photon counting; folds #30)",
+      abs(_sh1.var() / _sh2.var() - 5.0) < 1.0)
+_pulse34 = np.zeros(1 << 13); _pulse34[(1 << 12) - 20:(1 << 12) + 20] = 1.0
+_disp = _cd(_pulse34, strength=60.0)
+check("chromatic dispersion spreads a pulse (frequency-dependent group delay)",
+      np.sum(np.abs(_disp) > 0.1 * np.abs(_disp).max()) > 2 * np.sum(np.abs(_pulse34) > 0.1))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
