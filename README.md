@@ -314,6 +314,15 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=Tr
   .timing(ssc=dict(f_ssc=32e3, spread=0.005), pj=dict(amp_ps=2, f_hz=5e9), rj_ps=0.3)
 ```
 
+## Multi-signal scenes
+Compose several correlated lanes — a shared supply rail, lane-to-lane crosstalk, diff pairs:
+
+```python
+sc = (ws.Scene(g).add("lane0", w0).add("lane1", w1)
+      .shared_supply(f_ripple_hz=1e6, am_depth=0.03)      # one rail, correlated across lanes
+      .couple(into="lane1", frm="lane0", coupling=0.08))  # arbitrary lane-to-lane crosstalk
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

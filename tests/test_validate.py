@@ -820,6 +820,27 @@ def test_timing_source_composes_and_injects():
     assert s.waveform().shape == (gp.n,)
 
 
+def test_scene_shared_supply_coupling_and_differential():
+    import wfmsynth as ws
+    import wfmsynth.physics as P
+    g = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    nui = g.n // 4
+    w0 = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True, seed=1)).waveform()
+    w1 = (ws.Signal(seed=2, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True, seed=7)).waveform()
+    assert abs(np.corrcoef(w0, w1)[0, 1]) < 0.2                    # independent lanes
+    # a shared supply rail is the same artifact on both lanes
+    sc = ws.Scene(g).add("l0", w0).add("l1", w1).shared_supply(f_ripple_hz=1e6, am_depth=0.05)
+    assert np.allclose(sc.lane("l0") / w0 - 1.0, sc.lane("l1") / w1 - 1.0)
+    # lane-to-lane coupling injects the aggressor (FEXT ~ its derivative)
+    scb = ws.Scene(g).add("l0", w0).add("l1", w1).couple(into="l1", frm="l0", coupling=0.4)
+    assert not np.array_equal(scb.lane("l1"), w1)
+    assert abs(np.corrcoef(scb.lane("l1") - w1, np.gradient(w0))[0, 1]) > 0.9
+    # a differential pair splits into P/N sharing timing
+    scc = ws.Scene(g).add("d", w0).differential("d", skew_ps=6.0)
+    assert "d_p" in scc.lanes() and "d_n" in scc.lanes()
+    assert np.sqrt(np.mean(ws.common_mode(scc.lane("d_p"), scc.lane("d_n")) ** 2)) > 0.01
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

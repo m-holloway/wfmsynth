@@ -795,6 +795,24 @@ _tone35 = np.cos(2 * np.pi * 10e9 * np.arange(_g35.n) / _g35.fs)
 check("apply_phase warps a waveform by the composed timing (feeds a carrier or the CDR)",
       not np.allclose(_aph(_tone35, _pj35), _tone35))
 
+print("== multi-signal scene: shared supply correlates lanes; lane-to-lane coupling; diff pair ==")
+from wfmsynth.scene import Scene as _Scene
+_g36 = Grid(fs=200e9, baud=50e9, n=1 << 12); _nui36 = _g36.n // 4
+_w0 = (Signal(seed=1, grid=_g36).carrier("pam4", n_ui=_nui36, pattern="prbs13q", causal=True, seed=1)).waveform()
+_w1 = (Signal(seed=2, grid=_g36).carrier("pam4", n_ui=_nui36, pattern="prbs13q", causal=True, seed=7)).waveform()
+_sc36 = _Scene(_g36).add("l0", _w0).add("l1", _w1).shared_supply(f_ripple_hz=1e6, am_depth=0.05)
+check("a shared supply rail induces the SAME (correlated) artifact across independent lanes",
+      np.allclose(_sc36.lane("l0") / _w0 - 1.0, _sc36.lane("l1") / _w1 - 1.0)
+      and abs(np.corrcoef(_w0, _w1)[0, 1]) < 0.2)
+_sc36b = _Scene(_g36).add("l0", _w0).add("l1", _w1).couple(into="l1", frm="l0", coupling=0.4)
+check("lane-to-lane coupling injects the aggressor's signature into the victim",
+      not np.array_equal(_sc36b.lane("l1"), _w1)
+      and abs(np.corrcoef(_sc36b.lane("l1") - _w1, np.gradient(_w0))[0, 1]) > 0.9)
+_sc36c = _Scene(_g36).add("d", _w0).differential("d", skew_ps=6.0)
+check("a differential pair splits a lane into P/N that share timing (skew -> common-mode)",
+      "d_p" in _sc36c.lanes() and "d_n" in _sc36c.lanes()
+      and np.sqrt(np.mean(P.common_mode(_sc36c.lane("d_p"), _sc36c.lane("d_n")) ** 2)) > 0.01)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
