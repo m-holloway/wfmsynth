@@ -717,7 +717,13 @@ noise, and dispersion spreads a pulse.
 
 ### Composability enablers — what lets these (and anything else) compose into real scenarios
 
-### 35. Timing-modulation source (arbitrary phase into any carrier)
+### 35. Timing-modulation source (arbitrary phase into any carrier) — ✅ DONE (v0.26)
+`cdr.timing_source(n, grid, ssc, pj, wander, rj_ps, phase_noise)` sums named clock effects
+into one per-sample timing-phase sequence; `cdr.apply_phase(x, phase)` warps a waveform by
+it; `Signal.timing(...)` composes it into any carrier. The enabler for realistic COMBINED
+jitter and for exercising the CDR. validate asserts a Pj source lands a phase tone at its
+frequency, a composed SSC+Pj+Rj source carries each component, and apply_phase warps.
+
 A composable phase-modulation source that sums SSC (#31) + oscillator phase noise (#37) + long-term
 wander (#38) + Pj/Rj/DCD into one per-symbol timing-phase sequence, injectable into any carrier.
 Today jitter is parametric Rj/Pj/DCD only; arbitrary phase injection is the enabler for realistic

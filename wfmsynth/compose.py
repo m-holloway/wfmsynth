@@ -124,6 +124,13 @@ def _op_ssc(x, p, streams, grid, idx):
                          spread=p.get("spread", 0.005), profile=p.get("profile", "down"))
 
 
+def _op_timing(x, p, streams, grid, idx):
+    from . import cdr as CDR
+    kw = {k: p[k] for k in ("ssc", "pj", "wander", "rj_ps", "phase_noise") if k in p}
+    ph = CDR.timing_source(len(x), grid, rng=streams.role(f"timing/{idx}"), **kw)
+    return CDR.apply_phase(x, ph)
+
+
 def _op_ctle(x, p, streams, grid, idx):
     from . import rx as RX
     return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
@@ -158,7 +165,8 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
-         "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling}
+         "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
+         "timing": _op_timing}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -191,6 +199,11 @@ class Signal:
         """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.
         params: fz_ghz, fp1_ghz, fp2_ghz, dc_gain."""
         return self._add("ctle", **params)
+
+    def timing(self, **params):
+        """Compose arbitrary clock timing into the carrier (the timing-modulation enabler).
+        params: ssc, pj, wander, rj_ps, phase_noise (see cdr.timing_source)."""
+        return self._add("timing", **params)
 
     def ssc(self, **params):
         """Spread-spectrum clocking — triangular clock-frequency modulation (EMI reduction).

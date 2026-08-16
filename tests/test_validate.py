@@ -801,6 +801,25 @@ def test_spread_spectrum_clocking():
     assert sig.waveform().shape == (g.n,)
 
 
+def test_timing_source_composes_and_injects():
+    import wfmsynth as ws
+    g = ws.Grid(fs=200e9, n=1 << 16)
+    f = np.fft.rfftfreq(g.n, d=g.dt)
+    pj = ws.timing_source(g.n, g, pj=dict(amp_ps=3.0, f_hz=2e9))
+    assert abs(f[int(np.argmax(np.abs(np.fft.rfft(pj - pj.mean()))))] - 2e9) < 5e7
+    comb = ws.timing_source(g.n, g, ssc=dict(f_ssc=1e6, spread=0.005),
+                            pj=dict(amp_ps=3.0, f_hz=2e9), rj_ps=0.5, rng=np.random.default_rng(0))
+    Pc = np.abs(np.fft.rfft(comb - comb.mean()))
+    assert Pc[int(np.argmin(np.abs(f - 2e9)))] > 5 * np.median(Pc) and comb.std() > pj.std()
+    tone = np.cos(2 * np.pi * 10e9 * np.arange(g.n) / g.fs)
+    assert not np.allclose(ws.apply_phase(tone, pj), tone)
+    # composes into a carrier
+    gp = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
+    s = (ws.Signal(seed=1, grid=gp).carrier("pam4", n_ui=gp.n // 4, pattern="prbs13q", causal=True)
+         .timing(ssc=dict(f_ssc=1e6, spread=0.004), pj=dict(amp_ps=2.0, f_hz=5e9), rj_ps=0.3))
+    assert s.waveform().shape == (gp.n,)
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

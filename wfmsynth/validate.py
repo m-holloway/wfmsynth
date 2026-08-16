@@ -780,6 +780,21 @@ _both = P.supply_coupling(_probe33, _g33, _fr33, am_depth=0.06, psij_ps=6.0)
 check("AM and PSIJ come from the SAME rail (both sidebands present, correlated to f_ripple)",
       _sb33(_both) > _am1 and _sb33(_both) > _pm0)
 
+print("== timing-modulation source: compose SSC + Pj + Rj into one injectable phase ==")
+from wfmsynth.cdr import timing_source as _tsrc, apply_phase as _aph
+_g35 = Grid(fs=200e9, n=1 << 16); _f35 = np.fft.rfftfreq(_g35.n, d=_g35.dt)
+_pj35 = _tsrc(_g35.n, _g35, pj=dict(amp_ps=3.0, f_hz=2e9))
+check("a Pj timing source puts a phase tone at its frequency",
+      abs(_f35[int(np.argmax(np.abs(np.fft.rfft(_pj35 - _pj35.mean()))))] - 2e9) < 5e7)
+_comb35 = _tsrc(_g35.n, _g35, ssc=dict(f_ssc=1e6, spread=0.005), pj=dict(amp_ps=3.0, f_hz=2e9),
+                rj_ps=0.5, rng=np.random.default_rng(0))
+_Pc35 = np.abs(np.fft.rfft(_comb35 - _comb35.mean()))
+check("a composed source (SSC+Pj+Rj) carries each component: the Pj tone survives, Rj adds spread",
+      _Pc35[int(np.argmin(np.abs(_f35 - 2e9)))] > 5 * np.median(_Pc35) and _comb35.std() > _pj35.std())
+_tone35 = np.cos(2 * np.pi * 10e9 * np.arange(_g35.n) / _g35.fs)
+check("apply_phase warps a waveform by the composed timing (feeds a carrier or the CDR)",
+      not np.allclose(_aph(_tone35, _pj35), _tone35))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

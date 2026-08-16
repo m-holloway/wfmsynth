@@ -68,6 +68,49 @@ def apply_ssc(x, fs, f_ssc=32e3, spread=0.005, profile="down"):
     return np.interp(np.arange(n) - cum, np.arange(n), x, left=x[0], right=x[-1])
 
 
+def apply_phase(x, phase_samples):
+    """Warp a waveform by a per-sample timing deviation (in samples) — the general timing-
+    modulation primitive. Feed it a composed phase from `timing_source` (SSC + phase noise +
+    wander + Pj/Rj all at once), or any custom timing sequence."""
+    x = np.asarray(x, float)
+    idx = np.arange(len(x))
+    return np.interp(idx - np.asarray(phase_samples, float), idx, x, left=x[0], right=x[-1])
+
+
+def timing_source(n, grid, ssc=None, pj=None, wander=None, rj_ps=0.0, phase_noise=None, rng=None):
+    """Compose a per-sample timing-phase deviation (in SAMPLES) by summing named sources into
+    one sequence — the enabler for realistic COMBINED jitter feeding a carrier (`apply_phase`)
+    or the CDR (`recover_clock`). Today jitter is parametric Rj/Pj/DCD only; this lets any mix
+    of clock effects compose:
+
+      ssc          dict(f_ssc, spread, profile)  -> spread-spectrum wander (`ssc_phase`)
+      pj           dict(amp_ps, f_hz)            -> sinusoidal (periodic) jitter
+      wander       dict(amp_ps, f_hz)            -> low-frequency wander
+      rj_ps        gaussian random jitter, 1-sigma in ps
+      phase_noise  dict(rms_ps, slope)           -> colored random jitter (1/f**(slope/2))
+    """
+    t = np.arange(int(n)) / grid.fs
+    ph = np.zeros(int(n))
+    if ssc:
+        ph += ssc_phase(n, grid.fs, ssc.get("f_ssc", 32e3), ssc.get("spread", 0.005),
+                        ssc.get("profile", "down"))
+    if pj:
+        ph += (pj["amp_ps"] * 1e-12 * grid.fs) * np.sin(2 * np.pi * pj["f_hz"] * t)
+    if wander:
+        ph += (wander["amp_ps"] * 1e-12 * grid.fs) * np.sin(2 * np.pi * wander["f_hz"] * t)
+    if rj_ps:
+        rng = rng or np.random.default_rng()
+        ph += (rj_ps * 1e-12 * grid.fs) * rng.standard_normal(int(n))
+    if phase_noise:
+        rng = rng or np.random.default_rng()
+        w = rng.standard_normal(int(n))
+        W = np.fft.rfft(w)
+        f = np.arange(len(W), dtype=float); f[0] = 1.0
+        col = np.fft.irfft(W / f ** (phase_noise.get("slope", 2.0) / 2), int(n))
+        ph += (phase_noise["rms_ps"] * 1e-12 * grid.fs) * col / (col.std() + 1e-12)
+    return ph
+
+
 def recover_clock(phase, baud, loop_bw, order=2, damping=0.707):
     """Run a CDR over a per-symbol timing ``phase`` sequence. Returns ``(clock, residual)``:
     ``clock`` is the recovered-clock phase (low-pass, the loop follows slow jitter) and
