@@ -306,6 +306,14 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=Tr
   .supply_coupling(f_ripple_hz=1e6, am_depth=0.03, psij_ps=2.0)   # AM + PSIJ from one rail
 ```
 
+## Timing-modulation source (composable jitter)
+Compose any mix of clock effects into one phase and inject it into a carrier:
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True) \
+  .timing(ssc=dict(f_ssc=32e3, spread=0.005), pj=dict(amp_ps=2, f_hz=5e9), rj_ps=0.3)
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
