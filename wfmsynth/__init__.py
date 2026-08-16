@@ -14,7 +14,7 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.31.0"
+__version__ = "0.32.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding)
@@ -28,7 +28,7 @@ from .impairments import (IMPAIRMENTS, apply_impairment, domain_randomize,
 from .grammar import sample, generate, CARRIERS, ENVELOPES
 from .pam4 import deep_capture, PATHOLOGIES
 from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_adc,
-                         digitize as digitize_adc)
+                         digitize as digitize_adc, scope_bandwidth, probe_loading, timebase_jitter)
 from .compose import Signal, dataset
 from .measure import (eye_height, best_phase, attributes, align_symbols, ground_truth,
                       pattern_period)
@@ -59,6 +59,7 @@ __all__ = [
     "mix_at_constant_power", "burst_gate", "apply_gated", "realistic_noise", "drift",
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "interleave_adc", "shaped_noise_floor", "clip_adc", "quantize_adc", "digitize_adc",
+    "scope_bandwidth", "probe_loading", "timebase_jitter",
     "Signal", "dataset",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",

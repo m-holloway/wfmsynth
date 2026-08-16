@@ -787,7 +787,13 @@ PRBS is a stand-in; real DC balance and run length depend on the code, which dri
 interaction with AC-coupling.
 **Done when:** validate asserts an 8b/10b stream is DC-balanced with bounded run length vs raw PRBS.
 
-### 40. Acquisition-chain primitives (scope/probe transfer, loading, trigger/timebase jitter)
+### 40. Acquisition-chain primitives (scope/probe transfer, loading, trigger/timebase jitter) — ✅ DONE (v0.32)
+`instrument.scope_bandwidth(x, grid, bw_hz, kind)` (Bessel/Gaussian band-limited front end),
+`probe_loading(x, grid, c_load_f, r_source)` (capacitive DUT loading -> RC low-pass), and
+`timebase_jitter(x, grid, rms_ps)` (sample-clock jitter smears the eye horizontally); compose
+via `Signal.scope()`/`Signal.timebase()`. validate asserts scope BW rolls off HF, probe
+loading attenuates HF, and timebase jitter closes the eye.
+
 Beyond the ADC (#3/#24/#25): the scope's own bandwidth-limiting response (Bessel/Gaussian), probe
 capacitive loading of the DUT, and trigger/timebase jitter — present in every real capture.
 **Done when:** validate asserts the scope bandwidth rolls off HF and timebase jitter smears the eye

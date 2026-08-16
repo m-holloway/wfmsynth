@@ -52,6 +52,37 @@ def interleave_adc(x, m_cores=4, gain_mm=0.0, offset_mm=0.0, skew_mm=0.0,
     return y
 
 
+def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4):
+    """The acquisition front-end's finite analog bandwidth — a real scope is band-limited and
+    rolls off high frequencies. ``kind='bessel'`` (flat group delay, like a real scope) or
+    ``'gaussian'``, with the −3 dB point at ``bw_hz``. Part of "what the scope records"."""
+    x = np.asarray(x, float)
+    wn = min(bw_hz / (grid.fs / 2.0), 0.99)
+    if kind == "gaussian":
+        f = np.fft.rfftfreq(len(x))
+        H = np.exp(-0.5 * (f / (wn / 2.0 + 1e-12)) ** 2)
+        return np.fft.irfft(np.fft.rfft(x) * H, len(x))
+    return _sig.sosfiltfilt(_sig.bessel(order, wn, output="sos"), x)
+
+
+def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0):
+    """A passive probe's input capacitance LOADS the node it measures — an RC low-pass with a
+    pole at 1/(2·pi·R·C) that attenuates high frequency. Real probes perturb the DUT."""
+    fc = 1.0 / (2 * np.pi * r_source * c_load_f)
+    return scope_bandwidth(x, grid, fc, kind="bessel", order=1)
+
+
+def timebase_jitter(x, grid, rms_ps=0.5, rng=None):
+    """Sample-clock / timebase jitter — each sample is taken at a slightly wrong time, which
+    smears the eye HORIZONTALLY. Adds independent per-sample timing error (RMS in ps)."""
+    rng = rng or np.random.default_rng()
+    x = np.asarray(x, float)
+    n = len(x)
+    dev = (rms_ps * 1e-12 * grid.fs) * rng.standard_normal(n)
+    idx = np.arange(n)
+    return np.interp(idx - dev, idx, x, left=x[0], right=x[-1])
+
+
 def quantize_adc(x, enob=6.0, full_scale=None):
     """Quantise to a finite-ENOB ADC lattice — arguably the single most characteristic
     thing an ADC does, and previously reachable only inside the full deep_capture pipeline.

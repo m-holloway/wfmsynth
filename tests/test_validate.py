@@ -911,6 +911,20 @@ def test_line_coding_dc_balance_and_scrambler():
     assert abs(scr.mean() - 0.5) < 0.03 and len(scr) == (len(raw) // 64) * 66
 
 
+def test_acquisition_chain_bandwidth_and_timebase_jitter():
+    import wfmsynth as ws
+    from wfmsynth.instrument import scope_bandwidth, timebase_jitter, probe_loading
+    g = ws.Grid(fs=400e9, baud=50e9, n=1 << 13)
+    nui = int(g.n // g.samples_per_ui)
+    x = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)).waveform()
+    f = np.fft.rfftfreq(g.n, d=g.dt)
+    hi = f > 60e9
+    assert np.sum(np.abs(np.fft.rfft(scope_bandwidth(x, g, 33e9)))[hi]) < 0.5 * np.sum(np.abs(np.fft.rfft(x))[hi])
+    assert np.sum(np.abs(np.fft.rfft(probe_loading(x, g, c_load_f=1e-12)))[hi]) < np.sum(np.abs(np.fft.rfft(x))[hi])
+    tb = timebase_jitter(x, g, rms_ps=1.5, rng=np.random.default_rng(0))
+    assert ws.eye_height(tb, g) < ws.eye_height(x, g) - 0.02
+
+
 def test_differential_pair_skew_and_mode_conversion():
     import wfmsynth as ws
     import wfmsynth.physics as P

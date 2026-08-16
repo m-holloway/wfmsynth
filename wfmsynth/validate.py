@@ -872,6 +872,22 @@ _scr39 = _scr(_raw39)
 check("64b/66b scrambler whitens to a ~balanced stream at 66/64 the length",
       abs(_scr39.mean() - 0.5) < 0.03 and len(_scr39) == (len(_raw39) // 64) * 66)
 
+print("== acquisition chain: scope bandwidth rolls off HF; timebase jitter smears the eye ==")
+from wfmsynth.instrument import (scope_bandwidth as _sbw, timebase_jitter as _tbj,
+                                 probe_loading as _pl)
+_g40 = Grid(fs=400e9, baud=50e9, n=1 << 13); _nui40 = int(_g40.n // _g40.samples_per_ui)
+_x40 = (Signal(seed=1, grid=_g40).carrier("pam4", n_ui=_nui40, pattern="prbs13q", causal=True)).waveform()
+_f40 = np.fft.rfftfreq(_g40.n, d=_g40.dt)
+_hi = _f40 > 60e9
+_bw40 = _sbw(_x40, _g40, bw_hz=33e9)
+check("scope bandwidth rolls off high frequencies (band-limited acquisition)",
+      np.sum(np.abs(np.fft.rfft(_bw40))[_hi]) < 0.5 * np.sum(np.abs(np.fft.rfft(_x40))[_hi]))
+check("probe capacitive loading is a low-pass (attenuates HF, loads the DUT)",
+      np.sum(np.abs(np.fft.rfft(_pl(_x40, _g40, c_load_f=1e-12)))[_hi]) < np.sum(np.abs(np.fft.rfft(_x40))[_hi]))
+_tb40 = _tbj(_x40, _g40, rms_ps=1.5, rng=np.random.default_rng(0))
+check("timebase jitter smears the eye horizontally (closes it)",
+      _eh(_tb40, _g40) < _eh(_x40, _g40) - 0.02, f"eye {_eh(_x40,_g40):.3f} -> {_eh(_tb40,_g40):.3f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

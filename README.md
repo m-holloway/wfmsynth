@@ -331,6 +331,14 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=Tr
   .optical(er_db=6.0, rin_db_per_hz=-135, shot=True).dispersion(strength=10.0)
 ```
 
+## Acquisition chain (scope / probe)
+Model the instrument beyond the ADC — band-limited front end and timebase jitter:
+
+```python
+ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True) \
+  .scope(bw_hz=33e9).timebase(rms_ps=0.5)   # scope bandwidth + sample-clock jitter
+```
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a

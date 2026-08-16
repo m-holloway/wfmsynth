@@ -152,6 +152,15 @@ def _op_dispersion(x, p, streams, grid, idx):
     return OPT.chromatic_dispersion(x, strength=p.get("strength", 20.0))
 
 
+def _op_scope(x, p, streams, grid, idx):
+    kw = {k: p[k] for k in ("kind", "order") if k in p}
+    return INST.scope_bandwidth(x, grid, p["bw_hz"], **kw)
+
+
+def _op_timebase(x, p, streams, grid, idx):
+    return INST.timebase_jitter(x, grid, rms_ps=p.get("rms_ps", 0.5), rng=streams.role(f"timebase/{idx}"))
+
+
 def _op_ctle(x, p, streams, grid, idx):
     from . import rx as RX
     return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
@@ -188,7 +197,7 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
-         "drift": _op_drift}
+         "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -225,6 +234,14 @@ class Signal:
     def dispersion(self, **params):
         """Chromatic dispersion (pulse spreading). params: strength (~ D*L)."""
         return self._add("dispersion", **params)
+
+    def scope(self, **params):
+        """Scope acquisition bandwidth (band-limited front end). params: bw_hz, kind, order."""
+        return self._add("scope", **params)
+
+    def timebase(self, **params):
+        """Timebase / sample-clock jitter (smears the eye horizontally). params: rms_ps."""
+        return self._add("timebase", **params)
 
     def ctle(self, **params):
         """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.
