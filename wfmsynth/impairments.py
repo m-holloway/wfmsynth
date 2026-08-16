@@ -86,6 +86,24 @@ def realistic_noise(n, rms=0.01, df=5.0, pink_frac=0.0, rng=None):
     return rms * w / (w.std() + 1e-12)
 
 
+def drift(x, grid=None, kind="gain", amount=0.2, shape="linear"):
+    """Slow, sub-record NONSTATIONARITY — thermal drift, VGA/AGC settling, DC-offset drift,
+    laser aging. Applies a slowly-varying parameter across the whole record (much slower than
+    a symbol), so a measured attribute moves across the capture while any short window looks
+    stationary. ``kind``: 'gain' | 'amplitude' | 'dc'; ``shape``: 'linear' (0→1) or 'sine'
+    (one slow half-cycle). Real long captures are nonstationary; only intermittent gates (#10)
+    otherwise break stationarity."""
+    x = np.asarray(x, float)
+    n = len(x)
+    k = np.arange(n) / max(n - 1, 1)
+    prof = k if shape == "linear" else np.sin(np.pi * k)       # 0..1 across the record
+    if kind in ("gain", "amplitude"):
+        return x * (1.0 + amount * prof)
+    if kind == "dc":
+        return x + amount * (np.ptp(x) + 1e-12) * prof
+    raise ValueError(f"unknown drift kind {kind!r} (use 'gain', 'amplitude' or 'dc')")
+
+
 def burst_gate(n, intervals, edge_frac=0.1):
     """A per-sample gate weight in [0, 1], nonzero only inside the given ``(start, width)``
     intervals (in samples), with raised-cosine on/off ramps (``edge_frac`` of each width)

@@ -124,6 +124,12 @@ def _op_ssc(x, p, streams, grid, idx):
                          spread=p.get("spread", 0.005), profile=p.get("profile", "down"))
 
 
+def _op_drift(x, p, streams, grid, idx):
+    from . import impairments as IMP
+    kw = {k: p[k] for k in ("kind", "amount", "shape") if k in p}
+    return IMP.drift(x, grid=grid, **kw)
+
+
 def _op_timing(x, p, streams, grid, idx):
     from . import cdr as CDR
     kw = {k: p[k] for k in ("ssc", "pj", "wander", "rj_ps", "phase_noise") if k in p}
@@ -181,7 +187,8 @@ _EXEC = {"carrier": _op_carrier, "lossy": _op_lossy, "reflect": _op_reflect,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
-         "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion}
+         "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
+         "drift": _op_drift}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -223,6 +230,11 @@ class Signal:
         """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.
         params: fz_ghz, fp1_ghz, fp2_ghz, dc_gain."""
         return self._add("ctle", **params)
+
+    def drift(self, **params):
+        """Slow sub-record drift (thermal/VGA/DC). params: kind('gain'|'amplitude'|'dc'),
+        amount, shape('linear'|'sine')."""
+        return self._add("drift", **params)
 
     def timing(self, **params):
         """Compose arbitrary clock timing into the carrier (the timing-modulation enabler).

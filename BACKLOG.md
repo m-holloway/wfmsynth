@@ -765,7 +765,12 @@ Real clocks have a Leeson-shaped phase-noise profile; jitter measurement and CDR
 the spectrum, not a single Pj tone. Provides a phase-noise source for #35.
 **Done when:** validate asserts the generated jitter PSD follows the requested slope.
 
-### 38. Long-term wander / drift (real-world designs)
+### 38. Long-term wander / drift (real-world designs) — ✅ DONE (v0.30)
+`impairments.drift(x, grid, kind, amount, shape)` applies slow sub-record nonstationarity
+(thermal/VGA/DC drift, laser aging) as a slowly-varying gain/amplitude/DC across the record;
+`Signal.drift()` composes it. validate asserts a measured attribute moves monotonically across
+the record while any short window stays ~stationary.
+
 Sub-Hz nonstationarity over the record: thermal drift, VGA/AGC settling, DC-offset drift, laser
 aging. Real long captures are nonstationary; today only intermittent gates (#10) break stationarity.
 **Done when:** validate asserts a slow drift moves a measured attribute monotonically across the
