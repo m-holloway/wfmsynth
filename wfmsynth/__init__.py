@@ -14,10 +14,10 @@ Modules / public API:
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
-__version__ = "0.26.0"
+__version__ = "0.27.0"
 
 from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
-               measure, sweep, cdr, sparam, stream, simreal, rx)
+               measure, sweep, cdr, sparam, stream, simreal, rx, scene)
 from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, resonant_reflection,
                       nominal_nonlinearity, crosstalk_matrix, differential_pair,
                       differential_mode, common_mode, supply_coupling)
@@ -39,10 +39,11 @@ from .sparam import read_touchstone, write_touchstone, sparam_channel, touchston
 from .stream import stream_convolve, stream_blocks, channel_fir
 from .simreal import separability, feature_vector
 from .rx import ctle, dfe
+from .scene import Scene
 
 __all__ = [
     "physics", "impairments", "grammar", "pam4", "grid", "instrument", "streams", "compose",
-    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "ctle", "dfe",
+    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "ctle", "dfe", "Scene",
     "stream_convolve", "stream_blocks", "channel_fir", "separability", "feature_vector",
     "recover_clock", "jitter_transfer", "tracked_out_fraction", "ssc_phase", "apply_ssc",
     "timing_source", "apply_phase",

@@ -731,7 +731,14 @@ combined jitter and for exercising the CDR (#12).
 **Done when:** validate asserts a composed phase source (SSC+PN+Pj) reproduces each component in the
 carrier's realized edge timing.
 
-### 36. Multi-signal "scene" composition (shared aggressors / supply / clock)
+### 36. Multi-signal "scene" composition (shared aggressors / supply / clock) — ✅ DONE (v0.27)
+`wfmsynth.scene.Scene(grid)` composes several named lanes with SHARED sources: `shared_supply`
+(one rail -> correlated artifact across lanes), `couple(into, frm, coupling)` (arbitrary
+lane-to-lane crosstalk), `differential(name, skew_ps, ...)` (split a lane into P/N sharing
+timing). The enabler for realistic multi-lane scenarios the single-Signal chain can't express.
+validate asserts a shared rail gives an identical artifact across independent lanes, coupling
+injects the aggressor, and a diff pair yields P/N with skew-induced common-mode.
+
 Compose MULTIPLE Signals that share correlated sources — a supply rail coupling into several lanes,
 a differential pair as coupled P/N, user-defined aggressors coupling into user-defined victims.
 Today crosstalk aggressors are generated internally; a scene primitive lets arbitrary lanes/rails
