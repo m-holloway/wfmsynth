@@ -962,6 +962,35 @@ check("the CDR-folded eye is more OPEN than the fixed-grid eye for low-frequency
 check("high-frequency jitter is NOT tracked out (folded ~ fixed-grid eye)",
       abs(_fold(_hf29, _g29) - _eh(_hf29, _g29)) < 0.05)
 
+print("== generalized two-rate acquisition (issue #51): sim grid -> acquisition -> stored record ==")
+import json as _json51
+from wfmsynth.acquire import AcquisitionProfile as _AP, record_decimation as _rdec
+_gsim = Grid(fs=200e9, baud=25e9, n=1 << 14)
+_prof = _AP(sample_rate_hz=2.5e9, record_length=1024, input_bandwidth_hz=800e6, enob=7,
+            sample_clock_jitter_rms_s=0.5e-12, noise_floor=dict(rms=1e-3, shape="pink"))
+_asig = (Signal(seed=1, grid=_gsim).carrier("nrz", n_ui=256, causal=True)
+         .lossy(loss_db=6.0, loss_at_ghz=12.0, causal=True).acquire(_prof))
+_stored = _asig.waveform()
+check("two-rate: fine sim grid >= acquisition grid, and digitized length == record_length",
+      _gsim.fs >= _prof.sample_rate_hz and len(_stored) == 1024)
+_taps = (Signal(seed=1, grid=_gsim).carrier("nrz", n_ui=256, causal=True)
+         .lossy(loss_db=6.0, loss_at_ghz=12.0, causal=True)).acquire_taps(_prof)
+check("taps: 'simulated' and 'digitized' differ; info reports realized sim vs acq rates",
+      _taps["simulated"].shape != _taps["digitized"].shape
+      and _taps["info"]["sim_fs"] > _taps["info"]["acq_fs"]
+      and _taps["info"]["record_length"] == 1024)
+_rec51 = _json51.loads(_json51.dumps(_asig.recipe()))
+check("acquire recipe round-trips bit-for-bit (front end + jitter + noise via role streams)",
+      np.array_equal(Signal.from_recipe(_rec51).waveform(), _stored))
+_pulse51 = np.zeros(4096); _pulse51[2001:2007] = 1.0        # a 6-sample narrow pulse
+_ph = _rdec(_pulse51, mode="peak_hold", depth=512); _sm = _rdec(_pulse51, mode="sample", depth=512)
+check("record decimation: a narrow pulse survives peak_hold (2-ch) but is lost under naive sample",
+      _ph.shape == (2, 512) and _ph.max() > 0.9 and _sm.max() < 0.5)
+_a51 = (Signal(seed=1, grid=_gsim).carrier("nrz", n_ui=256, causal=True).scope(bw_hz=5e9)).waveform()
+_b51 = (Signal(seed=1, grid=_gsim).carrier("nrz", n_ui=256, causal=True).input_bandwidth(bw_hz=5e9)).waveform()
+check("backward-compat: .input_bandwidth() / .sample_clock_jitter() alias scope/timebase bit-identically",
+      np.array_equal(_a51, _b51))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

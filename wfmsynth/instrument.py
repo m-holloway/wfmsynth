@@ -155,3 +155,7 @@ def clip_adc(x, full_scale=1.0):
     x = np.asarray(x, float)
     mask = np.abs(x) >= full_scale
     return np.clip(x, -full_scale, full_scale), mask
+
+
+# General-purpose alias (issue #51): the analog input-stage bandwidth limit.
+input_bandwidth = scope_bandwidth

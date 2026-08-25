@@ -1104,3 +1104,41 @@ def test_default_rise_time_behaviour_is_unchanged():
     b = pam4(n_ui=64, tr_frac=0.02, seed=3, n=512, causal=True,
              tr_floor_samples=2.0)
     assert np.array_equal(a, b)
+
+
+def test_two_rate_acquisition_issue51():
+    import json
+    import wfmsynth as ws
+    from wfmsynth import AcquisitionProfile, record_decimation
+    g_sim = ws.Grid(fs=200e9, baud=25e9, n=1 << 14)
+    prof = AcquisitionProfile(sample_rate_hz=2.5e9, record_length=1024, input_bandwidth_hz=800e6,
+                              enob=7, sample_clock_jitter_rms_s=0.5e-12,
+                              noise_floor=dict(rms=1e-3, shape="pink"))
+    base = (ws.Signal(seed=1, grid=g_sim).carrier("nrz", n_ui=256, causal=True)
+            .lossy(loss_db=6.0, loss_at_ghz=12.0, causal=True))
+    asig = ws.Signal.from_recipe(base.recipe()).acquire(prof)   # fresh copy so we can reuse `base`
+    stored = asig.waveform()
+    assert g_sim.fs >= prof.sample_rate_hz and len(stored) == 1024
+
+    taps = ws.Signal.from_recipe(base.recipe()).acquire_taps(prof)
+    assert taps["simulated"].shape != taps["digitized"].shape
+    assert taps["info"]["sim_fs"] > taps["info"]["acq_fs"] and taps["info"]["record_length"] == 1024
+
+    rec = json.loads(json.dumps(asig.recipe()))
+    assert np.array_equal(ws.Signal.from_recipe(rec).waveform(), stored)   # round-trips
+
+    pulse = np.zeros(4096); pulse[2001:2007] = 1.0
+    ph = record_decimation(pulse, mode="peak_hold", depth=512)
+    sm = record_decimation(pulse, mode="sample", depth=512)
+    assert ph.shape == (2, 512) and ph.max() > 0.9 and sm.max() < 0.5
+
+    # peak_hold storage composes through a profile -> 2-channel stored record
+    prof2 = AcquisitionProfile(sample_rate_hz=2.5e9, record_length=4096,
+                               decimation=dict(mode="peak_hold", depth=512))
+    st2 = ws.Signal.from_recipe(base.recipe()).acquire(prof2).waveform()
+    assert st2.shape == (2, 512)
+
+    # backward-compat aliases are bit-identical
+    a = (ws.Signal(seed=1, grid=g_sim).carrier("nrz", n_ui=256, causal=True).scope(bw_hz=5e9)).waveform()
+    b = (ws.Signal(seed=1, grid=g_sim).carrier("nrz", n_ui=256, causal=True).input_bandwidth(bw_hz=5e9)).waveform()
+    assert np.array_equal(a, b)

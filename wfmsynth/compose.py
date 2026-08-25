@@ -23,7 +23,7 @@ real, documented parameter — nothing is hidden or randomized-but-unrecorded. R
 order, which is what makes the round-trip exact.
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import asdict as _asdict, dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -174,6 +174,13 @@ def _op_timebase(x, p, streams, grid, idx):
     return INST.timebase_jitter(x, grid, rms_ps=p.get("rms_ps", 0.5), rng=streams.role(f"timebase/{idx}"))
 
 
+def _op_acquire(x, p, streams, grid, idx):
+    from . import acquire as ACQ
+    prof = ACQ.AcquisitionProfile(**p["profile"])
+    taps = ACQ.acquire_record(x, grid, prof, rng=streams.role(f"acquire/{idx}"))
+    return taps[p.get("tap", "stored")]
+
+
 def _op_ctle(x, p, streams, grid, idx):
     from . import rx as RX
     return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
@@ -211,7 +218,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase,
-         "de_emphasis": _op_de_emphasis}
+         "de_emphasis": _op_de_emphasis, "acquire": _op_acquire}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -262,9 +269,35 @@ class Signal:
         """Scope acquisition bandwidth (band-limited front end). params: bw_hz, kind, order."""
         return self._add("scope", **params)
 
+    def input_bandwidth(self, **params):
+        """Analog input-stage bandwidth limit (general-purpose alias of `scope`). params: bw_hz."""
+        return self._add("scope", **params)
+
+    analog_front_end = input_bandwidth
+
     def timebase(self, **params):
         """Timebase / sample-clock jitter (smears the eye horizontally). params: rms_ps."""
         return self._add("timebase", **params)
+
+    def sample_clock_jitter(self, **params):
+        """Sample-clock jitter (general-purpose alias of `timebase`). params: rms_ps."""
+        return self._add("timebase", **params)
+
+    def acquire(self, profile, tap="stored"):
+        """Generalized two-rate acquisition: run the analog front end + digitizer + optional
+        record decimation described by an ``AcquisitionProfile`` (or its dict), sampling the
+        simulated waveform onto the acquisition grid. ``tap`` selects which stage to emit
+        ('simulated' | 'conditioned' | 'digitized' | 'stored'). Carrier-agnostic."""
+        prof = profile if isinstance(profile, dict) else _asdict(profile)
+        return self._add("acquire", profile=prof, tap=tap)
+
+    def acquire_taps(self, profile):
+        """Build the simulated waveform from the current chain (no acquire op), then run the
+        acquisition and return ALL taps as a dict: simulated / conditioned / digitized / stored /
+        info (realized simulation vs acquisition rates)."""
+        from .acquire import AcquisitionProfile, acquire_record
+        prof = profile if isinstance(profile, AcquisitionProfile) else AcquisitionProfile(**profile)
+        return acquire_record(self.waveform(), self.grid, prof, rng=np.random.default_rng(self.seed))
 
     def ctle(self, **params):
         """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.

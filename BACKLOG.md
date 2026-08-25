@@ -872,3 +872,20 @@ symbols to the carrier via #45's from_symbols.
 
 **Done when:** validate asserts an 8b/10b
 stream has max run <=5 and is DC-balanced, and decodes back to the input bytes.
+
+### 47. Generalized two-rate synthesis: simulation grid -> acquisition -> record (issue #51) — ✅ DONE (v0.39)
+`wfmsynth.acquire`: `AcquisitionProfile` (vendor-neutral config: sample_rate_hz, record_length,
+input_bandwidth_hz, sample_clock_jitter_rms_s, enob, clip, interleave, noise_floor, decimation)
++ `Signal.acquire(profile, tap=)` / `Signal.acquire_taps(profile)` run a carrier-agnostic
+two-rate pipeline (source@sim-grid -> analog front end -> sampled onto the acquisition grid with
+clock jitter -> digitizer -> optional record decimation) with taps (simulated/conditioned/
+digitized/stored) and realized-rate provenance. `record_decimation(mode='sample'|'peak_hold'|
+'average')` — peak_hold keeps a 2-channel (min,max) record so narrow transients survive.
+Backward-compat aliases `.input_bandwidth()`/`.sample_clock_jitter()` (== scope/timebase,
+bit-identical). validate asserts all 5 issue done-when. Follow-up: refactor `deep_capture`
+onto this as a PAM4 preset (#48).
+
+### 48. Refactor deep_capture onto generalized acquire (companion to #47)
+Make `pam4.deep_capture()` a thin PAM4 preset over `Signal.acquire()` + segmented-dataset
+conventions, rather than a separate two-rate path. **Done when:** deep_capture output is
+unchanged under defaults and its internal resample is `record_decimation`.

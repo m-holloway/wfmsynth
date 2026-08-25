@@ -347,6 +347,21 @@ bus = ws.open_drain([driver_a, driver_b])     # low if any driver pulls; else pu
 wave = ws.uart_frame([0x55, 0xA3], samples_per_bit=16)   # idle-high start/stop framing
 ```
 
+## Two-rate acquisition (simulation grid -> acquisition -> stored record)
+Simulate physics on a fine grid, then model the acquisition system (front end + digitizer +
+optional record decimation) onto the sample rate / record length that actually gets stored:
+
+```python
+from wfmsynth import AcquisitionProfile
+prof = AcquisitionProfile(sample_rate_hz=2.5e9, record_length=16384, input_bandwidth_hz=800e6,
+                          enob=7, decimation=dict(mode="peak_hold", depth=1024))
+sig = ws.Signal(seed=1, grid=ws.Grid(fs=200e9, baud=25e9, n=1<<14)).carrier("nrz", n_ui=256, causal=True)
+stored = sig.acquire(prof).waveform()             # what an acquisition system would store
+taps   = sig.acquire_taps(prof)                   # simulated / conditioned / digitized / stored
+```
+Carrier-agnostic (NRZ/PAM4/clocks/buses/optical). `peak_hold` decimation keeps a 2-channel
+(min,max) record so narrow transients survive time compression.
+
 ## Roadmap and backlog
 **[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
 flagship next step is **provenance-first composable synthesis**: building each signal as a
