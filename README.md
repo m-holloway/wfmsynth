@@ -1,47 +1,162 @@
 # wfmsynth
 
-**Physics-informed synthetic waveform generation.** Generate realistic voltage-vs-time
-signals — grounded in real signal-integrity physics — for testing, benchmarking, and
-training/ground-truth data. numpy/scipy only; every physics primitive is validated by a
-hard assertion.
+**Physics-informed waveform synthesis for ML datasets, benchmarks, and instrument-like
+captures.** `wfmsynth` builds voltage-versus-time signals from validated physical effects:
+sources, channels, reflections, interference, clock error, receiver equalization, and the
+scope/ADC that records the result.
 
-It models the things that actually shape a high-speed signal: frequency-dependent **causal
-channels** (skin + dielectric loss), transmission-line **reflections**, **crosstalk**
-(NEXT/FEXT), **AC-coupling** wander, and physically **decomposed jitter** (Rj/Pj/DCD) —
-plus digital (NRZ/PAM4) and RF (AM/FM/PSK/QAM) carriers, a compositional grammar of
-signals, and full **"deep-memory" scope captures** with injected defects and ground truth.
+The library is useful when ideal sine waves or perfect digital edges are too clean for the
+problem you are testing. It helps you:
+
+- generate reproducible training examples with exact recipes;
+- vary one physical factor while holding the others fixed;
+- emit labels measured from the resulting waveform, not merely copied from input knobs;
+- model the difference between an ideal simulated signal and a stored scope record; and
+- compare synthetic and measured sets to identify missing realism.
+
+Only NumPy and SciPy are required. Each physical primitive has a validation assertion that
+checks the behavior it claims to model.
+
+## Install and verify
+
+```bash
+git clone https://github.com/m-holloway/wfmsynth.git
+cd wfmsynth
+python -m pip install -e ".[test]"
+python -m wfmsynth.validate
+```
+
+The final command is a physics sanity gate: it checks properties such as channel loss,
+reflection delay, jitter transfer, ADC artifacts, and recipe round trips. It validates the
+synthesizer, not an ML model trained from its output.
+
+## Your first realistic waveform
+
+Start with the composable `Signal` API. A `Grid` gives the waveform real sample-rate and
+symbol-rate units; each chained operation represents one stage in the signal path.
 
 ```python
-import numpy as np
 import wfmsynth as ws
-from wfmsynth import physics as P
-rng = np.random.default_rng(0)
 
-# a causal (minimum-phase) lossy channel on an NRZ signal
-x = P.lossy_channel(P.nrz(n_ui=32, seed=3), length_in=10.0, tand=0.02, causal=True)
+grid = ws.Grid(fs=100e9, baud=25e9, n=16_384)
 
-# apply a named impairment, then label-preserving domain randomization
-y = ws.domain_randomize(ws.apply_impairment("crosstalk", P.pam4(n_ui=32, seed=5), rng), rng)
+signal = (
+    ws.Signal(seed=7, grid=grid)
+    .carrier("nrz", n_ui=4096, causal=True)             # transmitted data
+    .lossy(loss_db=8.0, loss_at_ghz=12.5, causal=True) # PCB/cable bandwidth
+    .reflect(td_ps=80.0, gamma_s=0.15)                 # connector/discontinuity echo
+    .scope(bw_hz=30e9)                                 # instrument front end
+)
 
-# a realistic segmented PAM4 deep-memory capture with injected defects (+ ground truth)
-cap = ws.deep_capture(n_segments=2000, needle_rate=0.02, seed=1, group_size=8)
-# cap["X"] -> (2000, 1024) scope segments ; cap["labels"], cap["needle_idx"], cap["group_id"]
+waveform = signal.waveform()
+recipe = signal.recipe()  # JSON-serializable, reproducible ground truth
 ```
 
-## Install
-```bash
-pip install numpy scipy          # runtime deps
-pip install -e .                 # from a clone
+For the complete path from a fine simulation grid to a stored acquisition record, use an
+`AcquisitionProfile`:
+
+```python
+profile = ws.AcquisitionProfile(
+    sample_rate_hz=25e9,
+    record_length=4096,
+    input_bandwidth_hz=10e9,
+    enob=7,
+)
+stored = signal.acquire(profile).waveform()
 ```
 
-## What's inside (`wfmsynth/`)
-| module | what it provides |
+Run [`examples/quickstart.py`](examples/quickstart.py) for a guided first example, then see
+[`examples/README.md`](examples/README.md) for the full learning path.
+
+## Which API should I use?
+
+| Goal | Start with | Why |
+|---|---|---|
+| Build a realistic, reproducible signal path | `Signal` + `Grid` | Recommended high-level API; records each stage in a recipe |
+| Model what a scope stores | `Signal.acquire(AcquisitionProfile)` | Separates fine-grid simulation from front end, sampling, ADC, and record decimation |
+| Apply or study one physical operation | `wfmsynth.physics` | Low-level NumPy-in/NumPy-out primitives for custom pipelines |
+| Add one named fault to an existing array | `apply_impairment` | Convenient fixed vocabulary for class-labelled augmentation |
+| Add harmless capture variation | `domain_randomize` | Adds sub-threshold gain, offset, bandwidth, and noise changes without changing the class; currently use the default 4096-point record length |
+| Sample many waveform shapes broadly | `generate` | Grammar-based morphology coverage; useful for broad pretraining, not a protocol-accurate link |
+| Build a segmented PAM4 defect benchmark | `deep_capture` | Specialized legacy preset with segment, defect, and shared-link labels |
+
+Do not treat these as interchangeable:
+
+- A **labelled impairment** is the effect your model should detect.
+- **Domain randomization** is nuisance variation the model should ignore.
+- A **recipe** records requested causes; **measured ground truth** records what those causes
+  actually produced after the complete chain.
+
+## From ideal to real-world-like
+
+A useful pipeline follows the order of the physical system:
+
+```text
+source data and clock
+  -> transmitter imperfections / FFE
+  -> channel loss and reflections
+  -> coupled interference and supply effects
+  -> receiver equalization
+  -> scope/probe bandwidth and timebase
+  -> ADC noise, clipping, interleave artifacts, and quantization
+  -> stored record / decimation
+```
+
+| Effect | Plain-language model | Use it when |
+|---|---|---|
+| Channel loss | Frequency-dependent blur that smears neighboring symbols | Modeling a PCB trace, cable, package, or other bandwidth-limited path |
+| Reflection | A delayed echo from an impedance discontinuity | Modeling connectors, vias, stubs, poor termination, or damaged interconnect |
+| Crosstalk | Interference coupled from another active signal | Modeling adjacent traces or lanes; use asynchronous aggressors unless lock is intentional |
+| Jitter / timing | Random, periodic, or slowly varying movement of edge times | Modeling transmitter clocks, SSC, phase noise, or timing margin |
+| Tx FFE / Rx CTLE / DFE | Compensation applied before or after the channel | Modeling links that use real transmitter or receiver equalization |
+| Supply coupling | Correlated amplitude and timing modulation from a power rail | Modeling ripple, switching activity, or power-supply-induced jitter |
+| Scope / probe | Bandwidth and loading imposed before digitization | Matching what an instrument sees rather than an ideal node |
+| ADC effects | Noise, interleave mismatch, clipping, and finite resolution | Matching stored sample statistics and converter artifacts |
+
+For jitter, prefer source timing (`carrier(..., jitter=...)` or `.timing(...)`) so the
+shifted edges propagate through the channel. `physics.inject_jitter()` remains available for
+legacy array-warp workflows but should not be the default for a new physical chain.
+
+## Small glossary
+
+| Term | Meaning |
 |---|---|
-| `physics` | low-level primitives: `lossy_channel` (causal option), `multi_reflection`, `crosstalk`, `ac_couple`, `inject_jitter`, `nrz`, `pam4`, `am/fm/psk/qam`, `chirp`, `pdn_transient`, `ecg_like`, `family_bank` |
-| `impairments` | `apply_impairment(name, x, rng)`, `domain_randomize(x, rng)`, and the `IMPAIRMENTS` vocabulary (14 grounded faults) |
-| `grammar` | compositional signals — `carrier()` × `envelope()` → `sample()` / `generate()`; covers a broad "shape manifold" by composition rather than enumeration |
-| `pam4` | `deep_capture()` — realistic segmented PAM4 scope captures (internal high-res → scope-rate digitization with thermal noise + finite ENOB), with channel-class defects grouped across a shared link |
-| `validate` | `python -m wfmsynth.validate` — hard assertions that each primitive does what it claims |
+| **NRZ / PAM4** | Two-level / four-level digital signaling |
+| **UI (unit interval)** | One transmitted symbol period |
+| **GSa/s / GBd** | Billions of samples per second / symbols per second |
+| **ISI** | Inter-symbol interference: one symbol smears into its neighbors |
+| **Eye height** | Vertical decision margin after repeated symbols are overlaid |
+| **Rj / Pj / DCD** | Random jitter / periodic jitter / duty-cycle distortion |
+| **FFE / CTLE / DFE** | Transmitter feed-forward / receiver analog / receiver feedback equalizers |
+| **CDR** | Clock and data recovery; tracks some timing movement and leaves the rest visible |
+| **ENOB** | Effective ADC resolution in bits |
+| **Touchstone / S-parameters** | Standard measured frequency-response files for channels |
+
+## Learning path
+
+1. **Start:** [`examples/quickstart.py`](examples/quickstart.py) — source, channel, capture
+   variation, and reproducibility.
+2. **Build a complete chain:** [`examples/realistic_scenario.py`](examples/realistic_scenario.py)
+   — electrical, optical, and multi-lane scenarios.
+3. **Create ML data safely:** [`examples/provenance.py`](examples/provenance.py),
+   [`examples/ground_truth.py`](examples/ground_truth.py), and
+   [`examples/confounder_sweep.py`](examples/confounder_sweep.py).
+4. **Check realism:** [`examples/sim_to_real.py`](examples/sim_to_real.py) — find features
+   that separate synthetic from measured data.
+5. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
+   samples/UI, and two-rate acquisition are indexed in
+   [`examples/README.md`](examples/README.md).
+
+## Capability map
+
+| Area | Modules | Main capabilities |
+|---|---|---|
+| Composition and units | `compose`, `grid`, `streams` | `Signal`, recipes, deterministic factor streams, contrastive pairs |
+| Sources and effects | `physics`, `impairments`, `grammar` | Digital/RF sources, channels, reflections, jitter, named faults, broad shape generation |
+| Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, scope/probe/ADC effects, segmented PAM4 datasets |
+| Links and systems | `rx`, `cdr`, `sparam`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, multi-lane, optical, coding, UART/open-drain |
+| Dataset quality | `measure`, `sweep`, `simreal` | Measured labels, confounder control, synthetic-vs-real separability |
+| Scale and trust | `stream`, `validate` | Bounded-memory channel processing and physical-property assertions |
 
 ## Design principles
 - **Physics-grounded, not hand-drawn.** Real formulas (skin+dielectric insertion loss,
@@ -363,19 +478,18 @@ Carrier-agnostic (NRZ/PAM4/clocks/buses/optical). `peak_hold` decimation keeps a
 (min,max) record so narrow transients survive time compression.
 
 ## Roadmap and backlog
-**[ROADMAP.md](ROADMAP.md)** is the breadth map — everything this engine could model. The
-flagship next step is **provenance-first composable synthesis**: building each signal as a
-component graph that records every knob value, so a generated waveform carries a complete,
-serializable *recipe* (exact ground truth for training, fully reproducible). v1's
-primitives are the building blocks that layer sits on, so it's additive, not a breaking
-change.
 
-**[BACKLOG.md](BACKLOG.md)** is the prioritized, actionable list — what to build next, why,
-and what "done" looks like for each (a hard assertion in `wfmsynth.validate`).
+**[ROADMAP.md](ROADMAP.md)** describes future direction from the current composable,
+provenance-first architecture. **[BACKLOG.md](BACKLOG.md)** contains only active work,
+known limitations, and concise delivered milestones. Current priorities are consolidating
+parallel acquisition/digitization paths, reporting realized rise time, and closing specific
+standards-fidelity gaps.
 
 ## Tests
 ```bash
-pip install pytest && pytest        # runs the physics validation + smoke tests
+python -m pip install -e ".[test]"
+pytest
+python -m wfmsynth.validate
 ```
 
 ## License

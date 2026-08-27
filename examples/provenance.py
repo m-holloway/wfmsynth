@@ -47,6 +47,7 @@ for r in recipes[:3]:
 
 # contrastive pairs: re-roll exactly one factor, hold everything else bit-identical
 pair_a = sig.waveform()
-pair_b = sig.contrast("noise/1")          # same symbols/jitter/channel; only the noise differs
+noise_role = next(role for role in sig.roles() if role.startswith("noise/"))
+pair_b = sig.contrast(noise_role)          # same symbols/jitter/channel; only the noise differs
 print("\nre-rollable factors:", sig.roles())
 print("contrastive pair differs only in noise:", not np.array_equal(pair_a, pair_b))

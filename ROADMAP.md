@@ -1,113 +1,110 @@
-# wfmsynth — Roadmap / Wishlist
+# wfmsynth roadmap
 
-> This file is the **breadth** map: everything the engine could eventually model.
-> For the **prioritized, actionable** next steps — with a rationale and a
-> definition of done for each — see **[BACKLOG.md](BACKLOG.md)**.
+This document describes where `wfmsynth` is going. For the prioritized work with
+definitions of done, see [`BACKLOG.md`](BACKLOG.md). For user-facing capabilities and
+examples, start with [`README.md`](README.md).
 
-v1 is a compact, **validated** physics-synthesis engine: causal channels, reflections,
-crosstalk, decomposed jitter, AC-coupling, NRZ/PAM4/RF carriers, a compositional grammar,
-and realistic segmented deep-memory PAM4 captures. This is where it could go. Nothing here
-is required to use v1; it's the map for pushing the engine toward a broad, high-fidelity,
-ground-truth-grade signal generator.
+## Where the library is today
 
----
+`wfmsynth` 0.39 is a validated, composable synthesis engine rather than an early collection
+of waveform helpers. The current architecture already provides:
 
-## ⭐ Flagship: provenance-first composable procedural synthesis
+- real-unit `Grid` configuration for sample rate, symbol rate, duration, and delay;
+- reproducible `Signal` recipes and independent random streams for controlled pairs;
+- electrical and optical carriers, source timing, transmitter imperfections, and drift;
+- causal analytic channels, reflections, Touchstone channels, and crosstalk;
+- transmitter and receiver equalization, CDR behavior, and multi-lane scenes;
+- scope/probe/ADC effects and generalized two-rate acquisition;
+- measured ground truth, confounder-controlled sweeps, and sim-to-real separability checks;
+- streaming channel application for long records; and
+- a physics validation gate plus automated tests.
 
-**The idea.** Build a signal as an explicit, composable *graph of components* — each
-recording its type and the exact knob values used — so every waveform comes with a
-complete, serializable **recipe**. Randomize freely for coverage, but *record every sampled
-value*, so each generated waveform is (a) exact ground truth for training, (b) fully
-reproducible, and (c) auditable ("what produced this artifact?").
+Provenance-first composition was the original flagship roadmap item. It is now the primary
+shipped API (`Signal`, `recipe()`, `dataset()`, and `contrast()`), not future work.
 
-Why it matters: for training data, you don't just want a waveform and a coarse label — you
-want to know *precisely* which channel length, which reflection coefficient at which delay,
-which Rj/Pj split, which EQ setting, etc. produced it. That turns synthetic data into
-labeled-to-arbitrary-depth ground truth, and makes datasets diffable and versionable.
+## Roadmap principles
 
-**Sketched API (v0.2):**
-```python
-from wfmsynth.compose import Signal, Carrier, Channel, Impair
+1. **Measured fidelity before feature count.** Compare synthetic and real captures, then
+   address the feature that separates them most strongly.
+2. **One canonical physical path.** Equivalent operations should not have subtly different
+   stage order or semantics across APIs.
+3. **Ground truth must survive scrutiny.** Record requested causes, independent random
+   factors, realized outputs, and any clamping or approximation.
+4. **Real units and physical order by default.** Keep legacy normalized forms compatible,
+   but teach and validate the paths users need for real instruments.
+5. **Every completed physics item needs an assertion.** Plausible-looking output is not
+   sufficient evidence that an effect behaves correctly.
 
-sig = (Signal(seed=42)
-       .carrier(Carrier.PAM4, n_ui=64, baud=112e9)
-       .channel(Channel.LOSSY,      length_in=8.0, tand=0.02, causal=True)
-       .channel(Channel.REFLECTION, td_frac=0.09,  gamma=0.4)
-       .impair(Impair.JITTER,       rj=0.3, pj=(0.05, 4e6))
-       .digitize(gsa=256e9, enob=5.5))
+## Near term: consolidate the acquisition path
 
-x      = sig.waveform()   # the samples
-recipe = sig.recipe()     # serializable dict: every component + every knob + seeds + versions
-```
-A `dataset(spec, n)` builder samples knobs from declared distributions and returns
-`(waveforms, recipes[])` — each example carrying its own exact recipe. Recipes round-trip:
-`Signal.from_recipe(recipe).waveform()` reproduces the sample bit-for-bit.
+The highest-value work is reducing parallel implementations, not adding another effect.
 
-**Forward-compatibility:** v1's primitives (`physics`, `impairments`, `pam4`) are exactly
-the building blocks such a composer orchestrates — adding the provenance layer on top is
-*additive*, not a breaking change to the primitive API. (v1 already returns partial
-provenance: `grammar.generate` reports the carrier kind and impairment names per waveform;
-the full-knob recipe is the v0.2 step.)
+- Unify `Signal.digitize()` with the validated `instrument.digitize()` pipeline while
+  preserving independent role-based random streams.
+- Refactor `deep_capture()` into a PAM4 segmented-data preset over the generalized
+  `Signal.acquire()` path without changing default outputs unexpectedly.
+- Add absolute rise-time input (`tr_ps`) and record requested, realized, and clamped rise
+  time in provenance.
+- Separate trigger jitter from sample-clock/timebase jitter and model it only where the
+  distinction is observable.
 
----
+See backlog items #27, #48, and the rise-time follow-up.
 
-## Aberrations / impairments (breadth)
-- **Jitter, fully decomposed**: DDJ (data-dependent, ISI-driven), DCD, sub-rate/bounded
-  uncorrelated jitter, and a proper dual-Dirac / random+deterministic split with target BER.
-- **Spread-spectrum clocking (SSC)** (down/center-spread, profile + frequency).
-- **PAM4 level nonlinearity / RLM**, level-dependent noise, thermal + shot noise models.
-- **Duty-cycle distortion, rise/fall asymmetry, slew-rate limiting.**
-- **PDN / power-integrity**: ripple, droop, load-step transients, supply-noise coupling
-  onto the signal (AM/PM), ground bounce.
-- **EMI / periodic interference**, spurs, intermodulation.
-- **Amplitude/timing drift** over the capture (thermal), and burst/intermittent faults.
+## Next: standards and protocol fidelity
 
-## Channel realism
-- **Measured / behavioral S-parameters** (Touchstone `.sNp`) as the channel, incl. return
-  loss and mixed-mode (SDD/SDC/SCD) for differential pairs; convolution with the true impulse.
-- **Causal Djordjević–Sarkar** dielectric model (vs the current linked min-phase form).
-- **Differential signaling**: true P/N pair, common-mode, skew, mode conversion.
-- **Vias/connectors/stubs** as parameterized discontinuities at specified locations.
+The library has useful building blocks, but it does not yet claim complete protocol
+implementations.
 
-## Signal types / standards
-- NRZ variants, clocks (with wander/SSC), sawtooth/PWM/switching-regulator waveforms.
-- Standard-flavored generators (PCIe, DDR, USB, UCIe, Ethernet/OIF-CEI PAM4) — coding,
-  scrambling, framing, compliance patterns (PRBS7/13/31Q), preambles.
+- Implement full 8b/10b tables, running-disparity selection, K characters, decoding, and
+  run-length validation.
+- Expose additional standard PRBS patterns through the carrier API.
+- Decide whether 128b/130b belongs in this package before advertising it as implemented.
+- Add focused low-speed building blocks only where they improve waveform realism; current
+  bus support is open-drain composition and UART framing, not complete SPI/CAN stacks.
+- Add standards-flavored presets as transparent recipes, not opaque monolithic generators.
 
-## Equalization
-- **Tx FFE**, **Rx CTLE**, **DFE** (and reference EQ) so captures can be modeled pre- or
-  post-EQ at a chosen probe point — this changes waveform character fundamentally.
+## Evidence-driven channel and instrument depth
 
-## Crosstalk / multi-channel
-- Multiple aggressors from a **coupling matrix** (NEXT + FEXT), realistic aggressor activity,
-  victim/aggressor alignment, and multi-lane captures with cross-lane structure.
+Use `separability(synthetic, measured, grid)` and measured attribute comparisons to order
+this work. Candidate gaps include:
 
-## Instrument / scope modeling
-- Front-end bandwidth (Bessel-Thomson), ENOB/noise floor, interleave spurs, timebase jitter,
-  trigger jitter, probe loading — model *what the scope records*, per instrument class.
+- trigger behavior and other acquisition-specific timing effects;
+- a fuller causal dielectric model;
+- mixed-mode S-parameters for differential channels;
+- parameterized connector, via, and stub discontinuities;
+- explicit dual-Dirac / target-BER jitter products;
+- ground bounce, EMI, and intermodulation; and
+- distribution-level fidelity benchmarks against versioned measured datasets.
 
-## Ground-truth co-generation
-- Emit the **true** derived measurements alongside each waveform: ideal eye (height/width per
-  eye), RLM, decomposed jitter components, TIE series, per-defect location/extent masks,
-  channel IL(f) — so a training set has exact regression/segmentation targets, not just class labels.
+These are candidates, not promises in priority order. Real-capture evidence should decide.
 
-## Reproducibility & tooling
-- Deterministic seeding end-to-end; **dataset manifests** (spec + recipes + engine version)
-  for versionable, diffable datasets; export to `.npz`/`.parquet`/`.wfm`/Touchstone.
-- Optional **eye-diagram / density rendering** and quick-look plots (kept as an optional extra
-  so the core stays numpy/scipy-only).
+## Dataset tooling and scale
 
-## Performance & scale
-- Vectorized/batched generation; optional GPU (CuPy/torch) backend; streaming generation for
-  very large "deep memory" captures (billions of points / hundreds of thousands of segments).
+Longer-term work that supports ML production workflows:
 
-## Fidelity & validation
-- Expand the assertion suite as primitives are added; where real captures exist, add
-  distribution-level fidelity checks (does synthetic match measured eye/jitter statistics?).
+- dataset manifests containing the generation spec, recipes, engine version, and schema;
+- export helpers for well-specified formats such as NPZ, Parquet, and HDF5;
+- batched or parallel dataset generation;
+- memory-mapped output for records larger than RAM; and
+- optional accelerated backends only after profiling shows generation is the bottleneck.
 
----
+## Intentionally outside the core
 
-### Companion extractions (separate repos, not part of this one)
-To keep this package *pure synthesis*, these belong elsewhere:
-- **Signal-integrity measurements** (eye/RLM/SNR/TIE analysis of a waveform) — an analysis lib.
-- **Eye-diagram / density-eye rendering** — a visualization utility (adds a plotting dep).
+The package should stay focused on synthesis and the minimum measurements needed to validate
+and label its output.
+
+- General-purpose SI analysis and root-cause diagnosis belong in downstream tools.
+- Interactive eye/density visualization should remain optional and not add a plotting
+  dependency to the runtime core.
+- Vendor-native instrument containers belong in instrument-specific adapters; prefer open,
+  documented interchange formats in this package.
+
+## How to propose roadmap work
+
+A proposal should state:
+
+1. the real capture or downstream failure that motivates it;
+2. why existing composition cannot represent the effect;
+3. the public API and compatibility impact;
+4. a measurable physical property; and
+5. the validation assertion that will define completion.
