@@ -1142,3 +1142,15 @@ def test_two_rate_acquisition_issue51():
     a = (ws.Signal(seed=1, grid=g_sim).carrier("nrz", n_ui=256, causal=True).scope(bw_hz=5e9)).waveform()
     b = (ws.Signal(seed=1, grid=g_sim).carrier("nrz", n_ui=256, causal=True).input_bandwidth(bw_hz=5e9)).waveform()
     assert np.array_equal(a, b)
+
+
+def test_causal_channel_odd_length_min_phase():
+    """Regression: the causal (minimum-phase) lossy channel must work on ODD-length records —
+    Signal.acquire() can produce an odd record_length, which crashed _min_phase_H (it assumed an
+    even FFT length). Odd + even both run and stay finite; even-n is still exercised by the
+    existing causal-channel tests (bit-identical path preserved)."""
+    from wfmsynth import physics as P
+    for n in (255, 1853, 4097):
+        x = np.random.default_rng(0).standard_normal(n)
+        y = P.lossy_channel(x, length_in=8.0, tand=0.02, causal=True)
+        assert y.shape == (n,) and np.isfinite(y).all()

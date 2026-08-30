@@ -40,10 +40,18 @@ def _min_phase_H(Hmag, n=None):
     `n` is the full (two-sided) transform length; inferred from Hmag when omitted."""
     if n is None:
         n = 2 * (len(Hmag) - 1)
-    mag_full = np.concatenate([Hmag, Hmag[-2:0:-1]])      # symmetric, length n
-    logmag = np.log(mag_full + 1e-12)
-    c = np.fft.ifft(logmag).real                          # real cepstrum
-    w = np.zeros(n); w[0] = 1.0; w[1:n // 2] = 2.0; w[n // 2] = 1.0   # causal folding
+    if n % 2 == 0:
+        # even length: rfft has a distinct Nyquist bin; drop DC+Nyquist from the mirror.
+        mag_full = np.concatenate([Hmag, Hmag[-2:0:-1]])  # symmetric, length n
+        logmag = np.log(mag_full + 1e-12)
+        c = np.fft.ifft(logmag).real                      # real cepstrum
+        w = np.zeros(n); w[0] = 1.0; w[1:n // 2] = 2.0; w[n // 2] = 1.0   # causal folding
+    else:
+        # odd length: no Nyquist bin; mirror all bins except DC.
+        mag_full = np.concatenate([Hmag, Hmag[-1:0:-1]])  # symmetric, length n
+        logmag = np.log(mag_full + 1e-12)
+        c = np.fft.ifft(logmag).real                      # real cepstrum
+        w = np.zeros(n); w[0] = 1.0; w[1:(n + 1) // 2] = 2.0             # causal folding
     return np.exp(np.fft.fft(c * w))                      # complex min-phase, length n
 
 
