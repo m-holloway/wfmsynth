@@ -414,6 +414,17 @@ def prbs13q(n_symbols, seed=1):
     return np.tile(base, reps)[:n_symbols]
 
 
+def prbs31q(n_symbols, seed=1):
+    """PRBS31Q PAM4 symbols: Gray-coded consecutive bit-pairs from PRBS31 (period 2^31-1), the
+    100G/400G-class long-pattern analogue of PRBS13Q. The period (2.1e9 symbols) is far too large to
+    materialize, so this generates the first ``n_symbols`` from the LFSR state ``seed`` — which is
+    exactly a capture-length SEGMENT starting at the position encoded by that 31-bit state. Returns
+    PAM4 levels in {-1,-1/3,+1/3,+1}. (Detection recovers the state = the position; see wfmreverse.)"""
+    bits = prbs(31, int(n_symbols) * 2, seed)             # 2 bits per PAM4 symbol
+    pairs = bits.reshape(-1, 2)
+    return np.array([GRAY_PAM4[(int(a), int(b))] for a, b in pairs], dtype=float)
+
+
 # Rise time cannot be faster than the grid supports. BW * t_r ~= 0.35, and the
 # highest cutoff _shape_edges can realise is 0.98 * Nyquist, so the fastest
 # representable edge is 0.7 / 0.98 ~= 0.714 samples. That is a PHYSICAL limit,
@@ -547,10 +558,12 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
         levels = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
         if pattern == "prbs13q":
             return prbs13q(n_ui, seed)
+        if pattern == "prbs31q":
+            return prbs31q(n_ui, seed)
         if pattern == "legacy":
             b0 = prbs(7, n_ui, seed); b1 = prbs(9, n_ui, seed + 3)
             return levels[np.clip(b0 * 2 + (b0 ^ b1), 0, 3)]
-        raise ValueError(f"unknown pattern {pattern!r}; use 'legacy' or 'prbs13q'")
+        raise ValueError(f"unknown pattern {pattern!r}; use 'legacy', 'prbs13q', or 'prbs31q'")
     raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz' or 'pam4'")
 
 
