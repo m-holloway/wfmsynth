@@ -493,4 +493,5 @@ python -m wfmsynth.validate
 ```
 
 ## License
-MIT — see [LICENSE](LICENSE).
+**0BSD** (Zero-Clause BSD) — see [LICENSE](LICENSE). Maximally permissive: use, copy, modify, and
+distribute for any purpose, with **no attribution requirement** and no conditions. Public-domain-equivalent.
