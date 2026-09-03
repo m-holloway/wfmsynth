@@ -186,6 +186,32 @@ def _op_ctle(x, p, streams, grid, idx):
     return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
 
 
+def _op_rx_ffe(x, p, streams, grid, idx):
+    from . import rx as RX
+    spb = grid.samples_per_ui if grid is not None else p.get("spb")
+    spacing = p.get("tap_spacing") or max(1, int(round(spb * p.get("spacing_ui", 0.5))))
+    return RX.ffe(x, p["taps"], spacing, pre=p.get("pre", 0))
+
+
+def _op_dfe(x, p, streams, grid, idx):
+    from . import rx as RX, physics as P
+    spb = int(round(grid.samples_per_ui)) if grid is not None else int(p["spb"])
+    levels = np.asarray(p.get("levels", [-1.0, -1 / 3, 1 / 3, 1.0]), float)
+    if "phase" in p:
+        phase = int(p["phase"])
+    else:                                                      # find the eye centre (clearest levels)
+        phase, best = spb // 2, 1e9
+        for off in range(spb):
+            s = x[off::spb]; s = s / (np.percentile(np.abs(s), 99) + 1e-9)
+            sep = float(np.mean(np.min(np.abs(s[:, None] - levels[None, :] / np.abs(levels).max()), axis=1)))
+            if sep < best:
+                best, phase = sep, off
+    samples = x[phase::spb]
+    scale = np.percentile(np.abs(samples), 99) + 1e-9          # DFE taps/levels are in normalized units
+    eq, _dec = RX.dfe(samples / scale, np.asarray(p["taps"], float), levels)
+    return P.from_symbols(eq, n=len(x), causal=p.get("causal", False))
+
+
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
     if "path" in p:
@@ -214,7 +240,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
-         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "ssc": _op_ssc,
+         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "rx_ffe": _op_rx_ffe, "dfe": _op_dfe,
+         "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase,
@@ -303,6 +330,24 @@ class Signal:
         """Receiver CTLE (high-frequency-peaking analog EQ), placed after the channel.
         params: fz_ghz, fp1_ghz, fp2_ghz, dc_gain."""
         return self._add("ctle", **params)
+
+    def rx_ffe(self, taps, spacing_ui=0.5, pre=0, **params):
+        """Receiver feed-forward equalizer — a trainable FIR on the waveform, post-channel. `spacing_ui`
+        = 0.5 is fractionally (T/2) spaced (the usual, sampling-phase-robust form); 1.0 is T-spaced.
+        `pre` = number of pre-cursor taps. The RX-side companion to `tx_ffe`."""
+        return self._add("rx_ffe", taps=list(taps), spacing_ui=spacing_ui, pre=pre, **params)
+
+    def dfe(self, taps, levels=None, **params):
+        """Receiver decision-feedback equalizer: samples the eye centre, cancels post-cursor ISI by
+        subtracting `taps · [past decisions]` before slicing, and returns the equalized waveform
+        (reconstructed from the per-symbol equalized values). `taps[j]` = post-cursor weight at lag j+1
+        (set to the channel's post-cursors to cancel them); `levels` = constellation (default PAM4; pass
+        [-1, 1] for NRZ). A DECISION op — it samples at the nominal eye centre of the known-timing signal."""
+        p = {"taps": list(taps)}
+        if levels is not None:
+            p["levels"] = list(levels)
+        p.update(params)
+        return self._add("dfe", **p)
 
     def drift(self, **params):
         """Slow sub-record drift (thermal/VGA/DC). params: kind('gain'|'amplitude'|'dc'),

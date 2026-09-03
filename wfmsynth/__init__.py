@@ -40,7 +40,7 @@ from .cdr import (recover_clock, jitter_transfer, tracked_out_fraction, ssc_phas
 from .sparam import read_touchstone, write_touchstone, sparam_channel, touchstone_channel
 from .stream import stream_convolve, stream_blocks, channel_fir
 from .simreal import separability, feature_vector
-from .rx import ctle, dfe
+from .rx import ctle, dfe, ffe
 from .scene import Scene
 from .optical import to_optical, rin_noise, shot_noise, chromatic_dispersion, mpi, laser_chirp
 from .coding import dc_balanced, scramble_64b66b, running_disparity, max_run
@@ -49,7 +49,7 @@ from .acquire import AcquisitionProfile, acquire_record, record_decimation
 
 __all__ = [
     "physics", "impairments", "grammar", "pam4", "grid", "instrument", "streams", "compose",
-    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "bus", "acquire", "ctle", "dfe", "Scene",
+    "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "bus", "acquire", "ctle", "dfe", "ffe", "Scene",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "uart_frame", "uart_decode",
     "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",

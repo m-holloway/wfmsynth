@@ -33,6 +33,22 @@ def ctle(x, grid, fz_ghz, fp1_ghz, fp2_ghz, dc_gain=1.0):
     return _sig.lfilter(b, a, np.asarray(x, float))
 
 
+def ffe(x, taps, tap_spacing, pre=0):
+    """Receiver feed-forward equalizer: a linear FIR with ``taps`` spaced ``tap_spacing`` samples apart,
+    ``pre`` of them pre-cursor. Unlike CTLE (a fixed analog shape) this is an arbitrary-tap FIR the RX
+    trains to the channel. ``tap_spacing = samples_per_ui`` is a T-spaced (baud-rate) FFE; ``= spb//2``
+    is a fractionally (T/2) spaced FFE — the usual receiver form, insensitive to sampling phase.
+    Applied to the WAVEFORM (post-channel), companion to the transmit-side ``tx_ffe``."""
+    x = np.asarray(x, float); taps = np.asarray(taps, float); n = len(x); y = np.zeros(n)
+    for k, c in enumerate(taps):
+        d = int(round((k - pre) * tap_spacing))
+        if d >= 0:
+            y[d:] += c * x[:n - d]
+        elif -d < n:
+            y[:d] += c * x[-d:]
+    return y
+
+
 def dfe(samples, taps, levels=_PAM4):
     """Decision-feedback equalizer over per-symbol ``samples``. For each symbol it subtracts
     ``taps · [previous decisions]`` (the post-cursor estimate) before slicing to the nearest
