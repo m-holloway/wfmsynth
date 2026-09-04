@@ -113,6 +113,7 @@ source data and clock
 | Supply coupling | Correlated amplitude and timing modulation from a power rail | Modeling ripple, switching activity, or power-supply-induced jitter |
 | Scope / probe | Bandwidth and loading imposed before digitization | Matching what an instrument sees rather than an ideal node |
 | ADC effects | Noise, interleave mismatch, clipping, and finite resolution | Matching stored sample statistics and converter artifacts |
+| Localized event | A defect with finite time support (one UI, one edge, a Poisson arrival) | Planting a needle — runt, glitch, ring, droop — rather than a whole-record fault |
 
 For jitter, prefer source timing (`carrier(..., jitter=...)` or `.timing(...)`) so the
 shifted edges propagate through the channel. `physics.inject_jitter()` remains available for
@@ -145,8 +146,8 @@ legacy array-warp workflows but should not be the default for a new physical cha
 4. **Check realism:** [`examples/sim_to_real.py`](examples/sim_to_real.py) — find features
    that separate synthetic from measured data.
 5. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
-   samples/UI, and two-rate acquisition are indexed in
-   [`examples/README.md`](examples/README.md).
+   samples/UI, two-rate acquisition, and localized events (needles in a long record)
+   are indexed in [`examples/README.md`](examples/README.md).
 
 ## Capability map
 

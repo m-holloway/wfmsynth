@@ -16,6 +16,8 @@ of waveform helpers. The current architecture already provides:
 - transmitter and receiver equalization, CDR behavior, and multi-lane scenes;
 - scope/probe/ADC effects and generalized two-rate acquisition;
 - measured ground truth, confounder-controlled sweeps, and sim-to-real separability checks;
+- localized events (runt, glitch, ring, droop, …) with independent placement and
+  per-window labels for an external segmenter;
 - streaming channel application for long records; and
 - a physics validation gate plus automated tests.
 

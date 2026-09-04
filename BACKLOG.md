@@ -187,6 +187,7 @@ branches.
 | #40 | Scope bandwidth, probe loading, and timebase jitter; trigger jitter remains #50 |
 | #41–45 | Open-drain/UART primitives, de-emphasis presets, electrical idle/LFPS, laser chirp, arbitrary-symbol carriers |
 | #47 | Generalized two-rate acquisition and record decimation |
+| events | Localized placeable needles (`Signal.events` / `place_events`) with per-window labels; clock recovery stays external |
 
 ## CI status
 

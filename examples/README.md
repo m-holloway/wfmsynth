@@ -47,6 +47,9 @@ Run these in order:
    correlated shortcut.
 4. [`sim_to_real.py`](sim_to_real.py) — identify which simple feature distinguishes a
    synthetic set from measured captures.
+5. [`events.py`](events.py) — plant rare localized defects in a long record and join
+   requested plus measured labels onto ±1 UI windows (your own clock recovery can
+   supply the instants).
 
 The distinction that matters:
 
