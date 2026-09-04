@@ -176,6 +176,11 @@ def _op_fiber(x, p, streams, grid, idx):                     # fibre CD (physica
                      gamma_per_w_km=p.get("gamma_per_w_km", 0.0), grid=grid)
 
 
+def _op_optical_mpi(x, p, streams, grid, idx):               # coherent multipath on the optical field
+    from . import optical as OPT
+    return OPT.field_mpi(x, delay_samples=p["delay_samples"], reflectivity=p.get("reflectivity", 0.01))
+
+
 def _op_edfa(x, p, streams, grid, idx):                      # optical amplifier + ASE
     from . import optical as OPT
     return OPT.edfa(x, gain_db=p.get("gain_db", 15.0), nf_db=p.get("nf_db", 5.0),
@@ -278,7 +283,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
-         "eo": _op_eo, "fiber": _op_fiber, "edfa": _op_edfa, "photodetect": _op_photodetect, "tia": _op_tia,
+         "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
+         "photodetect": _op_photodetect, "tia": _op_tia,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase,
          "de_emphasis": _op_de_emphasis, "acquire": _op_acquire}
 
@@ -333,6 +339,12 @@ class Signal:
         """Single-mode fibre on the optical field: physical chromatic dispersion (β2·L) + attenuation.
         params: length_km, D_ps_nm_km (17 @1550nm), wavelength_nm, atten_db_km (0.2)."""
         return self._add("fiber", **params)
+
+    def optical_mpi(self, **params):
+        """Coherent optical multipath interference on the field: a delayed, attenuated copy (double
+        reflection) that beats with the signal — the field-domain source of the MPI penalty. params:
+        delay_samples (required), reflectivity. Place on the field before `photodetect`."""
+        return self._add("optical_mpi", **params)
 
     def edfa(self, **params):
         """Optical amplifier (EDFA): field gain + ASE noise. params: gain_db, nf_db, p_ase_scale."""

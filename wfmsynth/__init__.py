@@ -43,7 +43,7 @@ from .simreal import separability, feature_vector
 from .rx import ctle, dfe, ffe
 from .scene import Scene
 from .optical import (to_optical, rin_noise, shot_noise, chromatic_dispersion, mpi, laser_chirp,
-                      modulate_field, fiber, edfa, photodetect, tia)
+                      modulate_field, fiber, field_mpi, edfa, photodetect, tia)
 from .coding import dc_balanced, scramble_64b66b, running_disparity, max_run
 from .bus import open_drain, uart_frame, uart_decode
 from .acquire import AcquisitionProfile, acquire_record, record_decimation
@@ -55,7 +55,7 @@ __all__ = [
     "open_drain", "uart_frame", "uart_decode",
     "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",
     "to_optical", "rin_noise", "shot_noise", "chromatic_dispersion", "mpi", "laser_chirp",
-    "modulate_field", "fiber", "edfa", "photodetect", "tia",
+    "modulate_field", "fiber", "field_mpi", "edfa", "photodetect", "tia",
     "stream_convolve", "stream_blocks", "channel_fir", "separability", "feature_vector",
     "recover_clock", "jitter_transfer", "tracked_out_fraction", "ssc_phase", "apply_ssc",
     "timing_source", "apply_phase", "phase_noise", "recover_and_fold",

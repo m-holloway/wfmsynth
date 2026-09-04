@@ -1032,6 +1032,19 @@ _flw = _OPT.modulate_field(_cw, kind="dml", linewidth_hz=1e7, grid=_glw, rng=np.
 check("finite laser linewidth adds random-walk phase noise (var grows vs zero-linewidth)",
       np.var(np.unwrap(np.angle(_flw))) > 10.0 * np.var(np.unwrap(np.angle(_f0))) + 1e-6)
 
+print("== optical MPI: a delayed field copy beats COHERENTLY (the real source of the MPI penalty) ==")
+# A CW field carries flat power (|E|^2 == 1) but a random-walk phase from finite linewidth; a delayed
+# copy has a decorrelated phase, so the field-domain ghost beats in TIME while the intensity ghost stays
+# flat. (This is exactly why laser linewidth governs the MPI penalty.) Measure in the overlap region.
+_cwm = _OPT.modulate_field(np.ones(4096), kind="dml", linewidth_hz=5e8, grid=_glw,
+                           rng=np.random.default_rng(0))
+_d = 20
+_ov = slice(_d, None)
+_det_field = np.abs(_OPT.field_mpi(_cwm, delay_samples=_d, reflectivity=0.2)) ** 2     # coherent beat
+_det_int = _OPT.mpi(np.abs(_cwm) ** 2, delay_samples=_d, reflectivity=0.2)             # flat intensity ghost
+check("field-domain optical MPI produces a coherent detected beat (an intensity ghost does not)",
+      np.var(_det_field[_ov]) > 1e-3 and np.var(_det_int[_ov]) < 1e-9)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

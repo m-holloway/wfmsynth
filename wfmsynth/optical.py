@@ -155,6 +155,23 @@ def fiber(field, length_km=1.0, D_ps_nm_km=17.0, wavelength_nm=1550.0, atten_db_
     return E * 10 ** (-atten_db_km * length_km / 20.0)       # amplitude attenuation
 
 
+def field_mpi(field, delay_samples, reflectivity=0.01):
+    """Optical multipath interference on the complex FIELD — a delayed, attenuated copy (e.g. a
+    double reflection off two connectors, r ~ r1·r2) that beats COHERENTLY with the signal.
+
+    Unlike the intensity-domain `mpi` (a flat additive ghost), the field version reproduces the
+    interference beat 2·Re(E·E_d*) that is the ACTUAL source of the MPI penalty once the signal is
+    square-law-detected. The relative phase of the ghost carries whatever the field carries — so with
+    an upstream finite laser linewidth the beat naturally decorrelates (the physical reason linewidth
+    governs the MPI penalty). Use on the field between `fiber`/`edfa` and `photodetect`."""
+    E = np.asarray(field, complex)
+    d = int(delay_samples)
+    ghost = np.zeros_like(E)
+    if 0 < d < len(E):
+        ghost[d:] = E[:len(E) - d]
+    return E + reflectivity * ghost
+
+
 def edfa(field, gain_db=15.0, nf_db=5.0, p_ase_scale=1e-3, rng=None):
     """Optical amplifier (EDFA): amplify the field by √gain and add amplified-spontaneous-emission
     (ASE) noise — complex Gaussian whose power grows with (gain-1)·noise-figure. Enables amplified
