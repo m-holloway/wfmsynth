@@ -1024,6 +1024,14 @@ _w_nochirp, _w_chirp = _detected(0.0), _detected(4.0)
 check("chirp x dispersion interaction is modeled (chirped field detects differently post-fibre)",
       np.corrcoef(_w_nochirp, _w_chirp)[0, 1] < 0.98)
 
+print("== laser linewidth: a finite linewidth adds random-walk phase noise to the field ==")
+_glw = Grid(fs=100e9, baud=10e9, n=4096)
+_cw = np.ones(4096)                                            # steady drive: chirp-free, phase ~ const
+_f0 = _OPT.modulate_field(_cw, kind="dml", linewidth_hz=0.0, grid=_glw)
+_flw = _OPT.modulate_field(_cw, kind="dml", linewidth_hz=1e7, grid=_glw, rng=np.random.default_rng(0))
+check("finite laser linewidth adds random-walk phase noise (var grows vs zero-linewidth)",
+      np.var(np.unwrap(np.angle(_flw))) > 10.0 * np.var(np.unwrap(np.angle(_f0))) + 1e-6)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

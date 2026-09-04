@@ -164,14 +164,16 @@ def _op_eo(x, p, streams, grid, idx):                        # E->O: electrical 
     from . import optical as OPT
     return OPT.modulate_field(x, kind=p.get("kind", "mzm"), vpi=p.get("vpi", 1.0),
                               bias=p.get("bias", 0.5), er_db=p.get("er_db"), p_avg=p.get("p_avg", 1.0),
-                              alpha=p.get("alpha", 0.0), adiabatic=p.get("adiabatic", 0.0), grid=grid)
+                              alpha=p.get("alpha", 0.0), adiabatic=p.get("adiabatic", 0.0),
+                              linewidth_hz=p.get("linewidth_hz", 0.0), grid=grid,
+                              rng=streams.role(f"linewidth/{idx}"))
 
 
 def _op_fiber(x, p, streams, grid, idx):                     # fibre CD (physical β2·L) + attenuation
     from . import optical as OPT
     return OPT.fiber(x, length_km=p.get("length_km", 1.0), D_ps_nm_km=p.get("D_ps_nm_km", 17.0),
                      wavelength_nm=p.get("wavelength_nm", 1550.0), atten_db_km=p.get("atten_db_km", 0.2),
-                     grid=grid)
+                     gamma_per_w_km=p.get("gamma_per_w_km", 0.0), grid=grid)
 
 
 def _op_edfa(x, p, streams, grid, idx):                      # optical amplifier + ASE

@@ -90,7 +90,7 @@ def mpi(power, delay_samples, reflectivity=0.05):
 # ---------------------------------------------------------------------------------------------------
 
 def modulate_field(drive, kind="mzm", vpi=1.0, bias=0.5, er_db=None, p_avg=1.0,
-                   alpha=0.0, adiabatic=0.0, grid=None):
+                   alpha=0.0, adiabatic=0.0, linewidth_hz=0.0, grid=None, rng=None):
     """Electro-optic modulation: an electrical drive -> a COMPLEX optical field E(t)=sqrt(P)·exp(jφ).
 
     kind='mzm' (Mach-Zehnder): the true modulator transfer E = cos(π/2·(V/Vπ + bias)) — so the
@@ -123,16 +123,24 @@ def modulate_field(drive, kind="mzm", vpi=1.0, bias=0.5, er_db=None, p_avg=1.0,
         field = np.sqrt(P) * np.exp(1j * phi)
     else:
         raise ValueError("modulate_field kind must be 'mzm' or 'dml'")
+    if linewidth_hz:                                        # finite laser linewidth -> phase noise
+        rng = rng or np.random.default_rng()               # random-walk phase, var = 2π·Δν·dt per step
+        dphi = rng.standard_normal(len(field)) * np.sqrt(2 * np.pi * linewidth_hz * dt)
+        field = field * np.exp(1j * np.cumsum(dphi))       # (converts to intensity noise via dispersion)
     return field * np.sqrt(p_avg / (np.mean(np.abs(field) ** 2) + 1e-12))
 
 
-def fiber(field, length_km=1.0, D_ps_nm_km=17.0, wavelength_nm=1550.0, atten_db_km=0.2, grid=None):
-    """Single-mode fibre on the complex FIELD: chromatic dispersion (PHYSICAL β2·L) + attenuation.
+def fiber(field, length_km=1.0, D_ps_nm_km=17.0, wavelength_nm=1550.0, atten_db_km=0.2,
+          gamma_per_w_km=0.0, grid=None):
+    """Single-mode fibre on the complex FIELD: chromatic dispersion (PHYSICAL β2·L) + attenuation
+    (+ optional Kerr nonlinearity).
 
     β2 = -D·λ²/(2πc) from the dispersion parameter `D_ps_nm_km` (ps/(nm·km)) and wavelength; the
     all-pass phase exp(j·β2·L·ω²/2) is applied to the field spectrum, so a chirped field develops
     transition-dependent intensity distortion once square-law-detected. `atten_db_km` is fibre loss
-    (0.2 dB/km at 1550 nm). Needs `grid` for real frequency units. Returns the complex field."""
+    (0.2 dB/km at 1550 nm). `gamma_per_w_km` adds self-phase modulation (Kerr): an intensity-dependent
+    phase φ_nl = γ·|E|²·L (lumped after CD — a first-order model, not a full split-step). Needs `grid`
+    for real frequency units. Returns the complex field."""
     E = np.asarray(field, complex); n = len(E)
     fs = grid.fs if grid is not None else 1.0
     c = 299792458.0
@@ -142,6 +150,8 @@ def fiber(field, length_km=1.0, D_ps_nm_km=17.0, wavelength_nm=1550.0, atten_db_
     L = length_km * 1e3
     w = 2 * np.pi * np.fft.fftfreq(n, 1.0 / fs)
     E = np.fft.ifft(np.fft.fft(E) * np.exp(1j * beta2 * L * w ** 2 / 2.0))
+    if gamma_per_w_km:                                       # Kerr self-phase modulation (lumped)
+        E = E * np.exp(1j * gamma_per_w_km * np.abs(E) ** 2 * length_km)
     return E * 10 ** (-atten_db_km * length_km / 20.0)       # amplitude attenuation
 
 
