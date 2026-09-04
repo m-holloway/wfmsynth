@@ -991,6 +991,39 @@ _b51 = (Signal(seed=1, grid=_gsim).carrier("nrz", n_ui=256, causal=True).input_b
 check("backward-compat: .input_bandwidth() / .sample_clock_jitter() alias scope/timebase bit-identically",
       np.array_equal(_a51, _b51))
 
+from wfmsynth import optical as _OPT
+
+print("== optical E/O/E: square-law photodetection closes the loop (i = R·|E|^2, real) ==")
+_Efield = np.array([0.5 + 0.5j, 1 + 0j, 0.3 - 0.2j])
+_iphoto = _OPT.photodetect(_Efield, responsivity=2.0, shot=False)
+check("square-law detection: photocurrent = R·|E|^2, real-valued (O->E closes E/O/E)",
+      np.isrealobj(_iphoto) and np.allclose(_iphoto, 2.0 * np.abs(_Efield) ** 2))
+
+print("== MZM: cos^2 electro-optic transfer (a real modulator, not a linear intensity ramp) ==")
+_drv = np.linspace(-1.0, 1.0, 401)
+_Pmzm = np.abs(_OPT.modulate_field(_drv, kind="mzm", bias=0.5, p_avg=1.0)) ** 2
+_argm = (np.pi / 2.0) * ((_drv - _drv.mean()) / (np.max(np.abs(_drv - _drv.mean())) + 1e-12) + 0.5)
+check("MZM intensity is cos^2 of the drive (nonlinear transfer, not a linear ramp)",
+      np.corrcoef(_Pmzm, np.cos(_argm) ** 2)[0, 1] > 0.999 and np.corrcoef(_Pmzm, _drv)[0, 1] ** 2 < 0.99)
+
+print("== optical fibre: chromatic dispersion spreads a pulse (physical beta2*L on the field) ==")
+_gfib = Grid(fs=1e12, baud=25e9, n=8192)
+_fpulse = np.zeros(8192, complex); _fpulse[4000:4010] = 1.0
+_wid_in = int(np.sum(np.abs(_fpulse) > 0.1))
+_fout = _OPT.fiber(_fpulse, length_km=20.0, D_ps_nm_km=17.0, grid=_gfib)
+_wid_out = int(np.sum(np.abs(_fout) > 0.1 * np.abs(_fout).max()))
+check("fibre chromatic dispersion broadens an optical pulse", _wid_out > 2 * _wid_in)
+
+print("== chirp x dispersion: DML laser chirp materially changes the DETECTED signal after fibre ==")
+_gd = Grid(fs=2560e9, baud=80e9, n=32 * 1500)
+def _detected(alpha):
+    return np.asarray(Signal(seed=1, grid=_gd).carrier("pam4", n_ui=1500, pattern="prbs13q", causal=True)
+                      .eo(kind="dml", alpha=alpha, er_db=8).fiber(length_km=4.0, D_ps_nm_km=17.0)
+                      .photodetect(shot=False).tia().waveform(), float)
+_w_nochirp, _w_chirp = _detected(0.0), _detected(4.0)
+check("chirp x dispersion interaction is modeled (chirped field detects differently post-fibre)",
+      np.corrcoef(_w_nochirp, _w_chirp)[0, 1] < 0.98)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

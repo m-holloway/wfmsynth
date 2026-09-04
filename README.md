@@ -295,6 +295,35 @@ sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", c
        .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True))
 ```
 
+## Full RX equalization (CTLE / RX FFE / DFE)
+The receiver side is composable end-to-end — equalize before slicing, just like real hardware:
+
+```python
+sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+       .tx_ffe([1.0, -0.2]).lossy(loss_db=10, loss_at_ghz=25, causal=True)
+       .ctle(fz_ghz=2, fp1_ghz=5, fp2_ghz=10)   # analog HF peaking
+       .rx_ffe([1.0, -0.3, 0.1], spacing_ui=0.5) # fractionally-spaced FIR
+       .dfe([0.25, 0.1])                          # cancel post-cursors (taps = channel post-cursors)
+       .digitize(snr_db=40))
+```
+
+## Optical E/O/E link (electrical → optical → electrical)
+A true optical link on a **complex field** — so laser chirp and fibre dispersion interact correctly,
+and square-law detection closes the loop back to electrical:
+
+```python
+det = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+       .eo(kind="dml", alpha=3.0, er_db=8)        # E→O: laser + chirp → complex optical field
+       .fiber(length_km=4, D_ps_nm_km=17)         # physical β2·L dispersion + attenuation
+       .edfa(gain_db=12, nf_db=5)                 # optical amp + ASE (optional)
+       .photodetect(responsivity=1.0)             # O→E: i = R·|E|²  (square-law, closes the loop)
+       .tia(gain=1.0, bw_hz=50e9)                 # transimpedance front end
+       .digitize(snr_db=40))
+```
+`eo(kind="mzm", ...)` gives a Mach-Zehnder cos² modulator; `optical`/`dispersion` remain for the
+simpler intensity-only model. Because the field carries phase, DML chirp through fibre dispersion
+distorts the detected eye — the interaction an intensity-only model can't show.
+
 ## Causality hazard (build causal chains end-to-end)
 Each stage can be causal in isolation while the *pipeline* is not: the default zero-phase
 edge shaping reintroduces pre-cursor **after** a causal channel. For an end-to-end causal

@@ -160,6 +160,38 @@ def _op_dispersion(x, p, streams, grid, idx):
     return OPT.chromatic_dispersion(x, strength=p.get("strength", 20.0))
 
 
+def _op_eo(x, p, streams, grid, idx):                        # E->O: electrical drive -> complex field
+    from . import optical as OPT
+    return OPT.modulate_field(x, kind=p.get("kind", "mzm"), vpi=p.get("vpi", 1.0),
+                              bias=p.get("bias", 0.5), er_db=p.get("er_db"), p_avg=p.get("p_avg", 1.0),
+                              alpha=p.get("alpha", 0.0), adiabatic=p.get("adiabatic", 0.0), grid=grid)
+
+
+def _op_fiber(x, p, streams, grid, idx):                     # fibre CD (physical β2·L) + attenuation
+    from . import optical as OPT
+    return OPT.fiber(x, length_km=p.get("length_km", 1.0), D_ps_nm_km=p.get("D_ps_nm_km", 17.0),
+                     wavelength_nm=p.get("wavelength_nm", 1550.0), atten_db_km=p.get("atten_db_km", 0.2),
+                     grid=grid)
+
+
+def _op_edfa(x, p, streams, grid, idx):                      # optical amplifier + ASE
+    from . import optical as OPT
+    return OPT.edfa(x, gain_db=p.get("gain_db", 15.0), nf_db=p.get("nf_db", 5.0),
+                    p_ase_scale=p.get("p_ase_scale", 1e-3), rng=streams.role(f"ase/{idx}"))
+
+
+def _op_photodetect(x, p, streams, grid, idx):               # O->E: square-law detection (closes loop)
+    from . import optical as OPT
+    return OPT.photodetect(x, responsivity=p.get("responsivity", 1.0), shot=p.get("shot", True),
+                           photons_per_unit=p.get("photons_per_unit", 1e4), rng=streams.role(f"shot/{idx}"))
+
+
+def _op_tia(x, p, streams, grid, idx):                       # optical RX front end
+    from . import optical as OPT
+    return OPT.tia(x, gain=p.get("gain", 1.0), bw_hz=p.get("bw_hz"), thermal_rms=p.get("thermal_rms", 0.0),
+                   grid=grid, rng=streams.role(f"tia/{idx}"))
+
+
 def _op_de_emphasis(x, p, streams, grid, idx):
     spb = grid.samples_per_ui if grid is not None else p["spb"]
     return P.tx_ffe(x, P.de_emphasis_taps(p["db"]), spb, pre=0)
@@ -244,6 +276,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
+         "eo": _op_eo, "fiber": _op_fiber, "edfa": _op_edfa, "photodetect": _op_photodetect, "tia": _op_tia,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase,
          "de_emphasis": _op_de_emphasis, "acquire": _op_acquire}
 
@@ -287,6 +320,31 @@ class Signal:
     def dispersion(self, **params):
         """Chromatic dispersion (pulse spreading). params: strength (~ D*L)."""
         return self._add("dispersion", **params)
+
+    def eo(self, **params):
+        """Electro-optic modulation: electrical drive -> COMPLEX optical field (start of an E/O/E link).
+        params: kind('mzm'|'dml'), vpi, bias, er_db, p_avg, alpha (chirp), adiabatic. Follow with
+        `fiber`/`edfa`/`photodetect` — NOT the real-valued electrical ops."""
+        return self._add("eo", **params)
+
+    def fiber(self, **params):
+        """Single-mode fibre on the optical field: physical chromatic dispersion (β2·L) + attenuation.
+        params: length_km, D_ps_nm_km (17 @1550nm), wavelength_nm, atten_db_km (0.2)."""
+        return self._add("fiber", **params)
+
+    def edfa(self, **params):
+        """Optical amplifier (EDFA): field gain + ASE noise. params: gain_db, nf_db, p_ase_scale."""
+        return self._add("edfa", **params)
+
+    def photodetect(self, **params):
+        """Square-law photodetector (O->E) — closes the electrical->optical->electrical loop.
+        params: responsivity, shot, photons_per_unit. Output is real photocurrent."""
+        return self._add("photodetect", **params)
+
+    def tia(self, **params):
+        """Transimpedance amplifier (optical RX front end): photocurrent -> voltage, band-limit, noise.
+        params: gain, bw_hz, thermal_rms."""
+        return self._add("tia", **params)
 
     def de_emphasis(self, **params):
         """Tx de-emphasis preset (dB). params: db."""

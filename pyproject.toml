@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wfmsynth"
-version = "0.39.0"
+version = "0.40.0"
 description = "Physics-informed synthetic waveform generation — channels, jitter, crosstalk, NRZ/PAM4/RF carriers, and realistic deep-memory scope captures."
 readme = "README.md"
 license = { text = "0BSD" }
