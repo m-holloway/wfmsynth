@@ -76,6 +76,7 @@ than an ideal simulated node.
 | [`non_integer_sps.py`](non_integer_sps.py) | Sample and symbol clocks are unrelated, as they normally are in hardware |
 | [`clock_recovery.py`](clock_recovery.py) | The receiver or scope CDR changes which jitter remains visible |
 | [`touchstone_channel.py`](touchstone_channel.py) | You have measured `.sNp` channel data or need resonances absent from an analytic model |
+| [`events.py`](events.py) | Rare localized defects (runt, glitch, ring, droop) in a long record, labelled per UI window |
 
 ## Choosing a dataset generator
 
@@ -86,6 +87,7 @@ than an ideal simulated node.
 | Label-preserving variation across capture conditions | `domain_randomize()` |
 | Broad, protocol-agnostic morphology pretraining | `generate()` |
 | A ready-made segmented PAM4 defect benchmark | `deep_capture()` |
+| Rare needles in a long record, labelled per window | `Signal.events()` + `label_windows()` |
 
 `deep_capture()` and `generate()` are specialized dataset presets. For a new system model,
 prefer a `Signal` recipe so the physical stages and their ordering are explicit.

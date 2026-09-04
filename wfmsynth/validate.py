@@ -991,6 +991,90 @@ _b51 = (Signal(seed=1, grid=_gsim).carrier("nrz", n_ui=256, causal=True).input_b
 check("backward-compat: .input_bandwidth() / .sample_clock_jitter() alias scope/timebase bit-identically",
       np.array_equal(_a51, _b51))
 
+print("== localized events: identity outside support; 2nd-order overshoot; placement + labels ==")
+from wfmsynth.events import (place_events as _pe, apply_events as _ae, label_windows as _lw,
+                             nominal_ui_windows as _nuw, second_order_step as _s2,
+                             step_overshoot_fraction as _sof, damped_sinusoid as _dsin,
+                             slope_reversals as _srev)
+from wfmsynth.compose import Signal as _SigEv
+from wfmsynth.grid import Grid as _GridEv
+_gev = _GridEv(fs=10e9, baud=1e9, n=4096)
+_nui_ev = int(_gev.n // _gev.samples_per_ui)
+_xev = _SigEv(seed=1, grid=_gev).carrier("nrz", n_ui=_nui_ev, causal=True, tr_frac=0.2).waveform()
+_eev = _pe(len(_xev), kind="glitch", on="symbols", grid=_gev, rng=np.random.default_rng(0),
+           x=_xev, indices=[20, 80], severity=0.8)
+_yev, _mev, _eev = _ae(_xev, _eev, grid=_gev)
+check("apply_events is bit-identical outside the mask",
+      np.array_equal(_yev[_mev == 0], _xev[_mev == 0]))
+check("apply_events modifies the support and emits a low-duty mask",
+      np.max(np.abs(_yev - _xev)) > 0.05 and 0.0 < (_mev > 0).mean() < 0.15)
+_t2 = np.linspace(0, 8e-9, 2000)
+_z2 = 0.3
+_s2y = _s2(_t2, wn=2 * np.pi * 1e9, zeta=_z2)
+_meas_os = (_s2y.max() - 1.0) / 1.0
+check("2nd-order step peak overshoot matches exp(-pi zeta / sqrt(1-zeta^2))",
+      abs(_meas_os - _sof(_z2)) < 0.02, f"meas={_meas_os:.4f} theory={_sof(_z2):.4f}")
+_kern = _dsin(512, 1 / _gev.fs, f0=500e6, tau=6e-9, amp=1.0)
+_K = np.abs(np.fft.rfft(_kern))
+_fk = np.fft.rfftfreq(len(_kern), d=1 / _gev.fs)
+check("damped-sinusoid kernel is causal at t=0 and peaks near f0",
+      abs(_kern[0]) < 1e-12 and abs(_fk[int(np.argmax(_K[1:])) + 1] - 500e6) / 500e6 < 0.25)
+_txev = P.carrier_symbols("nrz", _nui_ev, seed=1)
+_runt_ui = int((np.where(np.diff(_txev) != 0)[0] + 1)[4])
+_erunt = _pe(len(_xev), kind="runt", on="symbols", grid=_gev, x=_xev, n_ui=_nui_ev,
+             indices=[_runt_ui], severity=0.9, floor=0.2)
+_yrunt, _mrunt, _erunt = _ae(_xev, _erunt, grid=_gev)
+_sl = slice(*_erunt.events[0].span(len(_xev)))
+_prev = _xev[_sl.start - 1] if _sl.start else _xev[_sl.start]
+_exc = lambda w: np.max(np.abs(w[_sl] - _prev))
+_other = _mrunt == 0
+check("runt lowers the target-UI peak and leaves the rest identical",
+      _exc(_yrunt) < 0.85 * _exc(_xev) and np.array_equal(_yrunt[_other], _xev[_other]))
+_counts = []
+for _si in range(40):
+    _ep = _pe(len(_xev), kind="glitch", on="poisson", grid=_gev,
+              rng=np.random.default_rng(_si), rate_hz=2e7, severity=0.5)
+    _counts.append(len(_ep))
+check("poisson placement mean count tracks rate * duration",
+      abs(np.mean(_counts) - (2e7 * _gev.duration)) < 3.0,
+      f"mean={np.mean(_counts):.2f} expected={2e7 * _gev.duration:.2f}")
+_wins = _nuw(len(_xev), _gev, half_ui=1.0)
+_rows = _lw(_wins, _eev, x=_yev)
+_hit = [r for r in _rows if r["events"]]
+check("label_windows attaches each event only to overlapping UI windows",
+      len(_hit) >= 1 and all(any(e["sample"] >= r["start"] and e["sample"] < r["stop"]
+                                 for e in r["events"]) for r in _hit))
+_sig_ev = (_SigEv(seed=7, grid=_gev).carrier("nrz", n_ui=_nui_ev, causal=True)
+           .events("runt", on="symbols", count=3, severity=0.6, floor=0.3))
+_w1 = _sig_ev.waveform()
+_w2, _el2 = _sig_ev.realize()
+_rec_ev = _sig_ev.recipe()
+check("Signal.events recipe round-trips and realize() matches waveform()",
+      np.array_equal(_w1, _w2) and np.array_equal(_SigEv.from_recipe(_rec_ev).waveform(), _w1)
+      and len(_el2) == 3)
+_syms_d = np.array([-1.0] * 8 + [1.0] * 24 + [-1.0] * 8)
+_wdroop = P.from_symbols(_syms_d, n=2048, causal=True, tr_frac=0.15)
+_edroop = _pe(len(_wdroop), kind="droop", on="pattern", grid=_GridEv(fs=10e9, baud=1e9, n=2048),
+              x=_wdroop, symbols=_syms_d, min_run=10, count=1, severity=0.8, depth=0.4)
+_ydroop, _mdroop, _ = _ae(_wdroop, _edroop, grid=_GridEv(fs=10e9, baud=1e9, n=2048))
+_lo_d, _hi_d = _edroop.events[0].span(len(_wdroop))
+_third = max(1, (_hi_d - _lo_d) // 3)
+check("droop sags |level| through a long run",
+      np.mean(np.abs(_ydroop[_hi_d - _third:_hi_d])) < 0.85 * np.mean(np.abs(_ydroop[_lo_d:_lo_d + _third])))
+_eslow = _pe(len(_xev), kind="slow_edge", on="edges", grid=_gev, x=_xev, symbols=_txev,
+             which="rising", indices=[2], severity=0.9, tr_factor=6.0, n_ui=_nui_ev)
+_yslow, _mslow, _eslow = _ae(_xev, _eslow, grid=_gev)
+_t0s = int(_eslow.events[0].sample)
+_nb = slice(max(0, _t0s - 3), min(len(_xev), _t0s + int(_gev.samples_per_ui)))
+check("slow_edge reduces max |dv/dt| on the targeted edge",
+      np.max(np.abs(np.diff(_yslow[_nb]))) < 0.90 * np.max(np.abs(np.diff(_xev[_nb]))))
+_enm = _pe(len(_xev), kind="nonmonotonic", on="edges", grid=_gev, x=_xev, which="rising",
+           indices=[3], severity=0.9)
+_ynm, _, _enm = _ae(_xev, _enm, grid=_gev)
+_n0, _n1 = _enm.events[0].span(len(_xev))
+check("nonmonotonic edge increases slope reversals in its window",
+      _srev(_ynm[_n0:_n1]) > _srev(_xev[_n0:_n1]))
+
 from wfmsynth import optical as _OPT
 
 print("== optical E/O/E: square-law photodetection closes the loop (i = R·|E|^2, real) ==")

@@ -220,6 +220,25 @@ def _op_acquire(x, p, streams, grid, idx):
     return taps[p.get("tap", "stored")]
 
 
+_EVENT_SKIP = {"op"}
+
+
+def _op_events(x, p, streams, grid, idx, sink=None):
+    """Place + apply a localized mechanism. Optional ``sink`` collects realized events
+    for ``Signal.realize()`` without changing the waveform path."""
+    from .events import apply_events, place_events
+    kw = {k: v for k, v in p.items() if k not in _EVENT_SKIP}
+    if kw.get("on") == "aggressor" and isinstance(kw.get("aggressor"), dict):
+        spec = {"kind": "nrz", **kw["aggressor"]}
+        kw = dict(kw)
+        kw["aggressor"] = _carrier(spec, streams, grid, f"events_aggr{idx}")
+    ev = place_events(len(x), grid=grid, rng=streams.role(f"events/{idx}"), x=x, **kw)
+    y, _mask, ev = apply_events(x, ev, grid=grid)
+    if sink is not None:
+        sink.extend(ev.events)
+    return y
+
+
 def _op_ctle(x, p, streams, grid, idx):
     from . import rx as RX
     return RX.ctle(x, grid, p["fz_ghz"], p["fp1_ghz"], p["fp2_ghz"], dc_gain=p.get("dc_gain", 1.0))
@@ -286,7 +305,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
          "photodetect": _op_photodetect, "tia": _op_tia,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase,
-         "de_emphasis": _op_de_emphasis, "acquire": _op_acquire}
+         "de_emphasis": _op_de_emphasis, "acquire": _op_acquire,
+         "events": _op_events}
 
 
 # --------------------------------------------------------------- the Signal builder
@@ -483,17 +503,67 @@ class Signal:
         (absolute noise floor), enob, interleave=dict(m_cores, gain_mm, ...)."""
         return self._add("digitize", **params)
 
+    def events(self, kind, on="symbols", **params):
+        """Place a localized mechanism on the current waveform (a needle, not a
+        systemic LTI stage). ``kind`` is the mechanism, ``on`` is the targeting
+        policy — they are independent. See ``wfmsynth.events``.
+
+        kind: runt | glitch | ring | overshoot | undershoot | nonmonotonic |
+              droop | slow_edge
+        on:   symbols | edges | pattern | aggressor | intervals | poisson | times
+
+        Placement knobs: indices, count, fraction, every, which ('rising'|
+        'falling'|'both'), min_run, motif, intervals, rate_hz, times, samples,
+        aggressor (array or carrier dict), n_ui, symbols, transitions_only.
+        Mechanism knobs: severity, amp, floor, hold_frac, f0_hz, tau_s, q, zeta,
+        cycles, depth, polarity, tr_factor, width.
+
+        Drawn placements use role stream ``events/{i}`` so they are reproducible
+        and contrast-re-rollable. Realized times come from ``realize()`` /
+        ``event_list()``, not from this spec."""
+        if "n_ui" not in params:
+            car = next((o for o in self.ops if o["op"] in ("carrier", "symbols")), None)
+            if car is not None:
+                if car.get("n_ui") is not None:
+                    params = dict(params, n_ui=int(car["n_ui"]))
+                elif car["op"] == "symbols" and car.get("symbols") is not None:
+                    params = dict(params, n_ui=len(car["symbols"]))
+        return self._add("events", kind=kind, on=on, **params)
+
+    def _run(self, streams=None, collect_events=False):
+        from .events import EventList
+        st = streams if streams is not None else Streams(self.seed)
+        x = None
+        sink = [] if collect_events else None
+        for i, op in enumerate(self.ops):
+            if collect_events and op["op"] == "events":
+                x = _op_events(x, op, st, self.grid, i, sink=sink)
+            else:
+                x = _EXEC[op["op"]](x, op, st, self.grid, i)
+        if x is None:
+            raise ValueError("empty Signal: add a carrier first")
+        if collect_events:
+            return x, EventList(sink, n=len(x), grid=self.grid)
+        return x
+
     def waveform(self, streams=None):
         """Execute the recipe -> samples. Deterministic given (seed, ops, grid). Pass a
         `Streams` (e.g. from `Streams(seed).reroll(...)`) to re-roll selected factors
         while holding all others bit-identical — `contrast()` wraps the common case."""
-        st = streams if streams is not None else Streams(self.seed)
-        x = None
-        for i, op in enumerate(self.ops):
-            x = _EXEC[op["op"]](x, op, st, self.grid, i)
-        if x is None:
-            raise ValueError("empty Signal: add a carrier first")
-        return x
+        return self._run(streams)
+
+    def realize(self, streams=None):
+        """One-pass ``(waveform, EventList)`` — use this when an external segmenter
+        needs both the samples and the realized event times."""
+        return self._run(streams, collect_events=True)
+
+    def event_list(self, streams=None):
+        """Realized events (sample / UI / seconds) for every ``.events()`` op."""
+        return self.realize(streams)[1]
+
+    def event_mask(self, streams=None):
+        """Per-sample support of every realized event (1 = modified)."""
+        return self.realize(streams)[1].mask()
 
     def roles(self):
         """The re-rollable random factors in this signal, as role names — the valid
@@ -510,6 +580,8 @@ class Signal:
                     out.append(f"noise/{i}")
                 if op.get("interleave"):
                     out.append(f"interleave/{i}")
+            elif op["op"] == "events":
+                out.append(f"events/{i}")
         return out
 
     def contrast(self, *factors, seed=None):

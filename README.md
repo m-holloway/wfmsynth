@@ -76,6 +76,7 @@ Run [`examples/quickstart.py`](examples/quickstart.py) for a guided first exampl
 | Model what a scope stores | `Signal.acquire(AcquisitionProfile)` | Separates fine-grid simulation from front end, sampling, ADC, and record decimation |
 | Apply or study one physical operation | `wfmsynth.physics` | Low-level NumPy-in/NumPy-out primitives for custom pipelines |
 | Add one named fault to an existing array | `apply_impairment` | Convenient fixed vocabulary for class-labelled augmentation |
+| Plant a rare, localized defect in a long record | `Signal.events` / `place_events` | Targeting (symbols, edges, pattern, aggressor, poisson, …) is independent of mechanism (runt, glitch, ring, droop, …); emits event times for an external segmenter |
 | Add harmless capture variation | `domain_randomize` | Adds sub-threshold gain, offset, bandwidth, and noise changes without changing the class; currently use the default 4096-point record length |
 | Sample many waveform shapes broadly | `generate` | Grammar-based morphology coverage; useful for broad pretraining, not a protocol-accurate link |
 | Build a segmented PAM4 defect benchmark | `deep_capture` | Specialized legacy preset with segment, defect, and shared-link labels |
@@ -152,7 +153,7 @@ legacy array-warp workflows but should not be the default for a new physical cha
 | Area | Modules | Main capabilities |
 |---|---|---|
 | Composition and units | `compose`, `grid`, `streams` | `Signal`, recipes, deterministic factor streams, contrastive pairs |
-| Sources and effects | `physics`, `impairments`, `grammar` | Digital/RF sources, channels, reflections, jitter, named faults, broad shape generation |
+| Sources and effects | `physics`, `impairments`, `events`, `grammar` | Digital/RF sources, channels, reflections, jitter, named faults, localized needles, broad shape generation |
 | Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, scope/probe/ADC effects, segmented PAM4 datasets |
 | Links and systems | `rx`, `cdr`, `sparam`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, multi-lane, optical, coding, UART/open-drain |
 | Dataset quality | `measure`, `sweep`, `simreal` | Measured labels, confounder control, synthetic-vs-real separability |
@@ -285,6 +286,39 @@ from wfmsynth import apply_gated
 y, mask = apply_gated(x, glitch_fn, intervals=[(2000,180),(6000,140)])
 # y is bit-identical to x outside the gate; mask marks where the defect is active
 ```
+
+## Localized events (needles in a long record)
+Systemic stages (loss, reflections, ADC) apply to every sample. A runt bit, an
+edge-excited ring, a PDN sag on a long run, or an asynchronous glitch has **finite
+time support**. Placement (when) is independent of mechanism (what):
+
+```python
+sig = (ws.Signal(seed=1, grid=g).carrier("nrz", n_ui=n_ui, causal=True)
+       .events("runt", on="symbols", count=3, severity=0.6)      # data-locked
+       .events("ring", on="edges", which="rising", count=2,      # transition-locked
+               f0_hz=220e6, tau_s=12e-9)
+       .events("droop", on="pattern", min_run=8, severity=0.5)   # run-locked
+       .events("glitch", on="poisson", rate_hz=1e4, severity=0.4))  # not bus-locked
+x, events = sig.realize()   # samples + [{sample, ui, t_s, kind, severity}, ...]
+```
+
+`on` is the targeting policy: `symbols`, `edges`, `pattern`, `aggressor` (another
+lane's edges), `intervals`, `poisson`, `times`. `kind` is the mechanism: `runt`,
+`glitch`, `ring`, `overshoot`, `undershoot`, `nonmonotonic`, `droop`, `slow_edge`.
+
+Eye-mask failures and height at a sampling instant are **measured labels**, not
+mechanisms — many causes produce them:
+
+```python
+windows = ws.nominal_ui_windows(len(x), g, half_ui=1.0)   # ±1 UI on the known baud
+rows = ws.label_windows(windows, events, x=x, eye_low=0.12)
+# each row: requested event kinds + measured height / slope reversals / eye_violation
+```
+
+This module does not recover a clock or cut segments. Pass recovered instants to
+`windows_from_centers` and the same join still works. Systemic effects that were
+never placed as events (a resonant stub that rings only on some patterns) still
+appear in `measured` when they trip a flag. See [`examples/events.py`](examples/events.py).
 
 ## Tx FFE (pre-emphasis)
 Real transmitters run multi-tap FFE — a deliberate pre-cursor de-emphasizing ISI:

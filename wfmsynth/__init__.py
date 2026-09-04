@@ -10,13 +10,14 @@ Modules / public API:
   physics       low-level primitives — lossy_channel, multi_reflection, crosstalk,
                 ac_couple, inject_jitter, nrz, pam4, am, fm, psk, qam, chirp, ...
   impairments   apply_impairment(name, x, rng), domain_randomize(x, rng), IMPAIRMENTS
+  events        place_events / apply_events — localized needles + per-window labels
   grammar       carrier(), envelope(), sample(), generate() — compositional signals
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
 __version__ = "0.39.1"
 
-from . import (physics, impairments, grammar, pam4, grid, instrument, streams, compose,
+from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire)
 from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
@@ -27,6 +28,11 @@ from .streams import Streams
 from .impairments import (IMPAIRMENTS, apply_impairment, domain_randomize,
                           mix_at_constant_power, burst_gate, apply_gated, realistic_noise, drift,
                           electrical_idle)
+from .events import (Event, EventList, place_events, apply_events, defect_symbols,
+                     label_windows, windows_from_centers, nominal_ui_windows,
+                     measure_window, ui_heights, eye_mask, slope_reversals,
+                     step_overshoot_fraction, second_order_step, damped_sinusoid,
+                     MECHANISMS, PLACEMENTS)
 from .grammar import sample, generate, CARRIERS, ENVELOPES
 from .pam4 import deep_capture, PATHOLOGIES
 from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_adc,
@@ -49,7 +55,7 @@ from .bus import open_drain, uart_frame, uart_decode
 from .acquire import AcquisitionProfile, acquire_record, record_decimation
 
 __all__ = [
-    "physics", "impairments", "grammar", "pam4", "grid", "instrument", "streams", "compose",
+    "physics", "impairments", "events", "grammar", "pam4", "grid", "instrument", "streams", "compose",
     "measure", "sweep", "cdr", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "bus", "acquire", "ctle", "dfe", "ffe", "Scene",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "uart_frame", "uart_decode",
@@ -65,6 +71,11 @@ __all__ = [
     "differential_pair", "differential_mode", "common_mode", "supply_coupling",
     "IMPAIRMENTS", "apply_impairment", "domain_randomize",
     "mix_at_constant_power", "burst_gate", "apply_gated", "realistic_noise", "drift", "electrical_idle",
+    "Event", "EventList", "place_events", "apply_events", "defect_symbols",
+    "label_windows", "windows_from_centers", "nominal_ui_windows",
+    "measure_window", "ui_heights", "eye_mask", "slope_reversals",
+    "step_overshoot_fraction", "second_order_step", "damped_sinusoid",
+    "MECHANISMS", "PLACEMENTS",
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "interleave_adc", "shaped_noise_floor", "clip_adc", "quantize_adc", "digitize_adc",
     "scope_bandwidth", "probe_loading", "timebase_jitter",

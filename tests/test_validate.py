@@ -1154,3 +1154,54 @@ def test_causal_channel_odd_length_min_phase():
         x = np.random.default_rng(0).standard_normal(n)
         y = P.lossy_channel(x, length_in=8.0, tand=0.02, causal=True)
         assert y.shape == (n,) and np.isfinite(y).all()
+
+
+def test_localized_events_identity_labels_and_recipe():
+    import json
+    import wfmsynth as ws
+    from wfmsynth import physics as P
+
+    g = ws.Grid(fs=10e9, baud=1e9, n=4096)
+    n_ui = int(g.n // g.samples_per_ui)
+    sig = (ws.Signal(seed=3, grid=g)
+           .carrier("nrz", n_ui=n_ui, causal=True)
+           .events("runt", on="symbols", count=2, severity=0.7, floor=0.25)
+           .events("glitch", on="poisson", rate_hz=5e6, severity=0.6))
+    x, ev = sig.realize()
+    assert len(ev) >= 2
+    y, mask, ev2 = ws.apply_events(
+        (ws.Signal(seed=3, grid=g).carrier("nrz", n_ui=n_ui, causal=True)).waveform(),
+        ws.place_events(g.n, kind="glitch", on="times", grid=g, samples=[800], severity=0.8),
+        grid=g)
+    assert np.array_equal(y[mask == 0], (ws.Signal(seed=3, grid=g)
+                                         .carrier("nrz", n_ui=n_ui, causal=True)).waveform()[mask == 0])
+    assert np.array_equal(sig.waveform(), x)
+    rec = json.loads(json.dumps(sig.recipe()))
+    assert np.array_equal(ws.Signal.from_recipe(rec).waveform(), x)
+    assert f"events/1" in sig.roles()
+
+    wins = ws.nominal_ui_windows(len(x), g, half_ui=1.0)
+    rows = ws.label_windows(wins, ev, x=x, eye_low=0.15)
+    assert all("labels" in r and "start" in r for r in rows)
+    labeled = [r for r in rows if r["events"]]
+    assert len(labeled) >= 1
+    for r in labeled:
+        assert any(e["sample"] < r["stop"] and e["sample"] + e.get("width", 1) > r["start"]
+                   for e in r["events"])
+
+    tx = P.carrier_symbols("nrz", n_ui, seed=1)
+    evs = ws.place_events(g.n, kind="runt", on="symbols", grid=g, symbols=tx,
+                          indices=[int((np.where(np.diff(tx) != 0)[0] + 1)[0])],
+                          severity=0.8, floor=0.2)
+    tx2 = ws.defect_symbols(tx, evs, floor=0.2)
+    assert np.max(np.abs(tx2 - tx)) > 0.1
+
+    h, phase = ws.ui_heights(x, g, levels=2)
+    assert len(h) > 10 and np.isfinite(h).all()
+    viol = ws.eye_mask(h, low=0.05)
+    assert viol.shape == h.shape
+
+    z = 0.25
+    t = np.linspace(0, 12e-9, 4000)
+    s = ws.second_order_step(t, wn=2 * np.pi * 8e8, zeta=z)
+    assert abs((s.max() - 1.0) - ws.step_overshoot_fraction(z)) < 0.02
