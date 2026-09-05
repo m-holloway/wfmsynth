@@ -309,6 +309,38 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "events": _op_events}
 
 
+# --------------------------------------------------------------- fabric: stage-kind homing
+# Every op belongs to a stage KIND; the physical chain runs source -> shape -> supply -> channel
+# -> instrument. `canonicalize` stable-sorts an op list into that order, so cross-kind authoring
+# order commutes by construction (jitter-of-reflection vs reflection-of-jitter is resolved the same
+# way regardless of the order they were added). This is OPT-IN via `Signal.canonical()`: the default
+# `waveform()` still executes in insertion order, so no existing recipe changes. Order WITHIN a kind
+# is preserved (a stable sort), because same-kind ops do not generally commute.
+KIND_RANK = {"source": 0, "shape": 1, "supply": 2, "channel": 3, "instrument": 4}
+OP_KIND = {
+    "carrier": "source", "symbols": "source",
+    "tx_ffe": "shape", "de_emphasis": "shape", "events": "shape", "nonlinearity": "shape",
+    "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
+    "supply_coupling": "supply", "drift": "supply",
+    "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
+    "crosstalk_matrix": "channel", "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
+    "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
+    "ctle": "instrument", "dfe": "instrument", "rx_ffe": "instrument", "tia": "instrument",
+    "photodetect": "instrument", "scope": "instrument", "digitize": "instrument",
+    "timebase": "instrument", "acquire": "instrument",
+}
+
+
+def op_kind(op_name):
+    return OP_KIND.get(op_name, "channel")
+
+
+def canonicalize(ops):
+    """Stable-sort an op list into canonical stage-kind order (source->shape->supply->channel->
+    instrument). Order within a kind is preserved. Returns a new list."""
+    return sorted(ops, key=lambda o: KIND_RANK[op_kind(o["op"])])
+
+
 # --------------------------------------------------------------- the Signal builder
 @dataclass
 class Signal:
@@ -626,6 +658,18 @@ class Signal:
             g = self.grid
             r["grid"] = {"fs": g.fs, "baud": g.baud, "n": g.n, "v_full": g.v_full}
         return r
+
+    def stage_kinds(self):
+        """The stage kind of each op, in order (source/shape/supply/channel/instrument)."""
+        return [op_kind(o["op"]) for o in self.ops]
+
+    def canonical(self):
+        """A new Signal with the ops homed into canonical stage-kind order (a stable sort). The
+        default `waveform()` runs in insertion order and is unchanged; this is the opt-in Fabric
+        view where cross-kind authoring order commutes by construction."""
+        s = Signal(seed=self.seed, grid=self.grid)
+        s.ops = canonicalize(self.ops)
+        return s
 
     def to_json(self):
         """Canonical, key-sorted JSON string of the recipe — a stable serialization for

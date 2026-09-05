@@ -28,6 +28,29 @@ def open_drain(drivers, high=1.0, low=0.0):
     return np.where(released, high, low)
 
 
+def combine_drivers(drivers, law="wired_and", high=1.0, low=0.0):
+    """Resolve N drivers sharing ONE net by a declared combine LAW — the multi-driver physics
+    behind I2C multi-master, CAN arbitration and full-duplex/multi-drop buses. This is the Fabric's
+    driver-set: several sources on a node, resolved to one line.
+
+      wired_and    : the line is `high` only where EVERY driver is released (1); any driver pulling
+                     (0) wins -> `low` (I2C / open-drain; identical to `open_drain`).
+      dominant_min : the most-dominant (lowest) analog level present wins pointwise (CAN
+                     dominant/recessive, where the dominant state pulls the differential one way).
+      superpose    : the drivers add linearly (co-propagating waves on a shared medium).
+
+    The loser of an arbitration is detectable where it drove a released/recessive level but read the
+    combined line as pulled/dominant — that comparison is how a contention/arbitration label is placed."""
+    d = np.stack([np.asarray(a, float) for a in drivers])
+    if law == "wired_and":
+        return np.where(np.all(d == 1, axis=0), high, low)
+    if law == "dominant_min":
+        return d.min(axis=0)
+    if law == "superpose":
+        return d.sum(axis=0)
+    raise ValueError(f"unknown combine law {law!r} (use wired_and | dominant_min | superpose)")
+
+
 def uart_frame(data_bytes, samples_per_bit=16, idle=1.0):
     """UART framing: an idle-high line with, per byte, a start bit (0), 8 LSB-first data bits,
     and a stop bit (1). Returns the bit-level waveform (``samples_per_bit`` samples per bit)."""

@@ -365,6 +365,36 @@ check("rederive_anchor maps ui / t / sample to a consistent sample index",
       and _rda({"t": 1e-9}, _gp) == int(round(_gp.to_samples(1e-9)))
       and _rda({"sample": 123}, _gp) == 123)
 
+print("== fabric homing (opt-in): stage-kind canonical order; commute-by-construction; default unchanged ==")
+from wfmsynth.compose import KIND_RANK as _KR, op_kind as _opk
+# the provenance recipe is already canonical -> canonical() is a no-op -> bit-identical waveform
+check("canonical() is bit-identical on an already-canonical recipe (default path unchanged)",
+      np.array_equal(_sig.canonical().waveform(), _sig.waveform()))
+# a shape op (glitch) and a channel op (reflection) authored in EITHER order home to the same fabric
+_gk = Grid(fs=64e9, baud=16e9, n=1 << 12)
+_fa = (Signal(seed=3, grid=_gk).carrier("nrz", n_ui=128)
+       .reflect(td_ps=40, gamma_s=0.3, gamma_l=0.3).events("glitch", on="symbols", count=1))
+_fb = (Signal(seed=3, grid=_gk).carrier("nrz", n_ui=128)
+       .events("glitch", on="symbols", count=1).reflect(td_ps=40, gamma_s=0.3, gamma_l=0.3))
+check("homing makes cross-kind authoring order commute (identical op order and waveform)",
+      [o["op"] for o in _fa.canonical().ops] == [o["op"] for o in _fb.canonical().ops]
+      and np.array_equal(_fa.canonical().waveform(), _fb.canonical().waveform()))
+_ks = _fa.canonical().stage_kinds()
+check("canonical stage-kind order is nondecreasing (source->shape->supply->channel->instrument)",
+      all(_KR[_ks[i]] <= _KR[_ks[i + 1]] for i in range(len(_ks) - 1)))
+
+print("== multi-driver combine laws: N drivers on one shared net resolved by a declared law ==")
+from wfmsynth.bus import combine_drivers as _cd, open_drain as _od
+_A, _B = np.array([1, 1, 0, 1, 1.]), np.array([1, 0, 0, 1, 1.])
+check("wired_and: the line is low wherever ANY driver pulls (I2C multi-master; matches open_drain)",
+      np.array_equal(_cd([_A, _B], "wired_and"), _od([_A, _B]))
+      and np.array_equal(_cd([_A, _B], "wired_and"), np.array([1, 0, 0, 1, 1.])))
+_L1, _L2 = np.array([1.0, 0.2, -0.5]), np.array([0.3, 0.4, 0.4])
+check("dominant_min: the lowest (dominant) level wins pointwise (CAN arbitration)",
+      np.array_equal(_cd([_L1, _L2], "dominant_min"), np.array([0.3, 0.2, -0.5])))
+check("superpose: co-propagating drivers on a shared medium add linearly",
+      np.array_equal(_cd([_L1, _L2], "superpose"), _L1 + _L2))
+
 print("== rng stream roles: factors are independent & re-rollable (valid contrastive pairs) ==")
 from wfmsynth.streams import Streams as _St
 _s = _St(1234)
