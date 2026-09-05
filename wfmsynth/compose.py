@@ -76,7 +76,7 @@ def _op_lossy(x, p, streams, grid, idx):
 
 def _op_reflect(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("td_frac", "td_samples", "td_ps", "gamma_s", "gamma_l",
-                            "n_bounce") if k in p}
+                            "n_bounce", "node") if k in p}
     return P.multi_reflection(x, grid=grid, **kw)
 
 

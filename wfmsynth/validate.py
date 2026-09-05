@@ -228,6 +228,19 @@ _realized_ps = (_peak / 2.0) * _g.dt * 1e12
 check("reflection delay in ps round-trips through the grid",
       abs(_realized_ps - _td_ps) <= _g.dt * 1e12 + 1e-9,
       f"requested {_td_ps}ps -> realized {_realized_ps:.2f}ps (dt={_g.dt*1e12:.2f}ps)")
+
+print("== reverse-wave channel: a reflection is visible at the SOURCE plane, one bounce before the load ==")
+_imp = np.zeros(4096); _imp[100] = 1.0
+_d = 300
+_load_ms = P.multi_reflection(_imp, gamma_s=0.0, gamma_l=0.4, td_samples=_d, node="load")
+_src_ms = P.multi_reflection(_imp, gamma_s=0.0, gamma_l=0.4, td_samples=_d, node="source")
+check("matched source: the load tap sees no reflection train (the single bounce is absorbed at source)",
+      np.allclose(_load_ms, _imp))
+check("reverse wave: the source tap shows the returning echo at 2*td (return loss visible upstream)",
+      abs(_src_ms[100 + 2 * _d] - 0.4) < 1e-9 and abs(_src_ms[100] - 1.0) < 1e-9)
+check("matched load: source and load taps are both bit-identical to the incident (forward-only regression)",
+      np.array_equal(P.multi_reflection(_imp, gamma_s=0.3, gamma_l=0.0, td_samples=_d, node="source"), _imp)
+      and np.array_equal(P.multi_reflection(_imp, gamma_s=0.3, gamma_l=0.0, td_samples=_d, node="load"), _imp))
 # 2) a channel loss requested in dB at a stated frequency is realized at that frequency
 _loss_db, _at_ghz = 12.0, 20.0
 _hi = np.zeros(_g.n); _hi[0] = 1.0

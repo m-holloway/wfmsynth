@@ -292,16 +292,21 @@ def nominal_nonlinearity(x, compression=0.05, level_noise=0.0, rise_fall_ratio=1
 
 
 def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
-                     td_samples=None, td_ps=None, grid=None):
-    """Transmission-line bounce diagram: received = incident + reflected train.
-    Each round trip is delayed by 2*td and scaled by (gamma_s*gamma_l)^n. This is
-    the lattice/bounce superposition for a mismatched line.
+                     td_samples=None, td_ps=None, grid=None, node="load"):
+    """Transmission-line bounce diagram — the lattice/bounce superposition for a mismatched line,
+    observed at a chosen NODE. Each round trip is delayed by 2*td.
 
-    `td_frac` is a fraction of the record, which is convenient on a normalized grid
-    but scales with record length. `td_samples` overrides it with an absolute delay
-    in samples. `td_ps` (with grid=Grid(...)) states the one-way delay in picoseconds
-    -- a via stub is a fixed number of picoseconds away regardless of how long you
-    acquire for -- and is converted to samples via the grid's sample rate."""
+    node="load" (default): the far-end received signal = incident + reflected train,
+        y = x + sum_k (gamma_s*gamma_l)^k * gamma_l * x(t - 2k*td). The direct path plus every
+        wave that has bounced off BOTH ends and arrived forward again.
+    node="source": the near-end (driver-plane) signal = the launch plus every echo that RETURNS to
+        the source, y = x + sum_k (gamma_s*gamma_l)^(k-1) * gamma_l * x(t - 2k*td). This is the
+        reverse wave — return loss / an upstream echo — visible one bounce earlier than at the load
+        (a single load reflection returns to the source even when the source is matched).
+
+    Both reduce to the incident `x` at a matched termination, so a matched line is bit-identical to
+    the forward-only path. `td_frac` is a fraction of the record; `td_samples` overrides with an
+    absolute sample delay; `td_ps` (with grid) states the one-way delay in picoseconds."""
     x = np.asarray(x, float)
     nx = len(x)
     if td_ps is not None:
@@ -309,6 +314,8 @@ def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
             raise ValueError("td_ps requires grid=Grid(...)")
         td_samples = round(td_ps * 1e-12 * grid.fs)
     d = int(td_samples) if td_samples is not None else int(td_frac * nx)
+    if node not in ("load", "source"):
+        raise ValueError("node must be 'load' or 'source'")
     y = x.copy()
     g = gamma_s * gamma_l
     for k in range(1, n_bounce + 1):
@@ -317,7 +324,8 @@ def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
             break
         refl = np.zeros_like(x)
         refl[shift:] = x[:nx - shift]
-        y = y + (g ** k) * gamma_l * refl
+        weight = (g ** k) if node == "load" else (g ** (k - 1))   # source sees the echo one bounce sooner
+        y = y + weight * gamma_l * refl
     return y
 
 
