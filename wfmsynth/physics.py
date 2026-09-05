@@ -427,7 +427,7 @@ def prbs31q(n_symbols, seed=1):
     100G/400G-class long-pattern analogue of PRBS13Q. The period (2.1e9 symbols) is far too large to
     materialize, so this generates the first ``n_symbols`` from the LFSR state ``seed`` — which is
     exactly a capture-length SEGMENT starting at the position encoded by that 31-bit state. Returns
-    PAM4 levels in {-1,-1/3,+1/3,+1}. (Detection recovers the state = the position; see wfmreverse.)"""
+    PAM4 levels in {-1,-1/3,+1/3,+1}. (Detection recovers the state, i.e. the position in the pattern.)"""
     bits = prbs(31, int(n_symbols) * 2, seed)             # 2 bits per PAM4 symbol
     pairs = bits.reshape(-1, 2)
     return np.array([GRAY_PAM4[(int(a), int(b))] for a, b in pairs], dtype=float)
