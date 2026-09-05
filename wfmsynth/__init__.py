@@ -37,7 +37,7 @@ from .grammar import sample, generate, CARRIERS, ENVELOPES
 from .pam4 import deep_capture, PATHOLOGIES
 from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_adc,
                          digitize as digitize_adc, scope_bandwidth, probe_loading, timebase_jitter)
-from .compose import Signal, dataset
+from .compose import Signal, dataset, rederive_anchor
 from .measure import (eye_height, best_phase, attributes, align_symbols, ground_truth,
                       pattern_period)
 from .sweep import hold_constant, realized_table, solve_monotonic
@@ -79,7 +79,7 @@ __all__ = [
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "interleave_adc", "shaped_noise_floor", "clip_adc", "quantize_adc", "digitize_adc",
     "scope_bandwidth", "probe_loading", "timebase_jitter",
-    "Signal", "dataset",
+    "Signal", "dataset", "rederive_anchor",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",
 ]

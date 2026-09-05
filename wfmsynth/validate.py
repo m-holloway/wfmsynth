@@ -337,6 +337,21 @@ _xa = _sig2.waveform()
 check("different seed -> different waveform, still exactly reproducible",
       not np.array_equal(_xa, _xr) and np.array_equal(_xa, Signal.from_recipe(_sig2.recipe()).waveform()))
 
+print("== provenance identity: canonical JSON + sha256 stable; annotations round-trip, samples unchanged ==")
+from wfmsynth.compose import rederive_anchor as _rda
+check("sha256 is stable across a canonical-JSON round-trip",
+      _sig.sha256() == Signal.from_recipe(_json.loads(_sig.to_json())).sha256(), _sig.sha256()[:12])
+# annotating an op with provenance changes the recipe but leaves the samples bit-identical
+_siga = Signal.from_recipe(_rec).annotate(stage="channel", node="TP2")
+check("provenance annotation round-trips (recipe carries it) and samples stay bit-identical",
+      np.array_equal(Signal.from_recipe(_json.loads(_siga.to_json())).waveform(), _xr)
+      and _siga.recipe()["ops"][-1]["_prov"]["node"] == "TP2")
+# rederive_anchor turns a symbolic 'when' into a sample index on the grid
+check("rederive_anchor maps ui / t / sample to a consistent sample index",
+      _rda({"ui": 10}, _gp) == int(round(10 * _gp.samples_per_ui))
+      and _rda({"t": 1e-9}, _gp) == int(round(_gp.to_samples(1e-9)))
+      and _rda({"sample": 123}, _gp) == 123)
+
 print("== rng stream roles: factors are independent & re-rollable (valid contrastive pairs) ==")
 from wfmsynth.streams import Streams as _St
 _s = _St(1234)

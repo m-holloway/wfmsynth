@@ -319,6 +319,16 @@ class Signal:
     def _add(self, op, **params):
         self.ops.append({"op": op, **params}); return self
 
+    def annotate(self, **prov):
+        """Attach provenance metadata (e.g. ``stage="channel", node="TP2"``) to the most
+        recently added op. Stored under a reserved ``_prov`` key that executors ignore, so it
+        round-trips in the recipe but leaves the samples bit-identical. This is the hook the
+        higher-level authoring layer uses to tag where/what an op is without touching physics."""
+        if not self.ops:
+            raise ValueError("annotate() called before any op was added")
+        self.ops[-1].setdefault("_prov", {}).update(prov)
+        return self
+
     def symbols(self, symbols, **params):
         """First op: a carrier built from an ARBITRARY per-UI symbol sequence (e.g. a coded /
         scrambled stream from wfmsynth.coding). params: n, tr_frac, causal, jitter."""
@@ -617,6 +627,19 @@ class Signal:
             r["grid"] = {"fs": g.fs, "baud": g.baud, "n": g.n, "v_full": g.v_full}
         return r
 
+    def to_json(self):
+        """Canonical, key-sorted JSON string of the recipe — a stable serialization for
+        hashing, diffing and content-addressing. Two Signals with the same ops/grid/seed
+        (regardless of construction order) produce byte-identical JSON."""
+        import json
+        return json.dumps(self.recipe(), sort_keys=True)
+
+    def sha256(self):
+        """Stable content hash of the recipe: the identity of this synthesis program. Because
+        `(recipe, seed) -> waveform` is deterministic, equal hashes guarantee equal samples."""
+        import hashlib
+        return hashlib.sha256(self.to_json().encode("utf-8")).hexdigest()
+
     @classmethod
     def from_recipe(cls, r):
         """Reconstruct a Signal from a recipe; `.waveform()` reproduces bit-for-bit."""
@@ -624,6 +647,29 @@ class Signal:
         s = cls(seed=r["seed"], grid=grid)
         s.ops = [dict(o) for o in r["ops"]]
         return s
+
+
+def rederive_anchor(anchor, grid):
+    """Resolve a symbolic time-anchor to an absolute sample index on a (single-segment) grid —
+    the one function that lowering and rendering both call to turn a fault's *when* into a
+    sample. `anchor` is a dict with exactly one of: ``sample`` (index), ``t`` (seconds),
+    ``frac`` (fraction of the record), or ``ui`` (unit intervals; needs baud). The
+    piecewise/aperiodic generalization (named segments, landmarks) extends this later without
+    changing the single-segment result."""
+    if grid is None:
+        raise ValueError("rederive_anchor needs a grid")
+    if "sample" in anchor:
+        return int(round(anchor["sample"]))
+    if "t" in anchor:
+        return int(round(grid.to_samples(anchor["t"])))
+    if "frac" in anchor:
+        return int(round(anchor["frac"] * grid.n))
+    if "ui" in anchor:
+        spu = grid.samples_per_ui
+        if spu is None:
+            raise ValueError("a 'ui' anchor needs baud set on the grid")
+        return int(round(anchor["ui"] * spu))
+    raise ValueError(f"unknown anchor spec {anchor!r} (use sample/t/frac/ui)")
 
 
 def dataset(build, n, seed=0):
