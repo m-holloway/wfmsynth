@@ -27,6 +27,47 @@ class Grid:
     baud: Optional[float] = None       # symbol rate [Bd] (optional)
     n: int = 4096                      # record length [samples]
     v_full: float = 1.0                # full-scale voltage: amplitude +/-1 maps to +/-v_full/2
+    # optional piecewise timebase: a tuple of (name, baud, n_symbols) segments back-to-back. None =
+    # a single uniform segment (unchanged, bit-identical). Enables dual-rate records (CAN-FD BRS,
+    # DDR bursts) whose anchors resolve WITHIN their segment.
+    segments: Optional[tuple] = None
+
+    def resolve(self, anchor):
+        """Resolve a symbolic time-anchor to an absolute sample index. `anchor` is a dict with one
+        of: ``sample`` | ``t`` (seconds) | ``frac`` (of the record) | ``ui`` (single-segment; needs
+        baud) | ``{"segment": name, "bit": k}`` (piecewise; resolves within that segment). The one
+        resolver both lowering and rendering call."""
+        if "sample" in anchor:
+            return int(round(anchor["sample"]))
+        if "t" in anchor:
+            return int(round(anchor["t"] * self.fs))
+        if "frac" in anchor:
+            return int(round(anchor["frac"] * self.n))
+        if "segment" in anchor:
+            if not self.segments:
+                raise ValueError("a 'segment' anchor needs a segmented grid")
+            off = 0.0
+            for name, baud, n_sym in self.segments:
+                if name == anchor["segment"]:
+                    return int(round(off + anchor.get("bit", 0) * (self.fs / baud)))
+                off += n_sym * (self.fs / baud)
+            raise ValueError(f"unknown segment {anchor['segment']!r}")
+        if "ui" in anchor:
+            if self.samples_per_ui is None:
+                raise ValueError("a 'ui' anchor needs baud set on the grid")
+            return int(round(anchor["ui"] * self.samples_per_ui))
+        raise ValueError(f"unknown anchor spec {anchor!r} (use sample/t/frac/ui/segment)")
+
+    def segment_bounds(self):
+        """(name, start_sample, stop_sample) for each segment; empty if single-segment."""
+        if not self.segments:
+            return []
+        out, off = [], 0.0
+        for name, baud, n_sym in self.segments:
+            width = n_sym * (self.fs / baud)
+            out.append((name, int(round(off)), int(round(off + width))))
+            off += width
+        return out
 
     # ---- derived quantities ----
     @property

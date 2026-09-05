@@ -383,6 +383,20 @@ _ks = _fa.canonical().stage_kinds()
 check("canonical stage-kind order is nondecreasing (source->shape->supply->channel->instrument)",
       all(_KR[_ks[i]] <= _KR[_ks[i + 1]] for i in range(len(_ks) - 1)))
 
+print("== piecewise timebase: a segmented grid resolves anchors WITHIN their segment (CAN-FD BRS) ==")
+_gseg = Grid(fs=32e9, segments=(("arb", 500e6, 20), ("data", 2e9, 40)))
+# arbitration bits are 32e9/500e6 = 64 samples wide; data bits are 32e9/2e9 = 16 samples wide
+check("segment anchors resolve within-segment (dual-rate bit widths)",
+      _gseg.resolve({"segment": "arb", "bit": 3}) == 3 * 64
+      and _gseg.resolve({"segment": "data", "bit": 2}) == 20 * 64 + 2 * 16)
+_bounds = _gseg.segment_bounds()
+check("segment bounds are contiguous and dual-rate (data bits narrower than arbitration bits)",
+      _bounds[0] == ("arb", 0, 20 * 64) and _bounds[1] == ("data", 20 * 64, 20 * 64 + 40 * 16))
+# a single-segment grid is unchanged: resolve matches the uniform ui math
+check("single-segment grid: resolve('ui') matches uniform samples_per_ui (regression)",
+      Grid(fs=256e9, baud=112e9, n=4096).resolve({"ui": 7})
+      == int(round(7 * (256e9 / 112e9))))
+
 print("== multi-driver combine laws: N drivers on one shared net resolved by a declared law ==")
 from wfmsynth.bus import combine_drivers as _cd, open_drain as _od
 _A, _B = np.array([1, 1, 0, 1, 1.]), np.array([1, 0, 0, 1, 1.])
