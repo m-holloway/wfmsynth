@@ -52,7 +52,7 @@ def _carrier(p, streams, grid, idx):
     if p["kind"] == "pam4":
         return P.pam4(pattern=p.get("pattern", "legacy"), **common)
     if p["kind"] == "nrz":
-        return P.nrz(**common)
+        return P.nrz(pattern=p.get("pattern", "legacy"), **common)
     raise ValueError(f"unknown carrier kind {p['kind']!r} (use 'nrz' or 'pam4')")
 
 
@@ -368,7 +368,13 @@ class Signal:
 
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
-        pattern (pam4), jitter=dict(rj,pj,f_pj,dcd) for source jitter."""
+        pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter.
+
+        pattern is carrier-specific and defaults to 'legacy' for both: NRZ takes
+        'legacy' (== 'prbs7'), 'prbs7'/'prbs9'/'prbs11'/'prbs13'/'prbs15'/'prbs23'/
+        'prbs31' and 'clock'; PAM4 takes 'legacy', 'prbs13q', 'prbs31q'. Crossing them
+        raises rather than coercing -- see physics.carrier_symbols for why the order
+        matters to channel ISI."""
         return self._add("carrier", kind=kind, **params)
 
     def nonlinearity(self, **params):

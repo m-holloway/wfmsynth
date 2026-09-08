@@ -381,7 +381,19 @@ def inject_jitter(x, sigma_rj=0.0, a_pj=0.0, f_pj=5.0, dcd=0.0, rng=None,
 # pseudo-random sequence with the right level statistics -- that a protocol
 # analyser will never pattern-lock to. If a capture is meant to be analysable by
 # an instrument, it has to be the standard's polynomial.
-PRBS_TAPS = {7: (7, 6), 9: (9, 5), 13: (13, 12, 2, 1), 15: (15, 14), 31: (31, 28)}
+#
+# Orders 11 and 23 are the ITU-T O.150 test sequences (O.152 and O.151
+# respectively), added because they appear in transport standards:
+#     order 11: G(x) = 1 + x^9  + x^11   period 2047
+#     order 23: G(x) = 1 + x^18 + x^23   period 8388607
+# Every polynomial in this table is asserted PRIMITIVE by wfmsynth.validate (the
+# order of x in GF(2)[x]/G is exactly 2^order - 1). A non-primitive tap set yields a
+# sequence that looks random, has short sub-periods, and is not the standard's --
+# the failure mode the paragraph above is about, so it is checked rather than
+# trusted. Orders whose standard polynomial is not stated here are NOT offered:
+# guessing a tap set is worse than declining the order.
+PRBS_TAPS = {7: (7, 6), 9: (9, 5), 11: (11, 9), 13: (13, 12, 2, 1), 15: (15, 14),
+             23: (23, 18), 31: (31, 28)}
 
 # Gray mapping from a bit pair to a PAM4 level, per IEEE 802.3 120.5.11.2.1.
 GRAY_PAM4 = {(0, 0): -1.0, (0, 1): -1.0 / 3.0, (1, 1): 1.0 / 3.0, (1, 0): 1.0}
@@ -431,6 +443,47 @@ def prbs31q(n_symbols, seed=1):
     bits = prbs(31, int(n_symbols) * 2, seed)             # 2 bits per PAM4 symbol
     pairs = bits.reshape(-1, 2)
     return np.array([GRAY_PAM4[(int(a), int(b))] for a, b in pairs], dtype=float)
+
+
+def clock_pattern(n_symbols):
+    """The alternating 1010... clock pattern, as NRZ levels starting at +1.
+
+    The other sequence compliance work actually uses, and the deliberate contrast case
+    to a long PRBS: it has one transition per UI, no runs, and no low-frequency content
+    at all, so a channel's response to it is pure Nyquist-tone attenuation with
+    essentially NO pattern-dependent ISI. An eye that is open on a clock pattern and
+    shut on PRBS31 through the same channel is the signature of ISI rather than loss.
+    Independent of seed -- there is nothing random in it."""
+    return np.where(np.arange(int(n_symbols)) % 2 == 0, 1.0, -1.0)
+
+
+# Carrier pattern names. The BINARY (two-level) names spell the LFSR order out --
+# `prbs7` .. `prbs31` -- while the QUATERNARY sequences keep IEEE's "Q" suffix
+# (`prbs13q`, `prbs31q`). That is the whole naming rule, and it is chosen so that no
+# name can be ambiguous about how many levels it carries: `prbs13` and `prbs13q` are
+# different sequences on different carriers and now read as different names, rather
+# than one being a prefix-shaped guess at the other. Derived from PRBS_TAPS so an
+# order added to the table is exposed as a pattern by construction and cannot drift
+# out of sync with it.
+NRZ_PRBS_PATTERNS = {f"prbs{order}": order for order in sorted(PRBS_TAPS)}
+NRZ_PATTERNS = ("legacy", *NRZ_PRBS_PATTERNS, "clock")
+PAM4_PATTERNS = ("legacy", "prbs13q", "prbs31q")
+
+
+def _pattern_error(pattern, kind, accepted, other_kind, other_accepted):
+    """A ValueError that names what IS accepted, and says so specifically when the
+    pattern is real but belongs to the OTHER carrier. A quaternary pattern on an NRZ
+    carrier is a user error about how many levels the link has; silently coercing it
+    would hide exactly the mistake worth catching. ``kind``/``other_kind`` are the
+    carrier kind strings, so the message can be pasted straight back into the call."""
+    levels = {"nrz": "binary", "pam4": "quaternary"}
+    accepted_list = ", ".join(repr(p) for p in accepted)
+    if pattern in other_accepted:
+        return ValueError(
+            f"pattern {pattern!r} is a {levels[other_kind]} ({other_kind}) pattern and "
+            f"cannot drive a {levels[kind]} ({kind}) carrier; pass kind={other_kind!r}, "
+            f"or one of: {accepted_list}")
+    return ValueError(f"unknown {kind} pattern {pattern!r}; use one of: {accepted_list}")
 
 
 # Rise time cannot be faster than the grid supports. BW * t_r ~= 0.35, and the
@@ -558,10 +611,34 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
     """The ideal transmitted symbol levels (one per UI) for a carrier — the reference
     stream for realized symbol alignment and any per-symbol ground-truth statistic.
     Deterministic given (kind, n_ui, seed, pattern); the single source of truth that
-    `nrz`/`pam4` shape into a waveform."""
+    `nrz`/`pam4` shape into a waveform.
+
+    NRZ patterns: 'legacy' (== 'prbs7', the default), 'prbs7'/'prbs9'/'prbs11'/
+    'prbs13'/'prbs15'/'prbs23'/'prbs31', and 'clock' (1010...).
+    PAM4 patterns: 'legacy' (the default), 'prbs13q', 'prbs31q'.
+
+    CHOOSE THE ORDER DELIBERATELY. Channel ISI is a function of pattern HISTORY: the
+    long runs and low-frequency content of a long PRBS are what actually close an eye
+    through a lossy or reflective channel. PRBS7 repeats every 127 bits -- 23622 times
+    inside a 3 M UI record -- and carries almost none of that, so a lossy case rendered
+    on it comes out systematically MORE OPEN than the same link would be in the lab.
+    Compliance and SI work use PRBS31 (period 2147483647, i.e. never repeating inside
+    any realistic record) for exactly this reason. 'prbs7' remains the default only
+    because this kernel is pinned by SHA and its output diffed sample-for-sample
+    downstream; it is a compatibility default, not a recommendation."""
     n_ui = int(n_ui)
     if kind == "nrz":
-        return np.where(prbs(7, n_ui, seed) > 0, 1.0, -1.0)
+        if pattern in ("legacy", "prbs7"):
+            # The historical NRZ stream, kept bit-for-bit: 'legacy' means PRBS7 here
+            # and always will, because every NRZ waveform this kernel has ever
+            # produced came out of this line.
+            return np.where(prbs(7, n_ui, seed) > 0, 1.0, -1.0)
+        if pattern == "clock":
+            return clock_pattern(n_ui)
+        order = NRZ_PRBS_PATTERNS.get(pattern)
+        if order is not None:
+            return np.where(prbs(order, n_ui, seed) > 0, 1.0, -1.0)
+        raise _pattern_error(pattern, "nrz", NRZ_PATTERNS, "pam4", PAM4_PATTERNS)
     if kind == "pam4":
         levels = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
         if pattern == "prbs13q":
@@ -571,7 +648,7 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
         if pattern == "legacy":
             b0 = prbs(7, n_ui, seed); b1 = prbs(9, n_ui, seed + 3)
             return levels[np.clip(b0 * 2 + (b0 ^ b1), 0, 3)]
-        raise ValueError(f"unknown pattern {pattern!r}; use 'legacy', 'prbs13q', or 'prbs31q'")
+        raise _pattern_error(pattern, "pam4", PAM4_PATTERNS, "nrz", NRZ_PATTERNS)
     raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz' or 'pam4'")
 
 
@@ -589,10 +666,24 @@ def from_symbols(symbols, n=None, tr_frac=0.15, causal=False, jitter=None, rng=N
 
 
 def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=None,
-        tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES):
+        tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES, pattern="legacy"):
+    """NRZ carrier.
+
+    pattern="legacy"  PRBS7 -- the historical default, kept so existing output stays
+                      bit-identical. Its 127-bit period repeats ~23600 times in a 3 M UI
+                      record and carries almost no low-frequency content, so a lossy or
+                      reflective channel renders MORE OPEN on it than the real link is.
+    pattern="prbs31"  the compliance/SI choice: period 2147483647, never repeats inside a
+                      realistic record, and exercises the run lengths that actually close
+                      an eye. Also 'prbs9'/'prbs11'/'prbs13'/'prbs15'/'prbs23'.
+    pattern="clock"   alternating 1010... -- one transition per UI, no runs: the
+                      deliberately ISI-free contrast case.
+    jitter=Jitter(...) applies transmitter jitter at the symbol edge times (source
+                      jitter) before shaping; rng seeds it.
+    """
     n = N if n is None else int(n)
     spb = n / n_ui
-    lv = carrier_symbols("nrz", n_ui, seed)
+    lv = carrier_symbols("nrz", n_ui, seed, pattern)
     tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
     return _shape_edges(_place_symbols(lv, n, spb, jitter, rng), tr, causal)
 

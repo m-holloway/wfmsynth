@@ -59,7 +59,9 @@ implementations.
 
 - Implement full 8b/10b tables, running-disparity selection, K characters, decoding, and
   run-length validation.
-- Expose additional standard PRBS patterns through the carrier API.
+- Expose the standard PRBS patterns on PAM4 as well as NRZ. (NRZ now takes
+  `prbs7/9/11/13/15/23/31` and `clock`; PAM4 still takes only the quaternary
+  `prbs13q`/`prbs31q`, and the compliance patterns from the specs are still absent.)
 - Decide whether 128b/130b belongs in this package before advertising it as implemented.
 - Add focused low-speed building blocks only where they improve waveform realism; current
   bus support is open-drain composition and UART framing, not complete SPI/CAN stacks.

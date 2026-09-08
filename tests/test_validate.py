@@ -107,6 +107,124 @@ def test_pam4_pattern_selection():
         raise AssertionError("unknown pattern should raise")
 
 
+def test_nrz_pattern_selection_and_legacy_bit_exactness():
+    """The NRZ carrier honours `pattern`, and its DEFAULT is still PRBS7 bit-for-bit.
+
+    The NRZ branch used to hard-code PRBS7 and ignore `pattern` entirely, so every NRZ
+    waveform this kernel produced was a 127-bit sequence repeated ~23600 times in a 3 M UI
+    record -- almost no low-frequency content, and a lossy channel therefore rendered
+    systematically more open than the real link. The fix must not move the default:
+    downstream suites pin this kernel by SHA and diff its output sample for sample.
+    """
+    import hashlib
+
+    import pytest
+
+    from wfmsynth import physics as P
+
+    # 1) the default path is UNCHANGED, against an independent construction and a
+    #    platform-independent hash of the (unfiltered, exactly +/-1) symbol stream.
+    for seed in (1, 3, 42):
+        assert np.array_equal(P.carrier_symbols("nrz", 4096, seed),
+                              np.where(P.prbs(7, 4096, seed) > 0, 1.0, -1.0))
+    digest = hashlib.sha256(np.ascontiguousarray(
+        P.carrier_symbols("nrz", 4096, 1), dtype="<f8").tobytes()).hexdigest()
+    assert digest == "4ed094a8212a86fe7a996b38c31cdff9ea2689e821da50042ca709853495eedd"
+    assert np.array_equal(P.nrz(n_ui=512, seed=3, n=8192),
+                          P.nrz(n_ui=512, seed=3, n=8192, pattern="prbs7"))
+    assert np.array_equal(P.carrier_symbols("nrz", 999, 3, "legacy"),
+                          P.carrier_symbols("nrz", 999, 3, "prbs7"))
+
+    # 2) pattern is actually READ now, and every exposed name is two-level.
+    for name in P.NRZ_PATTERNS:
+        sym = P.carrier_symbols("nrz", 777, 5, name)
+        assert len(sym) == 777 and set(np.unique(sym)) == {-1.0, 1.0}, name
+    assert not np.array_equal(P.carrier_symbols("nrz", 4096, 1, "prbs7"),
+                              P.carrier_symbols("nrz", 4096, 1, "prbs31"))
+    assert not np.array_equal(P.nrz(n_ui=512, seed=3, n=8192),
+                              P.nrz(n_ui=512, seed=3, n=8192, pattern="prbs31"))
+
+    # 3) PRBS7 repeats inside the record; PRBS31 (period 2**31-1) cannot.
+    s7 = P.carrier_symbols("nrz", 1270, 1, "prbs7")
+    assert all(np.array_equal(s7[:127], s7[k * 127:(k + 1) * 127]) for k in range(1, 10))
+    s31 = P.carrier_symbols("nrz", 1270, 1, "prbs31")
+    assert not any(np.array_equal(s31[:L], s31[L:2 * L]) for L in range(1, 636))
+
+    # 4) the clock pattern: alternating, seed-independent, ISI-free by construction.
+    ck = P.carrier_symbols("nrz", 1001, 5, "clock")
+    assert np.all(ck[1:] != ck[:-1])
+    assert np.array_equal(ck, P.carrier_symbols("nrz", 1001, 99, "clock"))
+
+    # 5) errors stay honest: no silent coercion across carrier kinds, and the message
+    #    names what IS accepted.
+    for kind, bad, must_say in (("nrz", "prbs13q", ("quaternary", "pam4", "prbs31")),
+                                ("pam4", "prbs31", ("binary", "nrz", "prbs13q")),
+                                ("pam4", "clock", ("binary", "nrz")),
+                                ("nrz", "prbs42", ("prbs7", "prbs31", "clock")),
+                                ("pam4", "prbs42", ("legacy", "prbs13q", "prbs31q"))):
+        with pytest.raises(ValueError) as exc:
+            P.carrier_symbols(kind, 64, 1, bad)
+        assert all(w in str(exc.value) for w in must_say), (kind, bad, str(exc.value))
+    with pytest.raises(ValueError):
+        P.nrz(n_ui=64, pattern="prbs13q")
+
+
+def test_prbs_tap_table_polynomials_are_primitive():
+    """Every offered PRBS polynomial is primitive, so the sequence really is maximal
+    length. Orders 11 and 23 are the ITU-T O.150 sequences (x^11+x^9+1, x^23+x^18+1);
+    their periods (2047 and 8388607) are checked algebraically rather than generated,
+    which is also the only way to check order 31 at all. A tap set that is merely
+    plausible produces a sequence that looks random and is not the standard's.
+    """
+    from wfmsynth import physics as P
+    assert P.PRBS_TAPS[11] == (11, 9) and P.PRBS_TAPS[23] == (23, 18)
+
+    def prime_factors(m):
+        f, d = set(), 2
+        while d * d <= m:
+            while m % d == 0:
+                f.add(d); m //= d
+            d += 1
+        return f | ({m} if m > 1 else set())
+
+    def x_pow_mod(e, g, deg):                     # x^e in GF(2)[x]/g
+        r, base = 1, 2
+        while e:
+            if e & 1:
+                r = poly_mul(r, base, g, deg)
+            base = poly_mul(base, base, g, deg)
+            e >>= 1
+        return r
+
+    def poly_mul(a, b, g, deg):
+        r = 0
+        while b:
+            if b & 1:
+                r ^= a
+            b >>= 1
+            a <<= 1
+            if (a >> deg) & 1:
+                a ^= g
+        return r
+
+    for order, taps in P.PRBS_TAPS.items():
+        g = 1
+        for t in taps:
+            g ^= 1 << t
+        m = (1 << order) - 1
+        assert x_pow_mod(m, g, order) == 1, order
+        for p in prime_factors(m):
+            assert x_pow_mod(m // p, g, order) != 1, (order, p)
+
+    # and the generated sequences show the maximal-length signature for the orders
+    # whose period is small enough to materialize
+    for order in (7, 9, 11, 13, 15):
+        period = (1 << order) - 1
+        bits = P.prbs(order, period * 2)
+        assert np.array_equal(bits[:period], bits[period:])
+        assert int(bits[:period].sum()) == 1 << (order - 1)
+
+
 def test_causal_edge_shaping_has_no_precursor_or_startup_step():
     from wfmsynth import physics as P
     step = np.concatenate([np.full(256, -1.0), np.full(256, 1.0)])

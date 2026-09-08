@@ -168,6 +168,171 @@ check("PRBS13Q period is 8191 symbols",
 check("pam4(pattern='prbs13q') yields 4 separated levels",
       _pam4_levels(P.pam4(n_ui=512, seed=5, pattern="prbs13q")))
 
+print("== PRBS tap table: every offered polynomial is PRIMITIVE (maximal length) ==")
+# A tap set that is not primitive yields a sequence that looks random, has short
+# sub-periods, and is NOT the sequence the standard names -- and orders 23 and 31 have
+# periods (8.4e6, 2.1e9) far too long to demonstrate by generating them. So check the
+# algebra instead: G is primitive iff the order of x in GF(2)[x]/G is exactly 2^order-1,
+# i.e. x^(2^n-1) == 1 and x^((2^n-1)/p) != 1 for every prime p dividing 2^n-1. Exact,
+# and it runs in microseconds for every order in the table.
+def _prime_factors(m):
+    f, d = set(), 2
+    while d * d <= m:
+        while m % d == 0:
+            f.add(d); m //= d
+        d += 1
+    if m > 1:
+        f.add(m)
+    return f
+
+def _polymulmod(a, b, g, deg):                 # (a*b) mod g over GF(2)
+    r = 0
+    while b:
+        if b & 1:
+            r ^= a
+        b >>= 1
+        a <<= 1
+        if (a >> deg) & 1:
+            a ^= g
+    return r
+
+def _x_pow_mod(e, g, deg):                     # x^e mod g over GF(2)
+    r, base = 1, 2
+    while e:
+        if e & 1:
+            r = _polymulmod(r, base, g, deg)
+        base = _polymulmod(base, base, g, deg)
+        e >>= 1
+    return r
+
+def _is_primitive(order, taps):
+    g = 1
+    for t in taps:                             # G(x) = 1 + sum x^t, matching prbs()'s feedback
+        g ^= 1 << t
+    m = (1 << order) - 1
+    if _x_pow_mod(m, g, order) != 1:
+        return False
+    return all(_x_pow_mod(m // p, g, order) != 1 for p in _prime_factors(m))
+
+for _o, _t in sorted(P.PRBS_TAPS.items()):
+    _poly = " + ".join(["1"] + [f"x^{t}" for t in sorted(_t)])
+    check(f"PRBS{_o} polynomial is primitive (period 2^{_o}-1 = {(1 << _o) - 1})",
+          _is_primitive(_o, _t), _poly)
+check("PRBS_TAPS offers only orders whose standard polynomial is stated",
+      set(P.PRBS_TAPS) == {7, 9, 11, 13, 15, 23, 31}, f"orders={sorted(P.PRBS_TAPS)}")
+
+print("== maximal-length properties hold over a FULL period (balance and longest run) ==")
+# Two properties every m-sequence has and no near-miss polynomial has: exactly 2^(n-1)
+# ones per period, and a longest run of exactly n. Orders 23/31 are covered by the
+# algebraic check above -- materializing their periods is not worth the seconds.
+for _o in (7, 9, 11, 13, 15):
+    _p = (1 << _o) - 1
+    _b = P.prbs(_o, _p * 2)
+    _mr = _c = 1
+    for _i in range(1, _p):
+        _c = _c + 1 if _b[_i] == _b[_i - 1] else 1
+        _mr = max(_mr, _c)
+    check(f"PRBS{_o}: period {_p}, {1 << (_o - 1)} ones, longest run {_o}",
+          np.array_equal(_b[:_p], _b[_p:2 * _p]) and int(_b[:_p].sum()) == (1 << (_o - 1))
+          and _mr == _o,
+          f"ones={int(_b[:_p].sum())} longest_run={_mr}")
+
+print("== NRZ pattern: the carrier HONOURS `pattern`, and the default is PRBS7 bit-for-bit ==")
+# The default is a COMPATIBILITY default: this kernel is pinned by SHA and its output is
+# diffed sample-for-sample downstream, so an NRZ carrier with no pattern given must stay
+# the PRBS7 stream it has always been. That is asserted here, not assumed.
+_nd = 4096
+check("carrier_symbols('nrz') with no pattern is PRBS7, sample for sample",
+      np.array_equal(P.carrier_symbols("nrz", _nd, 3),
+                     np.where(P.prbs(7, _nd, 3) > 0, 1.0, -1.0)))
+check("'legacy' and 'prbs7' are the same NRZ stream (the alias is exact)",
+      np.array_equal(P.carrier_symbols("nrz", _nd, 3, "legacy"),
+                     P.carrier_symbols("nrz", _nd, 3, "prbs7")))
+check("nrz() default waveform == nrz(pattern='prbs7') waveform, sample for sample",
+      np.array_equal(P.nrz(n_ui=512, seed=3, n=8192),
+                     P.nrz(n_ui=512, seed=3, n=8192, pattern="prbs7")))
+check("every exposed NRZ pattern produces a two-level stream of the requested length",
+      all(len(_s) == 777 and set(np.unique(_s)) == {-1.0, 1.0}
+          for _s in (P.carrier_symbols("nrz", 777, 5, _p) for _p in P.NRZ_PATTERNS)),
+      f"patterns={list(P.NRZ_PATTERNS)}")
+check("pattern actually changes the stream (PRBS7 != PRBS31 != PRBS13)",
+      not np.array_equal(P.carrier_symbols("nrz", _nd, 1, "prbs7"),
+                         P.carrier_symbols("nrz", _nd, 1, "prbs31"))
+      and not np.array_equal(P.carrier_symbols("nrz", _nd, 1, "prbs13"),
+                             P.carrier_symbols("nrz", _nd, 1, "prbs31")))
+
+print("== pattern REPEAT length: PRBS7 repeats inside a record; PRBS31 cannot ==")
+# The substance of the defect. 127 bits inside a 3 M UI record is 23622 repetitions --
+# the channel sees the same 127-bit history over and over, so the record contains far
+# less distinct pattern history than its length suggests.
+_s7 = P.carrier_symbols("nrz", 4064, 1, "prbs7")
+check("PRBS7 repeats every 127 UI (32 whole repetitions in a 4064 UI record)",
+      all(np.array_equal(_s7[:127], _s7[k * 127:(k + 1) * 127]) for k in range(1, 32)),
+      "127-bit period; 23622 repetitions inside a 3 M UI record")
+_s31 = P.carrier_symbols("nrz", 4064, 1, "prbs31")
+check("PRBS31 does not repeat at ANY lag inside the same record (period 2147483647)",
+      not any(np.array_equal(_s31[:_L], _s31[_L:2 * _L]) for _L in range(1, 2033)))
+
+print("== pattern HISTORY closes the eye: PRBS7 renders a lossy channel too optimistic ==")
+# Channel ISI is a function of pattern history: long runs and low-frequency content are
+# what actually shut an eye. PRBS7's longest run is 7 UI, PRBS31's is ~27 in this record.
+# Same channel, same seed, same everything else -- only the pattern differs.
+# NOTE the record must be long enough to SAMPLE PRBS31's run distribution: PRBS31 is a
+# capture-length segment of a 2.1e9-symbol sequence, and in a short (~3 k UI) record
+# whether a long run falls inside the window is luck of the seed. 8192 UI is not.
+from wfmsynth.grid import Grid as _GridP
+_gpat = _GridP(fs=80e9, baud=10e9, n=8192 * 8)
+from wfmsynth.measure import eye_height as _eh
+def _lossy_eye(pattern, seed):
+    _x = P.nrz(n_ui=8192, seed=seed, n=_gpat.n, causal=True, tr_frac=0.4, pattern=pattern)
+    return float(_eh(P.lossy_channel(_x, length_in=14.0, tand=0.02, causal=True),
+                     _gpat, levels=2))
+for _sd in (1, 3, 11):
+    _e7, _e31, _eck = (_lossy_eye("prbs7", _sd), _lossy_eye("prbs31", _sd),
+                       _lossy_eye("clock", _sd))
+    check(f"seed {_sd}: PRBS7 eye is OPTIMISTIC vs PRBS31 through the same 14in channel",
+          _e7 > _e31 * 1.10,
+          f"prbs7={_e7:.4f} prbs31={_e31:.4f} ({100 * (_e7 / _e31 - 1):.0f}% overstated)")
+    check(f"seed {_sd}: the clock pattern is the ISI-free contrast (most open of the three)",
+          _eck > _e7 > 0, f"clock={_eck:.4f} prbs7={_e7:.4f} prbs31={_e31:.4f}")
+
+print("== clock pattern: alternating 1010..., one transition per UI, no runs ==")
+_ck = P.carrier_symbols("nrz", 1001, 5, "clock")
+check("clock alternates every UI (transition density 1.0, longest run 1)",
+      np.all(_ck[1:] != _ck[:-1]) and set(np.unique(_ck)) == {-1.0, 1.0},
+      f"density={float(np.mean(_ck[1:] != _ck[:-1])):.1f}")
+check("clock is seed-independent (there is nothing random in it)",
+      np.array_equal(P.carrier_symbols("nrz", 1001, 5, "clock"),
+                     P.carrier_symbols("nrz", 1001, 99, "clock")))
+check("clock is DC-balanced over an even number of UI",
+      abs(float(P.carrier_symbols("nrz", 1000, 1, "clock").sum())) < 1e-12)
+
+print("== pattern errors stay HONEST: no silent coercion across carrier kinds ==")
+def _err(fn):
+    try:
+        fn()
+    except ValueError as e:
+        return str(e)
+    return ""
+_e_q_on_nrz = _err(lambda: P.carrier_symbols("nrz", 64, 1, "prbs13q"))
+check("a QUATERNARY pattern on an NRZ carrier raises and says so",
+      "quaternary" in _e_q_on_nrz and "pam4" in _e_q_on_nrz, _e_q_on_nrz)
+_e_b_on_pam4 = _err(lambda: P.carrier_symbols("pam4", 64, 1, "prbs31"))
+check("a BINARY pattern on a PAM4 carrier raises and says so",
+      "binary" in _e_b_on_pam4 and "nrz" in _e_b_on_pam4, _e_b_on_pam4)
+_e_ck_on_pam4 = _err(lambda: P.carrier_symbols("pam4", 64, 1, "clock"))
+check("the clock pattern is rejected on a PAM4 carrier (it is a binary sequence)",
+      "binary" in _e_ck_on_pam4, _e_ck_on_pam4)
+_e_unk = _err(lambda: P.carrier_symbols("nrz", 64, 1, "prbs42"))
+check("an unknown NRZ pattern raises a message NAMING what is accepted",
+      all(_p in _e_unk for _p in ("prbs7", "prbs31", "clock", "legacy")), _e_unk)
+_e_unk4 = _err(lambda: P.carrier_symbols("pam4", 64, 1, "prbs42"))
+check("an unknown PAM4 pattern raises a message NAMING what is accepted",
+      all(_p in _e_unk4 for _p in ("legacy", "prbs13q", "prbs31q")), _e_unk4)
+check("nrz() rejects a bad pattern too (not just carrier_symbols)",
+      _err(lambda: P.nrz(n_ui=64, pattern="prbs13q")) != "")
+
+
 print("== rate parameterization: primitives must not be locked to the default grid ==")
 for n in (1024, 4096, 16384):
     xn = P.pam4(n_ui=64, seed=3, n=n)

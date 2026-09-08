@@ -193,6 +193,33 @@ And `causal=True` on the carrier generators uses forward-only edge shaping; the 
 zero-phase shaping is symmetric and therefore adds pre-cursor content, which is worth
 knowing about in a library whose channel model is otherwise strictly causal.
 
+## Choosing the pattern (it is not a cosmetic knob)
+
+Channel ISI is a function of pattern **history** — the long runs and low-frequency content
+are what actually close an eye through a lossy or reflective channel. `nrz` takes a
+`pattern` too:
+
+```python
+x = P.nrz(n_ui=n // 8, seed=1, n=n, pattern="prbs31")   # compliance/SI: period 2**31-1
+x = P.nrz(n_ui=n // 8, seed=1, n=n, pattern="clock")    # 1010...: the ISI-free contrast
+```
+
+| carrier | patterns |
+|---|---|
+| `nrz` | `legacy` (== `prbs7`, the default), `prbs7`, `prbs9`, `prbs11`, `prbs13`, `prbs15`, `prbs23`, `prbs31`, `clock` |
+| `pam4` | `legacy` (the default), `prbs13q`, `prbs31q` |
+
+Binary orders are spelled out and the quaternary sequences keep IEEE's `Q` suffix, so
+`prbs13` and `prbs13q` can never be confused. Crossing them raises rather than coercing.
+
+The default stays `prbs7` because this kernel is pinned by SHA and its output diffed
+sample-for-sample downstream — it is a **compatibility default, not a recommendation**.
+PRBS7's 127-bit period repeats 23 622 times inside a 3 M UI record and carries almost no
+low-frequency content: through a 14-inch lossy channel the validation suite measures its
+eye **~40 % more open** than PRBS31's on the same link. Pick `prbs31` for anything meant
+to resemble compliance or SI work; a dataset built on PRBS7 teaches an impairment
+signature that does not occur on a real link.
+
 ## Absolute units (real ps / Hz / dB / V)
 Bind the abstract grid to real units with `Grid`, then specify parameters the way an
 engineer would — delays in ps, jitter in seconds, corner/periodic-jitter frequencies in
