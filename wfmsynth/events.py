@@ -185,11 +185,90 @@ def slope_reversals(seg, deadband=None):
     return int(np.sum(np.diff(s) != 0))
 
 
+def _slope_reversals_rows(segs):
+    """`slope_reversals` over an ``(k, L)`` block of equal-length windows at once.
+
+    Identical arithmetic to the scalar form, including the per-row deadband. The one
+    non-obvious step is compacting away the zeroed slopes: the scalar drops them with
+    ``s[s != 0]`` and then counts adjacent differences, so here each non-zero slope is
+    compared against the *previous* non-zero slope in its own row, found by a running
+    maximum over the indices where the sign survived the deadband.
+    """
+    k, L = segs.shape
+    if L < 3:
+        return np.zeros(k, dtype=np.int64)
+    g = np.diff(segs, axis=1)
+    thr = 0.02 * ((segs.max(axis=1) - segs.min(axis=1)) + 1e-12)
+    g = np.where(np.abs(g) < thr[:, None], 0.0, g)
+    s = np.sign(g)
+    nz = s != 0
+    ar = np.arange(L - 1)
+    last = np.maximum.accumulate(np.where(nz, ar[None, :], -1), axis=1)
+    prev = np.empty_like(last)
+    prev[:, 0] = -1
+    prev[:, 1:] = last[:, :-1]
+    sp = np.take_along_axis(s, np.clip(prev, 0, None), axis=1)
+    return np.count_nonzero(nz & (prev >= 0) & (sp != s), axis=1).astype(np.int64)
+
+
+# Rows per gather in `measure_windows`. The gather is the only allocation that scales
+# with the window count, so it is chunked: 1 << 16 rows of a +/-1 UI window is a few MB.
+_MEASURE_CHUNK = 1 << 16
+
+
+def measure_windows(x, starts, stops, centers=None):
+    """`measure_window` for many windows in one pass — same values, same types.
+
+    A per-UI scan calls `measure_window` once per symbol, and on a deep record almost all
+    of that time is numpy's per-call overhead on a ~16-sample slice rather than the
+    arithmetic. Windows of equal length (the overwhelming majority — only the two at the
+    record's ends get clipped) are gathered into an ``(k, L)`` block and reduced along
+    ``axis=1``; anything left over falls back to the scalar path, so no caller has to know
+    whether its windows are uniform.
+    """
+    x = np.asarray(x, float)
+    n = len(x)
+    starts = np.asarray(starts, dtype=np.int64)
+    stops = np.asarray(stops, dtype=np.int64)
+    k = len(starts)
+    lo = np.clip(starts, 0, None)
+    hi = np.minimum(stops, n)
+    if centers is None:
+        c = (lo + hi) // 2
+    else:
+        c = np.array([(lo[i] + hi[i]) // 2 if centers[i] is None else int(round(centers[i]))
+                      for i in range(k)], dtype=np.int64)
+    c = np.clip(c, 0, max(n - 1, 0))
+    height = x[c] if n else np.zeros(k)
+    ptp = np.zeros(k)
+    peak = np.zeros(k)
+    trough = np.zeros(k)
+    rev = np.zeros(k, dtype=np.int64)
+    lens = hi - lo
+    live = lens > 0
+    for L in np.unique(lens[live]) if live.any() else ():
+        sel = np.nonzero(live & (lens == L))[0]
+        off = np.arange(int(L))
+        for a in range(0, len(sel), _MEASURE_CHUNK):
+            part = sel[a:a + _MEASURE_CHUNK]
+            segs = x[lo[part][:, None] + off[None, :]]
+            hiv = segs.max(axis=1)
+            lov = segs.min(axis=1)
+            peak[part] = hiv
+            trough[part] = lov
+            ptp[part] = hiv - lov          # exactly what np.ptp computes
+            rev[part] = _slope_reversals_rows(segs)
+    return [{"height": float(height[i]), "ptp": float(ptp[i]),
+             "slope_reversals": int(rev[i]), "peak": float(peak[i]),
+             "trough": float(trough[i])} for i in range(k)]
+
+
 def measure_window(x, start, stop, center=None):
     """Per-window attributes measured from ``x`` (not from event knobs)."""
     x = np.asarray(x, float)
     lo = max(0, int(start))
-    hi = min(len(x), int(stop))
+    hi = max(0, min(len(x), int(stop)))     # max(0, ...): a window entirely BEFORE the record
+    lo = min(lo, hi)                        # must be empty, not `x[0:-1]` -- the whole record
     seg = x[lo:hi]
     if center is None:
         c = (lo + hi) // 2
@@ -272,8 +351,16 @@ def label_windows(windows, events, x=None, eye_low=None, eye_high=None,
     for *edge-centered* windows.
     """
     evs = events if isinstance(events, EventList) else EventList(list(events), n=0)
+    windows = list(windows)
+    # One batched pass instead of one `measure_window` call per window. On a per-UI scan of a
+    # deep record that is the whole cost of this function -- the segments are ~16 samples, so
+    # numpy's per-call overhead dominated the arithmetic by an order of magnitude.
+    meas = (measure_windows(x, [int(w["start"]) for w in windows],
+                            [int(w["stop"]) for w in windows],
+                            [w.get("center") for w in windows])
+            if x is not None else None)
     rows = []
-    for w in windows:
+    for wi, w in enumerate(windows):
         start, stop = int(w["start"]), int(w["stop"])
         hit = evs.overlapping(start, stop)
         kinds = []
@@ -286,7 +373,7 @@ def label_windows(windows, events, x=None, eye_low=None, eye_high=None,
                                                      for e in hit],
                "kinds": kinds, "labels": list(kinds)}
         if x is not None:
-            m = measure_window(x, start, stop, center=w.get("center"))
+            m = meas[wi]
             row["measured"] = m
             if (nonmonotonic_rev is not None
                     and m["slope_reversals"] >= int(nonmonotonic_rev)

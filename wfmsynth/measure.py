@@ -28,19 +28,42 @@ def sample_at_phase(x, spb, phase):
     return x[idx]
 
 
+def _nearest_level(samps, centers):
+    """Index of the nearest of ``centers`` for every sample, lowest index winning a tie —
+    exactly ``|samps[:,None]-centers|.argmin(1)``, without building the ``(n, k)`` array
+    that dominated a deep record's eye measurement.
+
+    A running minimum over the ``k`` centers instead of one ``k``-wide reduction. Ties keep
+    the lower index because the update is strictly ``<``, which is argmin's own rule, so
+    this is equal by construction rather than to within a tolerance.
+    """
+    k = len(centers)
+    if k < 2:
+        return np.zeros(len(samps), dtype=np.intp)
+    lab = np.zeros(len(samps), dtype=np.intp)
+    best = np.abs(samps - centers[0])
+    d = np.empty_like(best)
+    for j in range(1, k):
+        np.abs(np.subtract(samps, centers[j], out=d), out=d)
+        closer = d < best
+        lab[closer] = j
+        np.minimum(best, d, out=best)
+    return lab
+
+
 def _cluster_levels(samps, k):
     """Assign samples to ``k`` amplitude levels (quantile init + a few Lloyd iterations).
     Returns sorted centers and per-sample labels."""
     centers = np.quantile(samps, [(i + 0.5) / k for i in range(k)])
     for _ in range(8):
-        lab = np.abs(samps[:, None] - centers[None, :]).argmin(1)
+        lab = _nearest_level(samps, centers)
         new = np.array([samps[lab == j].mean() if np.any(lab == j) else centers[j]
                         for j in range(k)])
         new.sort()
         if np.allclose(new, centers):
             break
         centers = new
-    lab = np.abs(samps[:, None] - centers[None, :]).argmin(1)
+    lab = _nearest_level(samps, centers)
     return centers, lab
 
 
