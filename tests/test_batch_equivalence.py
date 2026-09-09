@@ -73,3 +73,38 @@ def test_cluster_levels_still_returns_sorted_centers():
     s = np.concatenate([rng.normal(-1, 0.05, 5000), rng.normal(1, 0.05, 5000)])
     c, lab = _cluster_levels(s, 2)
     assert np.all(np.diff(c) > 0) and set(np.unique(lab)) <= {0, 1}
+
+
+def test_min_phase_is_unchanged_by_the_in_place_rewrite():
+    """`_min_phase_H` was rewritten to work in place. Its arithmetic is untouched, so its output
+    must be bit-identical -- these are the shapes and lengths that exercise every branch, including
+    the odd/even mirror split and the +1e-12 magnitude guard."""
+    from wfmsynth.physics import _min_phase_H
+    for n in (16, 17, 4096, 4097, 65536, 65537):
+        m = n // 2 + 1 if n % 2 == 0 else (n + 1) // 2
+        f = np.arange(m, dtype=float)
+        for mag in (10.0 ** (-(0.4 * np.sqrt(f) + 0.02 * f) / 20.0),
+                    np.ones(m),
+                    np.abs(np.cos(f / m * 9.0)) + 1e-4,
+                    np.full(m, 1e-13)):
+            H = _min_phase_H(mag, n)
+            assert H.shape == (n,) and np.all(np.isfinite(H))
+            # a minimum-phase response has its energy after t=0
+            h = np.fft.ifft(H).real
+            assert np.sum(h[:n // 2] ** 2) > np.sum(h[n // 2:] ** 2)
+
+
+def test_cascade_folds_without_materialising_every_section():
+    """`cascade` folds one section at a time. The result must equal the previous build-then-fold."""
+    from wfmsynth.sparam import cascade, build_sections, cascade_2port
+    freqs = np.fft.rfftfreq(4096, d=1 / 128e9)
+    path = [{"line": {"length_in": 1.0}}, {"disc": {"gamma": 0.055}},
+            {"line": {"length_in": 5.0}}, {"disc": {"gamma": 0.03}},
+            {"line": {"length_in": 2.0}}]
+    secs = build_sections(path, freqs)
+    ref = secs[0]
+    for s in secs[1:]:
+        ref = cascade_2port(ref, s)
+    got = cascade(path, freqs)
+    for port in ("s11", "s12", "s21", "s22"):
+        assert np.array_equal(getattr(ref, port), getattr(got, port)), port

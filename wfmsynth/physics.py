@@ -40,19 +40,31 @@ def _min_phase_H(Hmag, n=None):
     `n` is the full (two-sided) transform length; inferred from Hmag when omitted."""
     if n is None:
         n = 2 * (len(Hmag) - 1)
+    # Every step below is in place or explicitly freed. This runs at the FULL two-sided length
+    # of the record, so a deep record's cepstrum is the single largest allocation in a render;
+    # the arithmetic is untouched (elementwise ops in the same order), only the temporaries go.
     if n % 2 == 0:
         # even length: rfft has a distinct Nyquist bin; drop DC+Nyquist from the mirror.
         mag_full = np.concatenate([Hmag, Hmag[-2:0:-1]])  # symmetric, length n
-        logmag = np.log(mag_full + 1e-12)
-        c = np.fft.ifft(logmag).real                      # real cepstrum
-        w = np.zeros(n); w[0] = 1.0; w[1:n // 2] = 2.0; w[n // 2] = 1.0   # causal folding
     else:
         # odd length: no Nyquist bin; mirror all bins except DC.
         mag_full = np.concatenate([Hmag, Hmag[-1:0:-1]])  # symmetric, length n
-        logmag = np.log(mag_full + 1e-12)
-        c = np.fft.ifft(logmag).real                      # real cepstrum
-        w = np.zeros(n); w[0] = 1.0; w[1:(n + 1) // 2] = 2.0             # causal folding
-    return np.exp(np.fft.fft(c * w))                      # complex min-phase, length n
+    mag_full += 1e-12
+    np.log(mag_full, out=mag_full)                        # logmag
+    spec = np.fft.ifft(mag_full)
+    del mag_full
+    c = spec.real.copy()                                  # a copy, not a view: frees the complex half
+    del spec
+    w = np.zeros(n)
+    if n % 2 == 0:
+        w[0] = 1.0; w[1:n // 2] = 2.0; w[n // 2] = 1.0    # causal folding
+    else:
+        w[0] = 1.0; w[1:(n + 1) // 2] = 2.0               # causal folding
+    c *= w                                                # exactly `c * w`, without its output array
+    del w
+    spec = np.fft.fft(c)
+    del c
+    return np.exp(spec, out=spec)                         # complex min-phase, length n
 
 
 def insertion_loss_db(f_ghz, length_in=6.0, tand=0.02, eps_r=4.3, skin_k=0.0,

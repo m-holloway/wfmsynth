@@ -328,38 +328,43 @@ def build_sections(path, freqs):
 
     Plain JSON, so it round-trips through a recipe. A bare `TwoPort` may also appear in the
     list and is used as-is."""
-    out = []
-    for k, sec in enumerate(path):
-        if isinstance(sec, TwoPort):
-            out.append(sec); continue
-        if len(sec) != 1:
-            raise ValueError(f"path[{k}]: expected one key of line|disc|file, got {sorted(sec)}")
-        kind, args = next(iter(sec.items()))
-        args = dict(args)
-        if kind == "line":
-            if args.get("trend") is not None:
-                args["trend"] = tuple(float(t) for t in args["trend"])   # JSON gives a list
-            out.append(line(freqs, **args))
-        elif kind == "disc":
-            g = args.get("gamma")
-            if isinstance(g, (list, tuple)):
-                g = np.asarray(g, complex)
-            out.append(discontinuity(freqs, g))
-        elif kind == "file":
-            out.append(measured(freqs, **args))
-        else:
-            raise ValueError(f"path[{k}]: unknown section kind {kind!r} (line|disc|file)")
-    return out
+    return [_section(sec, freqs, k) for k, sec in enumerate(path)]
+
+
+def _section(sec, freqs, k=0):
+    """One `TwoPort` from one path entry. Split out of `build_sections` so `cascade` can fold
+    a path one section at a time: a section carries several complex arrays as long as the
+    signal's own rfft axis, and materialising every section before folding any of them was the
+    largest single allocation in a deep-record render."""
+    if isinstance(sec, TwoPort):
+        return sec
+    if len(sec) != 1:
+        raise ValueError(f"path[{k}]: expected one key of line|disc|file, got {sorted(sec)}")
+    kind, args = next(iter(sec.items()))
+    args = dict(args)
+    if kind == "line":
+        if args.get("trend") is not None:
+            args["trend"] = tuple(float(t) for t in args["trend"])   # JSON gives a list
+        return line(freqs, **args)
+    if kind == "disc":
+        g = args.get("gamma")
+        if isinstance(g, (list, tuple)):
+            g = np.asarray(g, complex)
+        return discontinuity(freqs, g)
+    if kind == "file":
+        return measured(freqs, **args)
+    raise ValueError(f"path[{k}]: unknown section kind {kind!r} (line|disc|file)")
 
 
 def cascade(path, freqs):
     """Cascade a path spec (or a list of `TwoPort`s) into one `TwoPort` on `freqs`."""
-    secs = build_sections(path, freqs)
-    if not secs:
+    if len(path) == 0:
         raise ValueError("cascade: empty path")
-    out = secs[0]
-    for s in secs[1:]:
-        out = cascade_2port(out, s)
+    out = None
+    for k, sec in enumerate(path):
+        s = _section(sec, freqs, k)
+        out = s if out is None else cascade_2port(out, s)
+        del s                      # the fold consumed it; do not hold the whole path at once
     return out
 
 
@@ -438,4 +443,7 @@ def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0)
     freqs = np.fft.rfftfreq(len(x), d=dt)
     tp = cascade(path, freqs)
     H = tp.s21 if node == "load" else (1.0 + tp.s11)
-    return np.fft.irfft(np.fft.rfft(x) * H, len(x))
+    del tp                         # only H is needed past here; the other three ports are not
+    X = np.fft.rfft(x)
+    X *= H                         # in place: the same product, one fewer record-sized temporary
+    return np.fft.irfft(X, len(x))
