@@ -40,7 +40,7 @@ def _transfer(loop_bw, order, damping):
 def ssc_phase(n, fs, f_ssc=32e3, spread=0.005, profile="down"):
     """Spread-spectrum-clocking timing phase: the cumulative clock-timing deviation (in
     SAMPLES) from a triangular ~``f_ssc`` modulation of the clock frequency. SSC is
-    near-universal in PCIe/USB/SATA/DisplayPort for EMI, and it is a large low-frequency
+    near-universal across high-speed serial standards for EMI, and it is a large low-frequency
     wander that a CDR must track. ``spread`` is the fractional frequency deviation (e.g.
     0.005 = 0.5%); ``profile`` is 'down' (0..−spread, the common case), 'up' (0..+spread) or
     'center' (−spread..+spread). Feed to a carrier as jitter, or use `apply_ssc` to warp a
@@ -160,3 +160,123 @@ def tracked_out_fraction(phase, baud, loop_bw, order=2, damping=0.707, warmup=0.
     res = jitter_transfer(phase, baud, loop_bw, order=order, damping=damping)
     s = int(warmup * len(phase))
     return 1.0 - np.ptp(res[s:]) / (np.ptp(np.asarray(phase, float)[s:]) + 1e-30)
+
+
+GARDNER_SLOPE = 5.0        # nominal Gardner S-curve slope (error per UI) at unit mean square;
+                           # only the loop's SEED gain -- `refine` measures the real one
+
+
+def _interp1(x, t):
+    """Linear interpolation of ``x`` at one fractional sample index (hot inner-loop form)."""
+    n = len(x)
+    if t <= 0.0:
+        return float(x[0])
+    if t >= n - 1:
+        return float(x[n - 1])
+    i = int(t)
+    f = t - i
+    return float(x[i] + (x[i + 1] - x[i]) * f)
+
+
+def _gardner_gain(x, instants, spb, step=0.05):
+    """The Gardner detector's S-curve SLOPE (error per UI) measured on this record, around
+    ``instants``. The loop gains are scaled by it so ``loop_bw`` means the same thing whatever
+    the record's amplitude, transition density or rise time — none of which the detector's raw
+    output is independent of."""
+    xi = np.arange(len(x), dtype=float)
+    out = []
+    for d in (-step, step):
+        t = np.asarray(instants, float) + d * spb
+        y = np.interp(t, xi, x)
+        ym = np.interp(t - 0.5 * spb, xi, x)
+        e = ym * (y - np.roll(y, 1))
+        out.append(float(e[1:].mean()))
+    return (out[1] - out[0]) / (2.0 * step)
+
+
+def recover_symbol_instants(x, grid=None, loop_bw_hz=None, spb=None, loop_bw_ui=None,
+                            order=2, damping=0.707, phase0=None, n_sym=None, refine=True):
+    """The decision instants a receiver's clock recovery actually produces, as FRACTIONAL
+    sample indices — one per symbol.
+
+    This is `recover_clock`'s loop closed around the waveform instead of around a phase
+    sequence someone already knew. A Gardner timing-error detector reads the sampling error
+    off the record (the sample halfway between two decisions is at the transition midpoint
+    only when the decisions are centred), and the same second-order loop drives an NCO that
+    produces the next instant. Because the loop INTEGRATES, the instants follow a symbol rate
+    that moves — which a fixed stride cannot do: a stride quantised to whole samples, or
+    matched to a rate that then changes, walks off the symbol centres and never comes back.
+
+    ``order`` carries the same meaning as in `recover_clock`: order 2 (a type-2 loop, the
+    default) drives a frequency offset to zero static error, order 1 leaves one. Loop
+    bandwidth is given either as ``loop_bw_hz`` with a ``grid`` that has ``baud``, or
+    directly as ``loop_bw_ui`` = loop bandwidth / symbol rate. ``phase0`` is the starting
+    instant in samples (default: half a symbol, the nominal first eye centre); the loop pulls
+    in from any starting phase within about half a symbol.
+
+    ``refine`` re-measures the detector gain around the instants the first pass found and runs
+    the loop again with it, so the realized loop bandwidth does not depend on the initial
+    amplitude guess.
+    """
+    x = np.asarray(x, float)
+    if spb is None:
+        if grid is None or grid.samples_per_ui is None:
+            raise ValueError("recover_symbol_instants needs spb= or a Grid with baud set")
+        spb = float(grid.samples_per_ui)
+    spb = float(spb)
+    if loop_bw_ui is None:
+        if loop_bw_hz is None:
+            raise ValueError("recover_symbol_instants needs loop_bw_hz= (with a Grid) or loop_bw_ui=")
+        if grid is None or grid.baud is None:
+            raise ValueError("loop_bw_hz= needs a Grid with baud set (or pass loop_bw_ui=)")
+        loop_bw_ui = float(loop_bw_hz) / float(grid.baud)
+    if order not in (1, 2):
+        raise ValueError(f"order must be 1 or 2 (got {order!r})")
+    t0 = 0.5 * spb if phase0 is None else float(phase0)
+    if n_sym is None:
+        n_sym = int((len(x) - 1 - t0) / spb)
+    n_sym = max(0, int(n_sym))
+    if n_sym == 0:
+        return np.zeros(0)
+
+    # SEED gain. The detector's slope cannot be measured before the loop has locked: on a
+    # record whose rate moves, a uniform stride slides through every sampling phase and the
+    # measured slope averages to zero (it is periodic in the symbol). So seed from the
+    # record's mean square -- GARDNER_SLOPE is a nominal slope for a unit-mean-square signal,
+    # not a claim about this record -- and let `refine` replace it with the measured value
+    # once there are locked instants to measure around.
+    power = float(np.mean(x * x))
+    kd = GARDNER_SLOPE * power
+    if not np.isfinite(kd) or kd <= 0.0:                 # a flat record: nothing to lock to
+        return t0 + np.arange(n_sym, dtype=float) * spb
+
+    wn = 2.0 * np.pi * float(loop_bw_ui)                 # rad per symbol
+    tau = None
+    for _pass in range(3 if refine else 1):
+        kp = 2.0 * damping * wn / kd
+        ki = (wn * wn / kd) if order == 2 else 0.0
+        tau = np.empty(n_sym)
+        t = t0
+        integ = 0.0
+        yprev = _interp1(x, t - spb)
+        for k in range(n_sym):
+            tau[k] = t
+            y = _interp1(x, t)
+            ym = _interp1(x, t - 0.5 * spb)
+            e = ym * (y - yprev)
+            yprev = y
+            integ += ki * e
+            t += spb - spb * (kp * e + integ)
+        if not refine:
+            break
+        kd2 = _gardner_gain(x, tau, spb)                 # now measurable: tau is locked
+        if not np.isfinite(kd2) or kd2 <= 0.0 or abs(kd2 - kd) <= 1e-3 * kd:
+            break
+        kd = kd2
+    return tau
+
+
+def sample_at_instants(x, instants):
+    """The record's value at fractional decision ``instants`` — the samples a receiver slices."""
+    x = np.asarray(x, float)
+    return np.interp(np.asarray(instants, float), np.arange(len(x), dtype=float), x)

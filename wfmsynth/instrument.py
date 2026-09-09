@@ -56,7 +56,8 @@ def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4):
     """A bandwidth limit. ``kind='bessel'`` (flat group delay) or ``'gaussian'`` model the
     ANALOG front end, which is band-limited by physics and rolls off gently. ``'brickwall'``
     models the instrument's DIGITAL selected-bandwidth filter, which sits after the converter
-    and is not gentle at all: MEASURED on the three real Keysight exports, the record's noise
+    and is not gentle at all: MEASURED on three real exports from a high-bandwidth real-time sampling oscilloscope,
+    the record's noise
     floor drops **38 dB across 2 GHz** at the corner and is flat on both sides of it. Use the
     analog kinds before the converter and ``'brickwall'`` after it."""
     x = np.asarray(x, float)
@@ -72,11 +73,62 @@ def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4):
     return _sig.sosfiltfilt(_sig.bessel(order, wn, output="sos"), x)
 
 
-def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0):
+def rc_pole_hz(r_ohm, c_f):
+    """The RC pole a capacitive load puts on a source resistance: ``1/(2*pi*R*C)`` [Hz]."""
+    return 1.0 / (2.0 * np.pi * float(r_ohm) * float(c_f))
+
+
+def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0, causal=False):
     """A passive probe's input capacitance LOADS the node it measures — an RC low-pass with a
-    pole at 1/(2·pi·R·C) that attenuates high frequency. Real probes perturb the DUT."""
-    fc = 1.0 / (2 * np.pi * r_source * c_load_f)
-    return scope_bandwidth(x, grid, fc, kind="bessel", order=1)
+    pole at ``1/(2*pi*R*C)`` that attenuates high frequency. Real probes perturb the DUT.
+
+    ``causal=True`` applies the single pole the closed form names, magnitude AND phase:
+    ``H(f) = 1/(1 + j*f/fc)``, so the loss is exactly ``10*log10(1 + (f/fc)**2)`` dB and the
+    group delay is the pole's, not zero.
+
+    The ``causal=False`` default is kept bit-identical for existing callers and is NOT that
+    response: it routes through `scope_bandwidth`'s zero-phase Bessel, which runs the pole
+    forwards and backwards, so its magnitude is the closed form SQUARED — MEASURED, twice the
+    dB at every frequency (6.03 dB where the closed form says 3.01, 14.12 where it says 6.99)
+    — and its group delay is zero. Prefer ``causal=True``; it is what `probe` uses."""
+    fc = rc_pole_hz(r_source, c_load_f)
+    if not causal:
+        return scope_bandwidth(x, grid, fc, kind="bessel", order=1)
+    x = np.asarray(x, float)
+    f = np.fft.rfftfreq(len(x), d=1.0 / grid.fs)
+    return np.fft.irfft(np.fft.rfft(x) / (1.0 + 1j * (f / fc)), len(x))
+
+
+def probe(x, grid, c_load_f=0.5e-12, r_source=50.0, bw_hz=None, kind="bessel", order=4,
+          noise_rms=0.0, atten=1.0, rng=None):
+    """The thing a measurement is made THROUGH. A chain that runs channel -> front end models
+    an ideal tap, which does not exist: a probe is an instrument in its own right and
+    contributes three separate mechanisms, all of them here.
+
+      * **loading** — its input capacitance across the source resistance is an RC pole at
+        ``1/(2*pi*R*C)``. This is the one that also perturbs the DUT, and it is applied as the
+        exact causal single pole (`probe_loading(causal=True)`).
+      * **bandwidth** — its own analog roll-off, independent of the loading pole and usually
+        well below the front end's. ``kind``/``order`` are `scope_bandwidth`'s.
+      * **noise** — its own input-referred noise, ``noise_rms`` in the record's units, added
+        at the probe tip (i.e. BEFORE the front end sees it, which is where a probe's noise
+        actually enters).
+
+    ``atten`` is the divider ratio as a GAIN (``0.1`` for a 10:1 probe); it scales the signal
+    and, being applied at the tip, the noise is added after it — a divider attenuates the
+    signal it passes, not the noise the probe itself makes.
+
+    Defaults are a bare loading pole with no bandwidth limit and no noise, so ``probe(x, g)``
+    is exactly ``probe_loading(x, g, causal=True)``."""
+    y = probe_loading(x, grid, c_load_f=c_load_f, r_source=r_source, causal=True)
+    if atten != 1.0:
+        y = y * float(atten)
+    if bw_hz is not None:
+        y = scope_bandwidth(y, grid, float(bw_hz), kind=kind, order=order)
+    if noise_rms:
+        rng = rng or np.random.default_rng()
+        y = y + rng.normal(0.0, float(noise_rms), len(y))
+    return y
 
 
 def timebase_jitter(x, grid, rms_ps=0.5, rng=None):
@@ -112,7 +164,7 @@ def converter_noise_rms(enob, full_scale, bandwidth_hz, nyquist_hz, bits=None):
 
         enob(B) = enob(B_ref) + 0.5*log2(B_ref/B)
 
-    MEASURED against the Keysight UXR1104A's published table (13 bandwidth/ENOB pairs, 10 to
+    MEASURED against one real-time sampling oscilloscope's published table (13 bandwidth/ENOB pairs, 10 to
     110 GHz): anchored at 110 GHz -> 5.0, the other twelve settings come back at **-0.05 to
     +0.31 bits**, rms 0.16 -- one number reproducing twelve. Adding a second, frequency-rising
     noise term only improves the rms to 0.08, which is not enough structure to justify it. The
@@ -125,7 +177,7 @@ def converter_noise_rms(enob, full_scale, bandwidth_hz, nyquist_hz, bits=None):
     `quantize_adc(x + noise, bits=bits)` lands on the published ENOB rather than overshooting
     it. It raises if the depth alone cannot reach the requested ENOB.
 
-    For the UXR1104A -- 10 bits, +/-423 mV, ENOB 5.0 at 110 GHz, Nyquist 128 GHz -- this is
+    For that instrument -- 10 bits, +/-423 mV, ENOB 5.0 at 110 GHz, Nyquist 128 GHz -- this is
     8.23 mV rms, **9.96 LSB of the converter's own lattice**: the lattice carries 0.084 % of
     the noise power that sets ENOB, and would on its own be worth 10.00 bits. That ratio is
     the entire argument for modelling the two mechanisms apart."""
@@ -146,12 +198,12 @@ def quantize_adc(x, enob=None, full_scale=None, bits=None):
     """Quantise to an ADC lattice — the one thing a converter does that nothing else does.
 
       bits        the converter's REAL depth -> exactly 2**bits codes across +/- full_scale.
-                  This is the physical lattice: a UXR1104A is 10 bits, full stop.
+                  This is the physical lattice: the converter has the depth it has, full stop.
       enob        legacy: treat an effective-bits figure as if it were a lattice depth.
                   KEPT FOR COMPATIBILITY AND IT IS THE CONFLATION THIS MODULE NOW SEPARATES --
                   ENOB is a SINAD figure (noise AND distortion, continuous); bit depth is a
                   lattice (discrete). Rounding to 2**enob codes gets the noise POWER roughly
-                  right and the record's structure entirely wrong: a UXR's 10-bit lattice is
+                  right and the record's structure entirely wrong: a 10-bit lattice is
                   9.96 LSB below its own noise (so fully dithered, and invisible in a
                   histogram), while an ENOB-5.9 lattice is 17x coarser than the real one and
                   produces a comb no real capture has. Use `bits` + `converter_noise_rms`.
@@ -230,7 +282,7 @@ def store_record(x, bits=11, full_scale=None, headroom=1.05, clip=True,
     again -- because the record is STORED as int16 codes -- and that second, terminal
     lattice is the record's noise floor at every frequency the signal does not occupy.
 
-    Measured on three real Keysight compliance-suite exports of 8 M samples each: 1,851 /
+    Measured on three real compliance-suite exports of 8 M samples each: 1,851 /
     1,880 / 2,035 distinct values, 1.0000 of them on the lattice, occupancy 0.997-1.000
     (a full lattice, not a sparse one), and a stop-band PSD floor equal to the lattice's
     own `q**2/12/(fs/2)` to under 0.1 dB in 3 of 3. A rendered record that stops at the

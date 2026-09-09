@@ -189,6 +189,47 @@ branches.
 | #47 | Generalized two-rate acquisition and record decimation |
 | events | Localized placeable needles (`Signal.events` / `place_events`) with per-window labels; clock recovery stays external |
 
+## Follow-ups owed by the acquisition-path work (recovered-clock DFE + probe op)
+
+Left undone deliberately, because each needs a file outside that change's scope.
+
+### `probe_loading`'s default is not the pole it documents
+
+`probe_loading(causal=False)` — still the default, still bit-identical — routes through
+`scope_bandwidth`'s zero-phase Bessel, which runs the single pole forwards and backwards. Its
+magnitude is therefore the closed form SQUARED: measured 6.027 dB at `fc` where
+`10*log10(1 + (f/fc)**2)` says 3.014, and 14.014 where the closed form says 6.989 — a ratio of
+1.9995 and 2.0050. Its group delay is zero, where an RC pole's is not. `causal=True` and the
+new `probe()` are the closed form to 5e-15 dB and 7e-15 degrees.
+
+**Done when:** the default is the pole, the change is stated as a versioned compatibility
+break, and `wfmsynth/validate.py:1124` — which asserts only that HF is attenuated *at all*, a
+check that passes on a response twice as steep as the physics — asserts the closed form
+instead.
+
+### `wfmsynth/validate.py` has no entry for either mechanism
+
+Both are covered by `tests/test_acquisition_path.py` (41 assertions, incl. 17 closed-form probe
+rows) but neither appears in `validate.py`, so `python -m wfmsynth.validate` still reports a
+green physics run for a chain with no probe and a DFE that diverges.
+
+**Done when:** `validate.py` carries (a) the RC pole against `1/(2*pi*R*C)` in magnitude and
+phase, and (b) a constructed-symbol round trip showing the recovered-clock DFE at zero symbol
+errors and the fixed stride at the constellation's chance rate.
+
+### `rx_ffe`'s tap spacing is quantised to whole samples
+
+Not the DFE's defect — a time-invariant FIR cannot accumulate — but a real fixed error:
+`int(round(samples_per_ui * spacing_ui))` misplaces every tap by up to half a sample, measured
+at 0.020 UI for 7.143 samples/UI, constant from the first block of a record to the last.
+Fractionally-spaced taps by interpolation would remove it, and would need `wfmsynth/rx.py`.
+
+### `_op_dfe` renders equalised symbols onto the nominal timebase
+
+`P.from_symbols(eq, n=len(x))` lays the equalised symbols back down at a uniform rate even
+when the decisions were taken on a clock that was not uniform. The decisions and their instants
+are right (`compose.dfe_decisions` returns both); only the waveform rendering is nominal.
+
 ## CI status
 
 The current workflow uses a fast Linux/Python 3.12 gate for pull requests and a scheduled

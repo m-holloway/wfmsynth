@@ -211,6 +211,14 @@ def _op_scope(x, p, streams, grid, idx):
     return INST.scope_bandwidth(x, grid, p["bw_hz"], **kw)
 
 
+def _op_probe(x, p, streams, grid, idx):
+    return INST.probe(x, grid, c_load_f=p.get("c_load_f", 0.5e-12),
+                      r_source=p.get("r_source", 50.0), bw_hz=p.get("bw_hz"),
+                      kind=p.get("kind", "bessel"), order=p.get("order", 4),
+                      noise_rms=p.get("noise_rms", 0.0), atten=p.get("atten", 1.0),
+                      rng=streams.role(f"probe/{idx}"))
+
+
 def _op_store(x, p, streams, grid, idx):
     return INST.store_record(x, bits=p.get("bits", 11), full_scale=p.get("full_scale"),
                              headroom=p.get("headroom", 1.05), clip=p.get("clip", True),
@@ -259,10 +267,25 @@ def _op_rx_ffe(x, p, streams, grid, idx):
     return RX.ffe(x, p["taps"], spacing, pre=p.get("pre", 0))
 
 
-def _op_dfe(x, p, streams, grid, idx):
-    from . import rx as RX, physics as P
-    spb = int(round(grid.samples_per_ui)) if grid is not None else int(p["spb"])
+def dfe_instants(x, p, grid):
+    """Where the DFE's decisions are taken, as fractional sample indices — the one thing that
+    decides whether a decision-feedback equaliser works or diverges, exposed so it can be read
+    and checked rather than inferred from the waveform that comes out.
+
+    Two sources. With ``cdr=`` it is a recovered clock (`cdr.recover_symbol_instants`): a
+    closed timing loop whose instants FOLLOW a symbol rate that moves. Without it, the
+    historical fixed stride: ``int(round(samples_per_ui))`` samples apart, phase chosen once.
+    That stride is only ever right when samples-per-UI is a whole number AND stays constant;
+    otherwise it walks off the symbol centres at a fixed rate for the whole record, and a DFE
+    that decides wrongly feeds that error back through its own tap history.
+    """
     levels = np.asarray(p.get("levels", [-1.0, -1 / 3, 1 / 3, 1.0]), float)
+    if p.get("cdr") is not None:
+        from . import cdr as CDR
+        c = dict(p["cdr"])
+        spb_f = float(grid.samples_per_ui) if grid is not None else float(p["spb"])
+        return CDR.recover_symbol_instants(x, grid=grid, spb=c.pop("spb", spb_f), **c)
+    spb = int(round(grid.samples_per_ui)) if grid is not None else int(p["spb"])
     if "phase" in p:
         phase = int(p["phase"])
     else:                                                      # find the eye centre (clearest levels)
@@ -272,9 +295,29 @@ def _op_dfe(x, p, streams, grid, idx):
             sep = float(np.mean(np.min(np.abs(s[:, None] - levels[None, :] / np.abs(levels).max()), axis=1)))
             if sep < best:
                 best, phase = sep, off
-    samples = x[phase::spb]
-    scale = np.percentile(np.abs(samples), 99) + 1e-9          # DFE taps/levels are in normalized units
-    eq, _dec = RX.dfe(samples / scale, np.asarray(p["taps"], float), levels)
+    return np.arange(phase, len(x), spb, dtype=float)
+
+
+def dfe_decisions(x, p, grid):
+    """``(instants, equalized, decisions)`` for a ``dfe`` op's parameters — the DFE's per-symbol
+    decision path. `_op_dfe` renders ``equalized`` back to a waveform and throws the decisions
+    away; this returns them, which is what a symbol-error rate has to be computed from."""
+    from . import rx as RX
+    levels = np.asarray(p.get("levels", [-1.0, -1 / 3, 1 / 3, 1.0]), float)
+    inst = dfe_instants(x, p, grid)
+    samples = (x[inst.astype(int)] if p.get("cdr") is None
+               else np.interp(inst, np.arange(len(x), dtype=float), np.asarray(x, float)))
+    if "scale" in p:                                           # a known full scale, e.g. an AGC's
+        scale = float(p["scale"])
+    else:                                                      # DFE taps/levels are in normalized units
+        scale = np.percentile(np.abs(samples), 99) + 1e-9
+    eq, dec = RX.dfe(samples / scale, np.asarray(p["taps"], float), levels)
+    return inst, eq, dec
+
+
+def _op_dfe(x, p, streams, grid, idx):
+    from . import physics as P
+    _inst, eq, _dec = dfe_decisions(x, p, grid)
     return P.from_symbols(eq, n=len(x), causal=p.get("causal", False))
 
 
@@ -326,7 +369,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
          "photodetect": _op_photodetect, "tia": _op_tia,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase, "store": _op_store,
-         "de_emphasis": _op_de_emphasis, "acquire": _op_acquire,
+         "de_emphasis": _op_de_emphasis, "acquire": _op_acquire, "probe": _op_probe,
          "events": _op_events}
 
 
@@ -337,7 +380,9 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
 # way regardless of the order they were added). This is OPT-IN via `Signal.canonical()`: the default
 # `waveform()` still executes in insertion order, so no existing recipe changes. Order WITHIN a kind
 # is preserved (a stable sort), because same-kind ops do not generally commute.
-KIND_RANK = {"source": 0, "shape": 1, "supply": 2, "channel": 3, "instrument": 4}
+# A probe sits BETWEEN the channel and the instrument -- it is what the instrument observes
+# through -- so it gets its own rank rather than sharing the instrument's.
+KIND_RANK = {"source": 0, "shape": 1, "supply": 2, "channel": 3, "probe": 4, "instrument": 5}
 OP_KIND = {
     "carrier": "source", "symbols": "source",
     "tx_ffe": "shape", "de_emphasis": "shape", "events": "shape", "nonlinearity": "shape",
@@ -347,6 +392,7 @@ OP_KIND = {
     "cascade": "channel",
     "crosstalk_matrix": "channel", "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
     "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
+    "probe": "probe",
     "ctle": "instrument", "dfe": "instrument", "rx_ffe": "instrument", "tia": "instrument",
     "photodetect": "instrument", "scope": "instrument", "digitize": "instrument",
     "timebase": "instrument", "acquire": "instrument", "store": "instrument",
@@ -500,16 +546,44 @@ class Signal:
         return self._add("rx_ffe", taps=list(taps), spacing_ui=spacing_ui, pre=pre, **params)
 
     def dfe(self, taps, levels=None, **params):
-        """Receiver decision-feedback equalizer: samples the eye centre, cancels post-cursor ISI by
-        subtracting `taps · [past decisions]` before slicing, and returns the equalized waveform
+        """Receiver decision-feedback equalizer: samples the symbol centres, cancels post-cursor ISI
+        by subtracting `taps · [past decisions]` before slicing, and returns the equalized waveform
         (reconstructed from the per-symbol equalized values). `taps[j]` = post-cursor weight at lag j+1
         (set to the channel's post-cursors to cancel them); `levels` = constellation (default PAM4; pass
-        [-1, 1] for NRZ). A DECISION op — it samples at the nominal eye centre of the known-timing signal."""
+        [-1, 1] for NRZ).
+
+        WHERE it decides is the parameter that matters, because a DFE feeds its own decisions back:
+        one wrong decision enters the tap history and corrupts the next, so a decision instant that
+        drifts makes it DIVERGE rather than degrade.
+
+          cdr=dict(loop_bw_ui=..., order=2, damping=0.707, phase0=..., spb=...)
+              take the decisions on a RECOVERED clock (`cdr.recover_symbol_instants`) — a closed
+              timing loop whose instants follow a symbol rate that moves. `loop_bw_hz=` may be used
+              instead of `loop_bw_ui=` when the Grid carries `baud`. Required for any record whose
+              symbol rate is modulated, and for any record whose samples-per-UI is not a whole number.
+          scale=  the amplitude the taps and levels are normalized against (e.g. 1.0 for a unit-
+              amplitude signal, an AGC's full scale otherwise). Default: the 99th percentile of the
+              sampled magnitudes, which an ISI-corrupted record inflates.
+          phase=  a fixed starting sample offset for the fixed-stride path.
+
+        DEFAULT (no `cdr=`) is the historical fixed stride: `int(round(samples_per_ui))` samples
+        apart, phase chosen once. That stride is right only while samples-per-UI is a whole number
+        AND constant; otherwise it walks off the symbol centres for the whole record.
+        `compose.dfe_instants` / `compose.dfe_decisions` expose where it decided and what it decided."""
         p = {"taps": list(taps)}
         if levels is not None:
             p["levels"] = list(levels)
         p.update(params)
         return self._add("dfe", **p)
+
+    def probe(self, **params):
+        """The probe the measurement is made THROUGH — placed between the channel and the front
+        end. Without it a chain models a perfect tap, which does not exist.
+        params: c_load_f (input capacitance, F — an RC pole at 1/(2*pi*R*C) against r_source),
+        r_source (ohms), bw_hz + kind/order (the probe's OWN bandwidth), noise_rms (its own
+        input-referred noise, added at the tip), atten (divider ratio as a gain, 0.1 = 10:1).
+        Defaults are the bare loading pole: no bandwidth limit, no noise, no division."""
+        return self._add("probe", **params)
 
     def drift(self, **params):
         """Slow sub-record drift (thermal/VGA/DC). params: kind('gain'|'amplitude'|'dc'),
@@ -684,6 +758,8 @@ class Signal:
                     out.append(f"interleave/{i}")
             elif op["op"] == "events":
                 out.append(f"events/{i}")
+            elif op["op"] == "probe" and op.get("noise_rms"):
+                out.append(f"probe/{i}")
         return out
 
     def contrast(self, *factors, seed=None):
