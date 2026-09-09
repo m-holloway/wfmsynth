@@ -70,7 +70,7 @@ def _op_symbols(x, p, streams, grid, idx):
 
 def _op_lossy(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("length_in", "tand", "eps_r", "skin_k", "causal",
-                            "loss_db", "loss_at_ghz", "trend") if k in p}
+                            "loss_db", "loss_at_ghz", "trend", "trend_floor_db") if k in p}
     if "trend" in kw and kw["trend"] is not None:
         kw["trend"] = tuple(float(t) for t in kw["trend"])   # JSON round-trips it as a list
     return P.lossy_channel(x, grid=grid, **kw)
@@ -212,10 +212,8 @@ def _op_scope(x, p, streams, grid, idx):
 
 
 def _op_store(x, p, streams, grid, idx):
-    fs = p.get("full_scale")
-    if fs is None:
-        fs = 1.0                       # normalized units: +/-1 is the instrument's full scale
-    return INST.store_record(x, bits=p.get("bits", 11), full_scale=fs, clip=p.get("clip", True))
+    return INST.store_record(x, bits=p.get("bits", 11), full_scale=p.get("full_scale"),
+                             headroom=p.get("headroom", 1.05), clip=p.get("clip", True))
 
 
 def _op_timebase(x, p, streams, grid, idx):
@@ -564,7 +562,7 @@ class Signal:
 
     def store(self, **params):
         """The instrument's EXPORT step: write the record as integer codes. params: bits,
-        full_scale (default 1.0 = the normalized +/-1 full scale), clip.
+        full_scale (omit to range the vertical to this acquisition), headroom, clip.
 
         This is not `digitize` twice. `digitize` is the converter, in the middle of the chain;
         every DSP stage after it (the selected-bandwidth filter above all) smears its lattice

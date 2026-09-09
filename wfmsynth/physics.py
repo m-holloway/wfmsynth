@@ -57,7 +57,7 @@ def _min_phase_H(Hmag, n=None):
 
 def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
                   skin_k=0.0, causal=False, grid=None, loss_db=None, loss_at_ghz=None,
-                  trend=None):
+                  trend=None, trend_floor_db=80.0):
     """Apply a frequency-dependent SI channel: insertion loss
         IL(f)[dB] = (a_skin*sqrt(f_GHz) + b_diel*f_GHz) * length_in
     with dielectric-loss coefficient b_diel = 2.3*sqrt(eps_r)*tand (dB/in/GHz)
@@ -99,7 +99,17 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
     GAIN at DC, which is how a resonance-dominated file (whose loss at one frequency is a
     point on a resonance skirt, not a rung on a loss ladder) silently becomes an amplifier.
     A fitted trend is smooth by construction and cannot make a resonance or a stub notch;
-    use `sparam` or `resonant_reflection` for those."""
+    use `sparam` or `resonant_reflection` for those.
+
+    `trend_floor_db` caps how deep the stop band goes, and it is not cosmetic. A fitted trend
+    keeps growing outside the band it was fitted in -- a Gen4-budget board's fit reaches 366 dB
+    at a 256 GSa/s grid's Nyquist -- and the causal (minimum-phase) reconstruction takes the
+    LOGARITHM of the magnitude, so an unbounded roll-off pushes the cepstrum through the guard
+    term and comes back with a different group delay. Measured through the Gen4 reference
+    receiver on B12: uncapped, the eye reads 116.69 mV; capped at 80 dB, 128.08 mV, which is
+    the number the smooth-fit arm of the measurement that motivated this reports (127.99). The
+    cap is also physically honest -- no real channel's stop band is bottomless, and 80 dB is
+    already ~14 dB below the noise floor of an 11-bit stored record."""
     x = np.asarray(x, float)
     n = len(x)
     if grid is not None:
@@ -108,7 +118,8 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
     if trend is not None:
         a, b, c = (float(t) for t in trend)
         il_db = -(a * np.sqrt(f_ghz) + b * f_ghz + c)
-        il_db = np.maximum(il_db, 0.0)                    # passive: a channel cannot amplify
+        # passive (a channel cannot amplify) and bounded (see `trend_floor_db`)
+        il_db = np.clip(il_db, 0.0, float(trend_floor_db))
     else:
         b_diel = 2.3 * np.sqrt(eps_r) * tand
         a_skin = skin_k if skin_k > 0 else 0.35           # ~dB/in/sqrt(GHz) typ

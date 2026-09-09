@@ -1472,7 +1472,7 @@ _smeared = _base.waveform()
 _stored = (Signal(seed=17, grid=_gst).carrier(kind="nrz", pattern="prbs13")
            .lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
            .scope(bw_hz=110e9).digitize(noise_rms=0.0032, enob=10.0).scope(bw_hz=32e9)
-           .store(bits=11)).waveform()
+           .store(bits=11, full_scale=1.0)).waveform()
 _q11 = 2.0 / 2 ** 11
 check("without the export step the DSP filter smears the converter lattice away (the defect)",
       _on_lattice(_smeared, _q11) < 0.02 and len(np.unique(_smeared)) > len(_smeared) // 2,
@@ -1494,7 +1494,20 @@ check("the export step is a rounding, not a rewrite: no sample moves by more tha
 check("`store` is idempotent — storing a stored record changes nothing",
       np.array_equal(_stored, INST.store_record(_stored, bits=11, full_scale=1.0)))
 check("`store` clips to the representable code range (a real export has no room beyond it)",
-      float(np.max(np.abs(INST.store_record(np.array([-4.0, 4.0]), bits=8)))) <= 1.0 + 1e-12)
+      float(np.max(np.abs(INST.store_record(np.array([-4.0, 4.0]), bits=8, full_scale=1.0))))
+      <= 1.0 + 1e-12)
+# The vertical is a SETTING, made once per acquisition. Ranged to the record with 5 % of
+# headroom -- the middle of the 0.6-10.7 % the three real captures' own code counts imply at
+# 11 bits -- the count falls out of the arithmetic rather than being chosen: 2**11/1.05 = 1950.
+_ranged = INST.store_record(_smeared, bits=11)             # full_scale=None: range to this record
+_n_ranged = len(np.unique(_ranged))
+check("a vertical ranged to the record at 11 bits lands on the real captures' code count",
+      1851 <= _n_ranged <= 2035,
+      f"{_n_ranged} distinct (2**11/1.05 = 1950 predicted; real 1851 / 1880 / 2035)")
+check("a ranged vertical clips nothing (real captures show no rail pile-up)",
+      float(np.max(np.abs(_ranged))) < 1.05 * float(np.max(np.abs(_smeared))))
+check("the ranged pitch is constant across the record (a setting, not per-sample rounding)",
+      _on_lattice(_ranged, float(np.min(np.diff(np.unique(_ranged))))) > 0.9999)
 
 print()
 if fails:

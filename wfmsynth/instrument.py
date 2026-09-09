@@ -135,7 +135,7 @@ def digitize(x, grid=None, interleave=None, clip_full_scale=None, enob=None,
     return x, info
 
 
-def store_record(x, bits=11, full_scale=1.0, clip=True):
+def store_record(x, bits=11, full_scale=None, headroom=1.05, clip=True):
     """The LAST thing a real-time DSO does before it hands you a file: write integer codes.
 
     THIS IS AN EXPORT STEP, NOT A NOISE MODEL, AND IT IS WHY REAL RECORDS HAVE A FLOOR
@@ -155,11 +155,16 @@ def store_record(x, bits=11, full_scale=1.0, clip=True):
     which is float64 numerical zero: 60-90 dB of missing floor, and an amplitude histogram
     5-11x smoother than any real capture's.
 
-      bits        stored code width. The lattice is fixed by the INSTRUMENT (its vertical
-                  setting), never by the record's own span: `lsb = 2*full_scale/2**bits`.
-                  Data-dependent rounding would make the floor move with the signal, which
-                  is not what a stored record does.
-      full_scale  +/- range the codes span, in the same amplitude units as `x`.
+      bits        stored code width. `lsb = 2*full_scale/2**bits`.
+      full_scale  +/- range the codes span, in the same amplitude units as `x`. None means the
+                  vertical was RANGED TO THIS ACQUISITION: `headroom * max|x|`, chosen once for
+                  the whole record. That is what an operator does before pressing Run, and it
+                  is not the same thing as data-dependent rounding -- the pitch is constant
+                  across the record either way, so the floor does not move with the signal
+                  within it. Give a number instead to model a fixed vertical setting.
+      headroom    how far above the record's peak the vertical sits when `full_scale` is None.
+                  The three real captures hold 1,851 / 1,880 / 2,035 codes, so at 11 bits their
+                  own ranging left 0.6-10.7 % of headroom; 1.05 is the middle of that.
       clip        clip to the representable code range (a real export cannot store a code
                   it has no room for). Set False to keep an out-of-range sample on-lattice
                   but out-of-range, which is a rendering, not an acquisition.
@@ -171,6 +176,10 @@ def store_record(x, bits=11, full_scale=1.0, clip=True):
     bits = int(bits)
     if bits < 1:
         raise ValueError("store_record needs at least 1 bit of stored code width")
+    if full_scale is None:
+        full_scale = float(headroom) * float(np.max(np.abs(x)))
+        if full_scale <= 0.0:
+            return x * 0.0                        # an all-zero record has no range to set
     lsb = 2.0 * float(full_scale) / 2.0 ** bits
     codes = np.round(x / lsb)
     if clip:
