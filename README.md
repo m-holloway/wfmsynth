@@ -131,7 +131,7 @@ legacy array-warp workflows but should not be the default for a new physical cha
 | **Rj / Pj / DCD** | Random jitter / periodic jitter / duty-cycle distortion |
 | **FFE / CTLE / DFE** | Transmitter feed-forward / receiver analog / receiver feedback equalizers |
 | **CDR** | Clock and data recovery; tracks some timing movement and leaves the rest visible |
-| **ENOB** | Effective ADC resolution in bits |
+| **ENOB** | Effective number of bits — a **SINAD** figure (noise *and* distortion), *not* the converter's bit depth. A 10-bit converter with ENOB 5.9 still has a 10-bit lattice; the missing four bits are noise. |
 | **Touchstone / S-parameters** | Standard measured frequency-response files for channels |
 
 ## Learning path
@@ -292,8 +292,45 @@ is silent (quantising before the noise gives the wrong noise floor).
 from wfmsynth import digitize_adc, quantize_adc
 y, info = digitize_adc(x, noise_floor={"rms":1e-3,"shape":"pink"},
                        interleave={"m_cores":4,"offset_v":1e-3},   # offset in absolute volts
-                       clip_full_scale=0.7, enob=6)                # -> noise->interleave->clip->quantise
-q = quantize_adc(x, enob=5.8)     # standalone finite-ENOB lattice
+                       clip_full_scale=0.7, bits=10)               # -> noise->interleave->clip->quantise
+q = quantize_adc(x, bits=10, full_scale=0.423)   # the converter's real lattice
+```
+
+### Quantisation and ENOB are two mechanisms — model them apart
+
+**Quantisation** is the converter's bit depth: a uniform lattice, `q = 2·FS/2**bits`, discrete.
+**ENOB** is a SINAD figure: noise *and* distortion, continuous. Collapsing the second into the
+first — rounding to a `2**enob` lattice — gets the noise power roughly right and the record's
+structure entirely wrong.
+
+```python
+from wfmsynth import converter_noise_rms
+sigma = converter_noise_rms(enob=5.0, full_scale=0.423,     # published at ...
+                            bandwidth_hz=110e9,             # ... this selected bandwidth
+                            nyquist_hz=128e9, bits=10)      # -> 8.23 mV rms, the converter's own
+```
+
+One fixed converter floor, shaped only by the selected-bandwidth filter, renders **all thirteen**
+published UXR1104A bandwidth/ENOB settings (10→110 GHz, 7.0→5.0 bits) to **−0.29…+0.09 bits**.
+That is the evidence the converter is fixed and ENOB is emergent. Two consequences:
+
+* the 10-bit lattice sits **9.96 LSB below** the noise that sets ENOB — 0.084 % of the power, so
+  it is fully dithered and invisible in a histogram. `quantize_adc(enob=5.9)` instead builds a
+  lattice **17× coarser** than the real converter's, and after the DSP filter a real DSO runs
+  *after* its converter it measures **7.81** bits, not the 5.9 it was handed.
+* the record's visible lattice is not the converter's at all — it is the **terminal store**
+  (`.store()`), and the real geometry is measurable: the three Keysight exports carry stride-8
+  int16 codes with the screen at ±8192, i.e. **2^11 = 2048 steps across the vertical**, of which
+  the records span 1851–2038.
+
+The honest chain, in order — analog front end, converter (its own noise, then its own lattice),
+the DSP bandwidth filter, then the export:
+
+```python
+(sig.scope(bw_hz=110e9)                                     # analog front end (Bessel)
+    .digitize(noise_rms=sigma, bits=10, full_scale=0.423)   # converter: two mechanisms, apart
+    .scope(bw_hz=32e9, kind="brickwall")                    # the DSP filter, AFTER the converter
+    .store(bits=11, dither_lsb=1/12**0.5))                  # int16 codes: the record's real floor
 ```
 
 ## Impairment mixing at constant power

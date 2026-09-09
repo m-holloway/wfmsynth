@@ -53,11 +53,18 @@ def interleave_adc(x, m_cores=4, gain_mm=0.0, offset_mm=0.0, skew_mm=0.0,
 
 
 def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4):
-    """The acquisition front-end's finite analog bandwidth — a real scope is band-limited and
-    rolls off high frequencies. ``kind='bessel'`` (flat group delay, like a real scope) or
-    ``'gaussian'``, with the −3 dB point at ``bw_hz``. Part of "what the scope records"."""
+    """A bandwidth limit. ``kind='bessel'`` (flat group delay) or ``'gaussian'`` model the
+    ANALOG front end, which is band-limited by physics and rolls off gently. ``'brickwall'``
+    models the instrument's DIGITAL selected-bandwidth filter, which sits after the converter
+    and is not gentle at all: MEASURED on the three real Keysight exports, the record's noise
+    floor drops **38 dB across 2 GHz** at the corner and is flat on both sides of it. Use the
+    analog kinds before the converter and ``'brickwall'`` after it."""
     x = np.asarray(x, float)
     wn = min(bw_hz / (grid.fs / 2.0), 0.99)
+    if kind == "brickwall":
+        X = np.fft.rfft(x)
+        X[np.fft.rfftfreq(len(x)) > wn / 2.0] = 0.0   # rfftfreq's Nyquist is 0.5
+        return np.fft.irfft(X, len(x))
     if kind == "gaussian":
         f = np.fft.rfftfreq(len(x))
         H = np.exp(-0.5 * (f / (wn / 2.0 + 1e-12)) ** 2)
@@ -83,23 +90,87 @@ def timebase_jitter(x, grid, rms_ps=0.5, rng=None):
     return np.interp(idx - dev, idx, x, left=x[0], right=x[-1])
 
 
-def quantize_adc(x, enob=6.0, full_scale=None):
-    """Quantise to a finite-ENOB ADC lattice — arguably the single most characteristic
-    thing an ADC does, and previously reachable only inside the full deep_capture pipeline.
+def sinad_noise_rms(enob, full_scale):
+    """The in-band noise+distortion rms that an ENOB figure stands for, at `+/- full_scale`.
 
-      enob        effective number of bits -> ~2**enob levels across the range
+    ENOB IS A SINAD FIGURE, NOT A BIT DEPTH. It is defined from a full-scale sine:
+    `SINAD_dB = 6.02*ENOB + 1.76`, so the noise it names is `(2*full_scale/2**enob)/sqrt(12)`
+    -- the rms a uniform quantiser of that many bits WOULD have had. That equivalence is the
+    whole reason ENOB is quoted in bits, and it is also the trap: the equivalent rms is a
+    CONTINUOUS noise level, and rounding a record to `2**enob` codes reproduces the level while
+    inventing a lattice the converter does not have. See `converter_noise_rms`."""
+    return (2.0 * float(full_scale) / 2.0 ** float(enob)) / np.sqrt(12.0)
+
+
+def converter_noise_rms(enob, full_scale, bandwidth_hz, nyquist_hz, bits=None):
+    """The CONVERTER's own wideband noise rms behind a published `enob` measured at
+    `bandwidth_hz`, given the converter runs to `nyquist_hz`.
+
+    A converter's noise is (to first order) white across its own Nyquist band; the instrument's
+    selected-bandwidth filter sits AFTER it and passes only `bandwidth_hz/nyquist_hz` of that
+    power. So one fixed converter floor produces a whole ENOB-vs-bandwidth table:
+
+        enob(B) = enob(B_ref) + 0.5*log2(B_ref/B)
+
+    MEASURED against the Keysight UXR1104A's published table (13 bandwidth/ENOB pairs, 10 to
+    110 GHz): anchored at 110 GHz -> 5.0, the other twelve settings come back at **-0.05 to
+    +0.31 bits**, rms 0.16 -- one number reproducing twelve. Adding a second, frequency-rising
+    noise term only improves the rms to 0.08, which is not enough structure to justify it. The
+    filter's SHAPE cancels out entirely (any fixed shape has noise bandwidth proportional to
+    its -3 dB point, and the proportionality is absorbed by the anchor), so this needs no
+    filter model to be useful.
+
+    `bits` (the converter's real depth) splits the answer honestly: the returned rms is the
+    converter's ADDED noise with its own lattice's `q**2/12` taken out, so that
+    `quantize_adc(x + noise, bits=bits)` lands on the published ENOB rather than overshooting
+    it. It raises if the depth alone cannot reach the requested ENOB.
+
+    For the UXR1104A -- 10 bits, +/-423 mV, ENOB 5.0 at 110 GHz, Nyquist 128 GHz -- this is
+    8.23 mV rms, **9.96 LSB of the converter's own lattice**: the lattice carries 0.084 % of
+    the noise power that sets ENOB, and would on its own be worth 10.00 bits. That ratio is
+    the entire argument for modelling the two mechanisms apart."""
+    wide = sinad_noise_rms(enob, full_scale) * np.sqrt(float(nyquist_hz) / float(bandwidth_hz))
+    if bits is None:
+        return float(wide)
+    q = 2.0 * float(full_scale) / 2.0 ** int(bits)
+    added = wide ** 2 - q ** 2 / 12.0
+    if added <= 0.0:
+        raise ValueError(
+            f"a {bits}-bit converter cannot reach ENOB {enob} at {bandwidth_hz / 1e9:g} GHz: its own "
+            f"lattice already contributes {q / np.sqrt(12.0):.3e} V rms against the {wide:.3e} V rms "
+            f"the figure allows")
+    return float(np.sqrt(added))
+
+
+def quantize_adc(x, enob=None, full_scale=None, bits=None):
+    """Quantise to an ADC lattice — the one thing a converter does that nothing else does.
+
+      bits        the converter's REAL depth -> exactly 2**bits codes across +/- full_scale.
+                  This is the physical lattice: a UXR1104A is 10 bits, full stop.
+      enob        legacy: treat an effective-bits figure as if it were a lattice depth.
+                  KEPT FOR COMPATIBILITY AND IT IS THE CONFLATION THIS MODULE NOW SEPARATES --
+                  ENOB is a SINAD figure (noise AND distortion, continuous); bit depth is a
+                  lattice (discrete). Rounding to 2**enob codes gets the noise POWER roughly
+                  right and the record's structure entirely wrong: a UXR's 10-bit lattice is
+                  9.96 LSB below its own noise (so fully dithered, and invisible in a
+                  histogram), while an ENOB-5.9 lattice is 17x coarser than the real one and
+                  produces a comb no real capture has. Use `bits` + `converter_noise_rms`.
       full_scale  +/- range of the lattice; None takes it from the signal's peak
 
-    Returns the quantised array; each sample moves by at most half an LSB. Pairs with
-    clip_adc (clip first so out-of-range samples land on the top code, not beyond it)."""
+    Exactly one of `bits`/`enob`. Returns the quantised array; each sample moves by at most
+    half an LSB. Pairs with clip_adc (clip first so out-of-range samples land on the top code,
+    not beyond it)."""
+    if (bits is None) == (enob is None):
+        raise ValueError("quantize_adc needs exactly one of bits= (a converter depth) or "
+                         "enob= (the legacy effective-bits lattice)")
     x = np.asarray(x, float)
     fs = float(np.max(np.abs(x))) + 1e-12 if full_scale is None else float(full_scale)
-    lsb = 2.0 * fs / 2 ** enob
+    lsb = 2.0 * fs / 2 ** (int(bits) if bits is not None else enob)
     return np.round(x / lsb) * lsb
 
 
 def digitize(x, grid=None, interleave=None, clip_full_scale=None, enob=None,
-             noise_floor=None, rng=None):
+             noise_floor=None, rng=None, bits=None):
     """Compose the ADC stages in the physically correct order and return ``(y, info)``.
 
     Order — all of it AFTER the channel and the additive impairment: additive noise floor
@@ -111,7 +182,12 @@ def digitize(x, grid=None, interleave=None, clip_full_scale=None, enob=None,
       noise_floor       kwargs for shaped_noise_floor, e.g. {"rms": 1e-3, "shape": "pink"}
       interleave        kwargs for interleave_adc, e.g. {"m_cores": 4, "offset_v": 1e-3}
       clip_full_scale   hard-clip level (absolute); None to skip. Also sets the quantiser range.
-      enob              effective bits for the final quantiser; None to skip
+      bits              the converter's REAL depth for the final lattice; None to skip. Pair it
+                        with a `noise_floor` sized by `converter_noise_rms` -- that is the honest
+                        two-mechanism converter: a discrete lattice at the depth the part has,
+                        and a continuous noise that sets the SINAD the data sheet publishes.
+      enob              legacy: quantise to a 2**enob lattice instead, which models the two as
+                        one thing. See `quantize_adc`.
 
     ``info`` records the applied settings and the clipped-sample mask fraction — feeding
     provenance (#5) and measured ground truth (#8). ``grid`` is accepted for API symmetry;
@@ -129,13 +205,20 @@ def digitize(x, grid=None, interleave=None, clip_full_scale=None, enob=None,
         x, mask = clip_adc(x, clip_full_scale)
         info["clip_full_scale"] = float(clip_full_scale)
         info["clipped_fraction"] = float(mask.mean())
-    if enob is not None:
+    if bits is not None and enob is not None:
+        raise ValueError("digitize takes bits= (a converter depth) or enob= (the legacy "
+                         "effective-bits lattice), not both")
+    if bits is not None:
+        x = quantize_adc(x, bits=bits, full_scale=clip_full_scale)
+        info["bits"] = int(bits)
+    elif enob is not None:
         x = quantize_adc(x, enob=enob, full_scale=clip_full_scale)
         info["enob"] = float(enob)
     return x, info
 
 
-def store_record(x, bits=11, full_scale=None, headroom=1.05, clip=True):
+def store_record(x, bits=11, full_scale=None, headroom=1.05, clip=True,
+                 dither_lsb=0.0, rng=None):
     """The LAST thing a real-time DSO does before it hands you a file: write integer codes.
 
     THIS IS AN EXPORT STEP, NOT A NOISE MODEL, AND IT IS WHY REAL RECORDS HAVE A FLOOR
@@ -168,6 +251,35 @@ def store_record(x, bits=11, full_scale=None, headroom=1.05, clip=True):
       clip        clip to the representable code range (a real export cannot store a code
                   it has no room for). Set False to keep an out-of-range sample on-lattice
                   but out-of-range, which is a rendering, not an acquisition.
+      dither_lsb  rms, in LSB, of independent noise added immediately BEFORE the rounding.
+                  MEASURED, not assumed: the three real captures' stop bands sit at
+                  **+2.68 / +3.00 / +3.08 dB above** their own lattice's `q**2/12/(fs/2)`, flat
+                  from the instrument's DSP corner to Nyquist, on a PSD whose normalisation is
+                  Parseval-exact (integral = variance to 1.0000). A bare rounder cannot produce
+                  that: its error power IS `q**2/12`. A rounder whose input carries an extra
+                  `q**2/12` of independent noise -- one LSB of RPDF dither, or a fixed-point DSP
+                  stage rounding at the same word width just upstream -- gives `q**2/6`, i.e.
+                  **+3.01 dB**, in the same place, and matches all three within 0.33 dB.
+                  `1/sqrt(12) = 0.2887` is that value. Default 0.0 keeps a bare rounder.
+
+    NOTE ON THE +3 dB. An earlier unit reported these same three captures matching `q**2/12`
+    to "under 0.1 dB, 3 of 3". That measurement is off by a factor of two (a one-sided /
+    two-sided PSD convention); re-measured with an instrument checked by Parseval AND by
+    recovering the closed form on constructed uniform error of a known step to 0.02 dB, the
+    real floor is 2.0x the bare-rounding prediction. A model that reproduces `q**2/12` exactly
+    is therefore 3 dB SHORT of a real record, not on it.
+
+    A NOTE ON THE "COMB RATIO", because it is the metric most likely to be aimed at here.
+    `mean|diff(hist)|/mean(hist)` at 2000 bins is NOT a physics measurement: it is the beat
+    between the histogram's bin grid and the record's lattice, and it is a non-monotonic
+    function of the distinct-value count almost alone. MEASURED on constructed Gaussian noise
+    on a lattice, with no signal physics at all: 1,851 codes -> 0.184, 1,880 -> 0.153,
+    2,035 -> 0.057, 2,099 -> 0.115, 2,399 -> 0.346. The three real captures' 0.197 / 0.144 /
+    0.091 are recovered by their code counts and nothing else, the metric has a MINIMUM right
+    where distinct ~ bins, and dither moves it by under 0.001. So a record reading just under
+    the real band is telling you its code count is slightly high, not that its noise is wrong,
+    and tuning noise to hit a comb number tunes against an aliasing artefact. Aim at the
+    distinct count / occupancy / effective bits instead; the comb follows.
 
     Returns floats -- the voltage each stored code stands for -- so the record stays in the
     pipeline's units. Every value is an exact multiple of one LSB and, for `bits <= 16`,
@@ -181,6 +293,9 @@ def store_record(x, bits=11, full_scale=None, headroom=1.05, clip=True):
         if full_scale <= 0.0:
             return x * 0.0                        # an all-zero record has no range to set
     lsb = 2.0 * float(full_scale) / 2.0 ** bits
+    if dither_lsb:
+        rng = rng or np.random.default_rng()
+        x = x + rng.normal(0.0, float(dither_lsb) * lsb, len(x))
     codes = np.round(x / lsb)
     if clip:
         codes = np.clip(codes, -(2.0 ** (bits - 1)), 2.0 ** (bits - 1) - 1.0)

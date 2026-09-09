@@ -1323,3 +1323,76 @@ def test_localized_events_identity_labels_and_recipe():
     t = np.linspace(0, 12e-9, 4000)
     s = ws.second_order_step(t, wn=2 * np.pi * 8e8, zeta=z)
     assert abs((s.max() - 1.0) - ws.step_overshoot_fraction(z)) < 0.02
+
+
+def test_quantisation_and_enob_are_two_mechanisms():
+    """Bit depth is a lattice; ENOB is a SINAD figure. The kernel must keep them apart.
+
+    Three properties, each of which fails if they are conflated again:
+      1. one fixed converter-referred noise floor, shaped only by the selected-bandwidth
+         filter, reproduces a published bandwidth/ENOB table (UXR1104A, 5992-3132);
+      2. the converter's own lattice is ~10 LSB BELOW that noise, so it is dithered and
+         contributes < 0.2 % of the power ENOB measures;
+      3. rounding to a 2**ENOB lattice instead does not survive the DSP filter a real DSO
+         runs after its converter -- it reads ~2 bits better than the figure it was given.
+    """
+    import numpy as np, pytest
+    from wfmsynth.grid import Grid
+    from wfmsynth import instrument as INST
+
+    A, FSAMP = 0.846 / 2, 256e9
+    g = Grid(fs=FSAMP, n=1 << 18)
+    t = np.arange(g.n); k = int(round(2.0e9 * g.n / FSAMP))
+    sine = A * np.sin(2 * np.pi * k * t / g.n)
+
+    def enob(y, guard=2):
+        P = np.abs(np.fft.rfft(y - np.mean(y))) ** 2
+        j = int(np.argmax(P)); s = P[max(j - guard, 1):j + guard + 1].sum()
+        return (10.0 * np.log10(s / (P[1:].sum() - s)) - 1.76) / 6.02
+
+    sig_c = INST.converter_noise_rms(5.0, A, 110e9, FSAMP / 2, bits=10)   # sized ONCE
+    for B, pub in ((13, 6.8), (32, 5.9), (67, 5.4), (110, 5.0)):
+        y = INST.scope_bandwidth(sine, g, 110e9, kind="bessel")
+        y = y + np.random.default_rng(11).normal(0.0, sig_c, g.n)
+        y, _ = INST.clip_adc(y, A)
+        y = INST.quantize_adc(y, bits=10, full_scale=A)
+        y = INST.scope_bandwidth(y, g, B * 1e9, kind="brickwall")
+        assert abs(enob(y) - pub) < 0.35, (B, pub, enob(y))
+
+    q10 = 2 * A / 2 ** 10
+    assert 8.0 < sig_c / q10 < 12.0                       # the lattice is dithered away
+    assert (q10 ** 2 / 12) / sig_c ** 2 < 0.002
+
+    legacy = INST.quantize_adc(INST.scope_bandwidth(sine, g, 110e9), enob=5.9, full_scale=A)
+    assert enob(INST.scope_bandwidth(legacy, g, 32e9, kind="brickwall")) - 5.9 > 1.5
+
+    with pytest.raises(ValueError):                       # a depth that cannot reach the figure
+        INST.converter_noise_rms(11.0, A, 110e9, FSAMP / 2, bits=10)
+    with pytest.raises(ValueError):                       # and no silent both-at-once
+        INST.quantize_adc(sine, bits=10, enob=5.9, full_scale=A)
+
+
+def test_terminal_store_floor_matches_the_real_captures_not_bare_rounding():
+    """Three real Keysight exports sit +2.68/+3.00/+3.08 dB above their own lattice's
+    q**2/12/(fs/2), flat from the DSP corner to Nyquist. A bare rounder lands on q**2/12
+    and is 3 dB short; one more LSB**2/12 of noise before the rounding lands on q**2/6."""
+    import numpy as np
+    from wfmsynth.grid import Grid
+    from wfmsynth import instrument as INST
+
+    fs = 256e9
+    g = Grid(fs=fs, n=1 << 19)
+    # band-limit first: the stop band has to be EMPTY of signal or it is not a floor.
+    x = INST.scope_bandwidth(np.random.default_rng(4).normal(0.0, 0.18, g.n), g, 32e9,
+                             kind="brickwall")
+    for dither, want in ((0.0, 0.0), (1 / np.sqrt(12), 3.01)):
+        r = INST.store_record(x, bits=11, full_scale=1.0, dither_lsb=dither,
+                              rng=np.random.default_rng(9))
+        q = 2.0 / 2 ** 11
+        n = r.size
+        P = (np.abs(np.fft.rfft(r - r.mean())) ** 2) * (2.0 / (n * n)) * (n / fs)
+        f = np.fft.rfftfreq(n, 1.0 / fs)
+        meas = 10 * np.log10(P[(f > 0.80 * fs / 2) & (f < 0.98 * fs / 2)].mean())
+        assert abs((meas - INST.quantisation_floor_db_per_hz(q, fs)) - want) < 0.4
+        rr = r / q                                        # dither does not leave the lattice
+        assert np.mean(np.abs(rr - np.round(rr)) < 1e-9) > 0.9999

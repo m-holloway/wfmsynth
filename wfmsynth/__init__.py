@@ -38,7 +38,8 @@ from .grammar import sample, generate, CARRIERS, ENVELOPES
 from .pam4 import deep_capture, PATHOLOGIES
 from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_adc,
                          digitize as digitize_adc, scope_bandwidth, probe_loading, timebase_jitter,
-                         store_record, quantisation_floor_db_per_hz)
+                         store_record, quantisation_floor_db_per_hz,
+                         sinad_noise_rms, converter_noise_rms)
 from .compose import Signal, dataset, rederive_anchor, canonicalize, op_kind
 from .measure import (eye_height, best_phase, attributes, align_symbols, ground_truth,
                       pattern_period)
@@ -83,6 +84,7 @@ __all__ = [
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "interleave_adc", "shaped_noise_floor", "clip_adc", "quantize_adc", "digitize_adc",
     "scope_bandwidth", "probe_loading", "timebase_jitter", "store_record",
+    "sinad_noise_rms", "converter_noise_rms",
     "quantisation_floor_db_per_hz",
     "Signal", "dataset", "rederive_anchor", "canonicalize", "op_kind",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",

@@ -213,7 +213,8 @@ def _op_scope(x, p, streams, grid, idx):
 
 def _op_store(x, p, streams, grid, idx):
     return INST.store_record(x, bits=p.get("bits", 11), full_scale=p.get("full_scale"),
-                             headroom=p.get("headroom", 1.05), clip=p.get("clip", True))
+                             headroom=p.get("headroom", 1.05), clip=p.get("clip", True),
+                             dither_lsb=p.get("dither_lsb", 0.0), rng=streams.role(f"store/{idx}"))
 
 
 def _op_timebase(x, p, streams, grid, idx):
@@ -284,6 +285,11 @@ def _op_sparam(x, p, streams, grid, idx):
     return SP.sparam_channel(x, np.asarray(p["freqs"]), np.asarray(p["s21"], complex), grid=grid)
 
 
+def _op_cascade(x, p, streams, grid, idx):
+    from . import sparam as SP
+    return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"))
+
+
 def _op_digitize(x, p, streams, grid, idx):
     n_out = p.get("n_out")
     if n_out and n_out != len(x):
@@ -295,7 +301,15 @@ def _op_digitize(x, p, streams, grid, idx):
         x = x + streams.role(f"noise/{idx}").normal(0.0, span / 10 ** (p["snr_db"] / 20), len(x))
     if p.get("interleave"):
         x = INST.interleave_adc(x, rng=streams.role(f"interleave/{idx}"), **p["interleave"])
-    if "enob" in p:
+    if "bits" in p and "enob" in p:
+        raise ValueError("digitize takes bits= (the converter's real depth) or enob= (the legacy "
+                         "effective-bits lattice), not both")
+    if "bits" in p:                           # the CONVERTER's real lattice, on its full scale
+        fs = p.get("full_scale")
+        fs = float(np.max(np.abs(x))) + 1e-12 if fs is None else float(fs)
+        lsb = 2.0 * fs / 2 ** int(p["bits"])
+        x = lsb * np.round(x / lsb)
+    elif "enob" in p:
         lsb = span / 2 ** p["enob"]
         x = lsb * np.round(x / lsb)
     return x
@@ -303,7 +317,7 @@ def _op_digitize(x, p, streams, grid, idx):
 
 _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
-         "tx_ffe": _op_tx_ffe, "sparam": _op_sparam,
+         "tx_ffe": _op_tx_ffe, "sparam": _op_sparam, "cascade": _op_cascade,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "rx_ffe": _op_rx_ffe, "dfe": _op_dfe,
          "ssc": _op_ssc,
@@ -330,6 +344,7 @@ OP_KIND = {
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
+    "cascade": "channel",
     "crosstalk_matrix": "channel", "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
     "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
     "ctle": "instrument", "dfe": "instrument", "rx_ffe": "instrument", "tia": "instrument",
@@ -533,8 +548,21 @@ class Signal:
         freqs=[Hz] + s21=[complex]. Reproduces resonances/structure the analytic model can't."""
         return self._add("sparam", **params)
 
+    def cascade(self, path, **params):
+        """A CASCADED channel: `path` is a list of `{"line": {...}}` / `{"disc": {"gamma": g}}` /
+        `{"file": {"path": "x.s2p"}}` sections in physical order from driver to receiver, so each
+        reflection is generated where it sits and its echo is attenuated by the segment it
+        actually traverses. Replaces `lossy` + `reflect` for a path with structure — do not stack
+        it on them. params: node ('load' far-end, 'source' driver-plane reverse wave).
+        See `wfmsynth.sparam.cascade_channel`."""
+        return self._add("cascade", path=path, **params)
+
     def reflect(self, **params):
-        """Multi-reflection. params: td_frac | td_samples | td_ps, gamma_s, gamma_l, n_bounce."""
+        """Multi-reflection, LUMPED: one round-trip delay, one Gamma, no positional structure —
+        every echo pays whatever loss was applied before this op, once. Correct for a line
+        mismatched at both ends and nowhere else; for a path with discontinuities at different
+        distances use `cascade`. params: td_frac | td_samples | td_ps, gamma_s, gamma_l,
+        n_bounce, node."""
         return self._add("reflect", **params)
 
     def resonant_reflect(self, **params):
@@ -556,8 +584,15 @@ class Signal:
         return self._add("ac_couple", **params)
 
     def digitize(self, **params):
-        """Scope digitization. params: n_out, snr_db (noise vs signal span) | noise_rms
-        (absolute noise floor), enob, interleave=dict(m_cores, gain_mm, ...)."""
+        """Scope digitization -- the CONVERTER. params: n_out, snr_db (noise vs signal span) |
+        noise_rms (absolute noise floor), bits + full_scale (the converter's real depth and
+        range), interleave=dict(m_cores, gain_mm, ...), enob (legacy).
+
+        `bits` and `noise_rms` are the two mechanisms, and they are not the same thing: `bits`
+        is the converter's discrete lattice, `noise_rms` the continuous noise+distortion that
+        sets its SINAD. A published ENOB is the second, not the first -- turn one into the
+        other with `instrument.converter_noise_rms`. `enob` is the old single knob that does
+        both jobs at once and gets the record's structure wrong; it still works."""
         return self._add("digitize", **params)
 
     def store(self, **params):

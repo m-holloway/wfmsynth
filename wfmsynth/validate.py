@@ -1509,6 +1509,99 @@ check("a ranged vertical clips nothing (real captures show no rail pile-up)",
 check("the ranged pitch is constant across the record (a setting, not per-sample rounding)",
       _on_lattice(_ranged, float(np.min(np.diff(np.unique(_ranged))))) > 0.9999)
 
+
+# ---------------------------------------------------------------------------------------------
+# QUANTISATION AND ENOB ARE TWO MECHANISMS. Quantisation is the converter's real bit depth: a
+# uniform lattice, discrete, `q = 2*FS/2**bits`. ENOB is a SINAD figure: noise AND distortion,
+# continuous, and the reason ten physical bits behave like about six. Modelling the second as if
+# it were the first (rounding to a `2**enob` lattice) gets the noise POWER roughly right and the
+# record's structure entirely wrong. Everything below is a constructed case with a known answer.
+print()
+print("== converter vs ENOB: two mechanisms, checked apart ==")
+_FSV = 0.846; _A = _FSV / 2; _FSAMP = 256e9; _NYQ = _FSAMP / 2      # a 10-bit, 256 GSa/s DSO
+_gE = Grid(fs=_FSAMP, n=1 << 20)
+_NE = _gE.n; _tE = np.arange(_NE); _kE = int(round(2.0e9 * _NE / _FSAMP))
+_sine = _A * np.sin(2 * np.pi * _kE * _tE / _NE)                    # full-scale, on an exact bin
+
+
+def _enob_meas(y, guard=2):
+    """ENOB from SINAD by coherent-sampling FFT: (SINAD_dB - 1.76)/6.02, DC and the
+    fundamental +/- guard removed. The signal sits on an exact FFT bin, so no window is
+    needed and none is used -- a window would leak the carrier into the noise sum."""
+    P = np.abs(np.fft.rfft(np.asarray(y, float) - np.mean(y))) ** 2
+    k = int(np.argmax(P)); sig = P[max(k - guard, 1):k + guard + 1].sum()
+    return float((10.0 * np.log10(sig / (P[1:].sum() - sig)) - 1.76) / 6.02)
+
+
+# CONSTRUCTED CASE — the ENOB instrument itself, before it is used to judge anything.
+for _et in (5.0, 6.5, 9.0, 11.0):
+    _n = _rs.normal(0.0, INST.sinad_noise_rms(_et, _A), _NE)
+    check(f"ENOB instrument recovers a CONSTRUCTED SINAD of {_et} bits",
+          abs(_enob_meas(_sine + _n) - _et) < 0.05, f"{_enob_meas(_sine + _n):.2f}")
+
+# ONE fixed converter floor, sized ONCE from the widest published setting, RENDERED through the
+# whole chain at every other setting. The Keysight UXR1104A data sheet (5992-3132) publishes 13
+# bandwidth/ENOB pairs for a 10-bit converter; a white converter-referred floor shaped only by
+# the selected-bandwidth filter has to reproduce all of them or the split is wrong.
+_UXR = [(10, 7.0), (13, 6.8), (16, 6.7), (20, 6.5), (25, 6.2), (32, 5.9), (40, 5.8),
+        (50, 5.6), (59, 5.5), (67, 5.4), (80, 5.3), (90, 5.1), (110, 5.0)]
+_sig_c = INST.converter_noise_rms(5.0, _A, 110e9, _NYQ, bits=10)    # anchored at 110 GHz -> 5.0
+_dev = []
+for _B, _pub in _UXR:
+    _y = INST.scope_bandwidth(_sine, _gE, 110e9, kind="bessel")     # analog front end
+    _y = _y + np.random.default_rng(11).normal(0.0, _sig_c, _NE)    # the converter's own noise
+    _y, _ = INST.clip_adc(_y, _A)
+    _y = INST.quantize_adc(_y, bits=10, full_scale=_A)              # the converter's real lattice
+    _y = INST.scope_bandwidth(_y, _gE, _B * 1e9, kind="brickwall")  # the DSP filter, AFTER it
+    _dev.append(_enob_meas(_y) - _pub)
+_dev = np.array(_dev)
+check("ONE converter noise floor + a 10-bit lattice renders all 13 published bandwidth/ENOB "
+      "settings", np.abs(_dev).max() < 0.35,
+      f"{_dev.min():+.2f}..{_dev.max():+.2f} bits, rms {np.sqrt((_dev ** 2).mean()):.3f} "
+      f"(floor {_sig_c * 1e3:.2f} mV rms wideband, sized once at 110 GHz)")
+_q10 = 2.0 * _A / 2 ** 10
+check("the converter's lattice is far BELOW the noise that sets its ENOB (so it is dithered, "
+      "not visible)", 8.0 < _sig_c / _q10 < 12.0 and (_q10 ** 2 / 12) / _sig_c ** 2 < 0.002,
+      f"{_sig_c / _q10:.2f} LSB rms; the lattice is {(_q10 ** 2 / 12) / _sig_c ** 2 * 100:.3f} % "
+      f"of the noise power, and alone would be worth "
+      f"{(10 * np.log10((_A ** 2 / 2) / (_q10 ** 2 / 12)) - 1.76) / 6.02:.2f} bits")
+
+# THE REFUTATION. The legacy knob rounds to a 2**enob lattice. A real DSO filters AFTER its
+# converter, and that filter throws away most of a lattice's noise power -- so the ENOB-as-lattice
+# model does not even reproduce the number it was handed.
+_yl = INST.quantize_adc(INST.scope_bandwidth(_sine, _gE, 110e9, kind="bessel"), enob=5.9,
+                        full_scale=_A)
+_yl_f = INST.scope_bandwidth(_yl, _gE, 32e9, kind="brickwall")
+check("ENOB-as-a-lattice does NOT survive the DSP filter a real DSO has after its converter",
+      _enob_meas(_yl_f) - 5.9 > 1.5,
+      f"asked for 5.9, reads {_enob_meas(_yl_f):.2f} after the 32 GHz filter "
+      f"({_enob_meas(_yl):.2f} before it); its lattice is {2 * _A / 2 ** 5.9 * 1e6:.0f} uV against "
+      f"the converter's real {_q10 * 1e6:.0f} uV")
+try:
+    INST.converter_noise_rms(11.0, _A, 110e9, _NYQ, bits=10)
+    _guard = False
+except ValueError:
+    _guard = True
+check("converter_noise_rms REFUSES an ENOB a converter's depth cannot reach", _guard)
+
+# THE TERMINAL STORE'S FLOOR. Three real Keysight exports sit +2.68 / +3.00 / +3.08 dB ABOVE
+# their own lattice's q^2/12/(fs/2) -- flat from the DSP corner to Nyquist. A bare rounder cannot
+# do that; a rounder whose input carries one more LSB^2/12 of independent noise lands at q^2/6.
+_ys = (Signal(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
+       .carrier(kind="nrz", pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
+       .scope(bw_hz=110e9).digitize(noise_rms=_sig_c, bits=10, full_scale=_A)
+       .scope(bw_hz=32e9, kind="brickwall")).waveform()
+for _dth, _want, _lbl in ((0.0, 0.0, "a BARE store lands on q^2/12"),
+                          (1 / np.sqrt(12), 3.01, "a store dithered by 1 LSB^2/12 lands on q^2/6"
+                                                  " -- where the real captures are")):
+    _r = INST.store_record(_ys, bits=11, dither_lsb=_dth, rng=np.random.default_rng(5))
+    _u = np.unique(_r); _qs = float(np.min(np.diff(_u)))
+    _d = _stopband_psd_db_per_hz(_r, _FSAMP) - INST.quantisation_floor_db_per_hz(_qs, _FSAMP)
+    check(_lbl, abs(_d - _want) < 0.4, f"{_d:+.2f} dB above q^2/12/(fs/2) (real: +2.68/+3.00/+3.08)")
+    check(f"  ... and it is still a lattice ({_dth:.4f} LSB of dither does not smear it)",
+          _on_lattice(_r, _qs) > 0.9999 and 1851 <= len(_u) <= 2035,
+          f"{len(_u)} distinct, on-lattice {_on_lattice(_r, _qs):.4f}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
