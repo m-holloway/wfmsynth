@@ -379,8 +379,10 @@ def first_order_echoes(path, eps_r_default=4.0):
     it actually traverses, which is frequency-dependent and so is not a single number. Use this
     to know WHERE the echoes must be and roughly how big, then measure the realised waveform.
 
-    Returns a list of dicts: index, delay_ps (round trip), td_ps (one way), gamma, amp,
-    distance_inch, il_db_at (a callable-free note of the loss length the echo pays twice)."""
+    Returns a list of dicts with keys: `index` (position in `path`), `td_ps` (one way to the
+    discontinuity), `delay_ps` (the round trip, = 2*td_ps), `gamma`, `amp`, `distance_inch`
+    (td_ps at eps_r_default), and `loss_length_ps` -- the electrical length whose insertion loss
+    this echo pays, which is the round trip, not the one-way."""
     out, td, through = [], 0.0, 1.0
     for k, sec in enumerate(path):
         if isinstance(sec, TwoPort) or len(sec) != 1:
