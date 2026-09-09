@@ -266,3 +266,65 @@ def test_the_probe_op_reaches_the_probe_and_sits_before_the_instrument():
     assert KIND_RANK["channel"] < KIND_RANK[op_kind("probe")] < KIND_RANK["instrument"]
     bare = (Signal(seed=1, grid=g).carrier("nrz", n_ui=400, tr_frac=0.4).scope(bw_hz=60e9)).waveform()
     assert np.sqrt(np.mean((x - bare) ** 2)) > 1e-3 * np.sqrt(np.mean(bare ** 2))
+
+
+# ============================================================ the same claim, end to end
+def _e2e(spread, n_ui, grid, post=0.35):
+    """carrier -> ssc -> a one-UI post-cursor, through the composer's OWN ops. The transmitted
+    symbols come from the recipe (`physics.carrier_symbols`), not from a second estimator."""
+    s = Signal(seed=11, grid=grid).carrier("pam4", n_ui=n_ui, pattern="prbs13q", tr_frac=0.3)
+    if spread:
+        s = s.ssc(f_ssc=32e3, spread=spread, profile="down")
+    x = s.waveform()
+    d = int(round(grid.samples_per_ui))
+    y = x.copy()
+    y[d:] += post * x[:-d]
+    return y
+
+
+def _e2e_ser(y, tx, grid, **params):
+    _inst, _eq, dec = dfe_decisions(y, {"taps": [0.35], "levels": list(PAM4), **params}, grid)
+    best = 1.0
+    for lag in range(-4, 5):                    # a channel and a CDR both shift the symbol index
+        a, b = dec[max(0, lag):], tx[max(0, -lag):]
+        m = min(len(a), len(b))
+        if m > 1000:
+            best = min(best, float(np.mean(a[:m] != b[:m])))
+    return best
+
+
+def test_an_ssc_bearing_chain_through_a_dfe_is_readable_end_to_end():
+    """The user-facing claim, through `Signal.ssc()` rather than a hand-built record: a record
+    carrying spread-spectrum clocking through a DFE must come out READ, not destroyed.
+
+    Samples-per-UI is a whole 8.000 here, so the fixed stride is right when the rate is
+    constant and returns everything -- and it is the SSC alone that breaks it."""
+    import wfmsynth.physics as P
+    g = Grid(fs=128e9, baud=16e9, n=1 << 17)
+    n_ui = int(g.n // g.samples_per_ui)
+    tx = P.carrier_symbols("pam4", n_ui, 1, "prbs13q")
+
+    clean = _e2e(0.0, n_ui, g)
+    assert _e2e_ser(clean, tx, g, scale=1.0) == 0.0                      # stride right, left alone
+    assert _e2e_ser(clean, tx, g, scale=1.0, cdr=dict(loop_bw_hz=10e6)) == 0.0
+
+    ssc = _e2e(0.005, n_ui, g)
+    assert _e2e_ser(ssc, tx, g, scale=1.0) > 0.3                         # today: destroyed
+    assert _e2e_ser(ssc, tx, g, scale=1.0, cdr=dict(loop_bw_hz=10e6)) == 0.0
+    # negative control: the equaliser is load-bearing, so zero above is not a free pass
+    assert _e2e_ser(ssc, tx, g, taps=[0.0], scale=1.0, cdr=dict(loop_bw_hz=10e6)) > 0.3
+
+
+def test_the_default_amplitude_normalisation_costs_symbols_on_a_record_it_should_read():
+    """A third defect the constructed answer exposed, separate from the timing. The DFE's
+    default scale is the 99th percentile of the SAMPLED magnitudes, which post-cursor ISI
+    inflates above the constellation's own full scale -- so the slicer's levels sit wrong even
+    on a record with a perfect clock. Here it costs 12 % of the symbols where an explicit
+    `scale` reads every one. `scale=` is the knob; the default is unchanged."""
+    import wfmsynth.physics as P
+    g = Grid(fs=128e9, baud=16e9, n=1 << 17)
+    n_ui = int(g.n // g.samples_per_ui)
+    tx = P.carrier_symbols("pam4", n_ui, 1, "prbs13q")
+    clean = _e2e(0.0, n_ui, g)
+    assert _e2e_ser(clean, tx, g, scale=1.0) == 0.0
+    assert _e2e_ser(clean, tx, g) > 0.1

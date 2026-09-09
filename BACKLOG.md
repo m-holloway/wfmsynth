@@ -224,6 +224,16 @@ Not the DFE's defect — a time-invariant FIR cannot accumulate — but a real f
 at 0.020 UI for 7.143 samples/UI, constant from the first block of a record to the last.
 Fractionally-spaced taps by interpolation would remove it, and would need `wfmsynth/rx.py`.
 
+### The DFE's default amplitude normalisation is the 99th percentile of ISI-corrupted samples
+
+Separate from the timing, and exposed by the same constructed answer. `_op_dfe` normalises the
+sampled magnitudes by their own 99th percentile, which post-cursor ISI inflates above the
+constellation's full scale, so the slicer's levels sit wrong even on a record with a perfect
+clock: measured 12.3 % symbol error on a chain that reads perfectly with `scale=1.0`. The
+`scale=` parameter is in; the default is unchanged because changing it is a compatibility
+break. An AGC that estimates the level scale from the DECIDED levels rather than a percentile
+of the raw samples would fix it without a parameter.
+
 ### `_op_dfe` renders equalised symbols onto the nominal timebase
 
 `P.from_symbols(eq, n=len(x))` lays the equalised symbols back down at a uniform rate even
