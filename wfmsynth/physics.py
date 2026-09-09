@@ -56,7 +56,8 @@ def _min_phase_H(Hmag, n=None):
 
 
 def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
-                  skin_k=0.0, causal=False, grid=None, loss_db=None, loss_at_ghz=None):
+                  skin_k=0.0, causal=False, grid=None, loss_db=None, loss_at_ghz=None,
+                  trend=None):
     """Apply a frequency-dependent SI channel: insertion loss
         IL(f)[dB] = (a_skin*sqrt(f_GHz) + b_diel*f_GHz) * length_in
     with dielectric-loss coefficient b_diel = 2.3*sqrt(eps_r)*tand (dB/in/GHz)
@@ -68,19 +69,54 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
     Absolute units (wfmsynth.grid.Grid): pass grid=Grid(...) to take the real
     frequency axis (f_nyq_ghz) from the grid's Nyquist. Pass loss_db + loss_at_ghz to
     request a channel with a stated insertion loss (dB) at a stated frequency (GHz):
-    the skin+dielectric SHAPE is kept and scaled so IL(loss_at_ghz) == loss_db exactly."""
+    the skin+dielectric SHAPE is kept and scaled so IL(loss_at_ghz) == loss_db exactly.
+
+    THE SHAPE IS THE PART THAT MATTERS, AND ONE ANCHOR DOES NOT FIX IT
+    -----------------------------------------------------------------
+    `loss_db`+`loss_at_ghz` pin the curve at ONE frequency and leave it free everywhere
+    else, because the skin/dielectric mix above is HARD-WIRED: 0.35*sqrt(f) against
+    2.3*sqrt(eps_r)*tand*f in a fixed ratio, whatever `loss_db` says. That mix implies
+    IL(4 GHz)/IL(8 GHz) = 0.617 for every channel this function can make. Real measured
+    backplanes run 0.468-0.678 (pure dielectric is 0.500, pure skin effect 0.707), and
+    anchored at 8 GHz on a Gen4-budget board the fixed mix is 1.7-2.0 dB optimistic at
+    1-2 GHz and 3.5 dB pessimistic at 12 GHz -- 2.94 dB rms, 11.18 dB pp across the band.
+    Measured through a reference receiver that error is worth ~52 mV of eye height, more
+    than band truncation (19 mV) and the boards' resonances (15 mV) combined, and it is
+    why an analytic channel quoted at a real board's own insertion loss opens an eye where
+    the board has none.
+
+    So `trend=(a, b, c)` takes the whole curve instead of one point on it:
+
+        |S21|(f)[dB] = a*sqrt(f_GHz) + b*f_GHz + c        (a fitted magnitude, <= 0)
+        IL(f)[dB]    = -(a*sqrt(f_GHz) + b*f_GHz + c),  clamped at >= 0 (passivity)
+
+    which is the three-parameter least-squares fit of a measured differential |SDD21|.
+    It needs no measured file at run time -- three numbers per board are enough, and a
+    caller's manifest of them is the whole channel. `length_in`, `tand`, `eps_r`,
+    `skin_k`, `loss_db` and `loss_at_ghz` are all ignored when `trend` is given: a fitted
+    trend is not a per-inch coefficient and must not be scaled like one. Passivity is
+    enforced rather than assumed -- a fit whose `c` is positive would otherwise deliver
+    GAIN at DC, which is how a resonance-dominated file (whose loss at one frequency is a
+    point on a resonance skirt, not a rung on a loss ladder) silently becomes an amplifier.
+    A fitted trend is smooth by construction and cannot make a resonance or a stub notch;
+    use `sparam` or `resonant_reflection` for those."""
     x = np.asarray(x, float)
     n = len(x)
     if grid is not None:
         f_nyq_ghz = grid.f_nyquist / 1e9                  # real frequency axis from the grid
     f_ghz = np.fft.rfftfreq(n) * 2.0 * f_nyq_ghz          # 0..f_nyq_ghz at Nyquist
-    b_diel = 2.3 * np.sqrt(eps_r) * tand
-    a_skin = skin_k if skin_k > 0 else 0.35               # ~dB/in/sqrt(GHz) typ
-    il_db = (a_skin * np.sqrt(f_ghz) + b_diel * f_ghz) * length_in
-    if loss_db is not None and loss_at_ghz is not None:
-        # keep the skin+dielectric SHAPE; scale so IL(loss_at_ghz) == loss_db exactly
-        shape_at = (a_skin * np.sqrt(loss_at_ghz) + b_diel * loss_at_ghz) * length_in
-        il_db = il_db * (loss_db / (shape_at + 1e-12))
+    if trend is not None:
+        a, b, c = (float(t) for t in trend)
+        il_db = -(a * np.sqrt(f_ghz) + b * f_ghz + c)
+        il_db = np.maximum(il_db, 0.0)                    # passive: a channel cannot amplify
+    else:
+        b_diel = 2.3 * np.sqrt(eps_r) * tand
+        a_skin = skin_k if skin_k > 0 else 0.35           # ~dB/in/sqrt(GHz) typ
+        il_db = (a_skin * np.sqrt(f_ghz) + b_diel * f_ghz) * length_in
+        if loss_db is not None and loss_at_ghz is not None:
+            # keep the skin+dielectric SHAPE; scale so IL(loss_at_ghz) == loss_db exactly
+            shape_at = (a_skin * np.sqrt(loss_at_ghz) + b_diel * loss_at_ghz) * length_in
+            il_db = il_db * (loss_db / (shape_at + 1e-12))
     Hmag = 10.0 ** (-il_db / 20.0)
     if causal:
         Hc = _min_phase_H(Hmag, n)                        # full-spectrum complex H

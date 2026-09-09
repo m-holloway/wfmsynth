@@ -70,7 +70,9 @@ def _op_symbols(x, p, streams, grid, idx):
 
 def _op_lossy(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("length_in", "tand", "eps_r", "skin_k", "causal",
-                            "loss_db", "loss_at_ghz") if k in p}
+                            "loss_db", "loss_at_ghz", "trend") if k in p}
+    if "trend" in kw and kw["trend"] is not None:
+        kw["trend"] = tuple(float(t) for t in kw["trend"])   # JSON round-trips it as a list
     return P.lossy_channel(x, grid=grid, **kw)
 
 
@@ -209,6 +211,13 @@ def _op_scope(x, p, streams, grid, idx):
     return INST.scope_bandwidth(x, grid, p["bw_hz"], **kw)
 
 
+def _op_store(x, p, streams, grid, idx):
+    fs = p.get("full_scale")
+    if fs is None:
+        fs = 1.0                       # normalized units: +/-1 is the instrument's full scale
+    return INST.store_record(x, bits=p.get("bits", 11), full_scale=fs, clip=p.get("clip", True))
+
+
 def _op_timebase(x, p, streams, grid, idx):
     return INST.timebase_jitter(x, grid, rms_ps=p.get("rms_ps", 0.5), rng=streams.role(f"timebase/{idx}"))
 
@@ -304,7 +313,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
          "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
          "photodetect": _op_photodetect, "tia": _op_tia,
-         "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase,
+         "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase, "store": _op_store,
          "de_emphasis": _op_de_emphasis, "acquire": _op_acquire,
          "events": _op_events}
 
@@ -327,7 +336,7 @@ OP_KIND = {
     "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
     "ctle": "instrument", "dfe": "instrument", "rx_ffe": "instrument", "tia": "instrument",
     "photodetect": "instrument", "scope": "instrument", "digitize": "instrument",
-    "timebase": "instrument", "acquire": "instrument",
+    "timebase": "instrument", "acquire": "instrument", "store": "instrument",
 }
 
 
@@ -516,7 +525,9 @@ class Signal:
         return self._add("intra_pair_skew", **params)
 
     def lossy(self, **params):
-        """Lossy channel. params: length_in, tand, causal, or loss_db+loss_at_ghz (real units)."""
+        """Lossy channel. params: length_in, tand, causal, loss_db+loss_at_ghz (real units), or
+        trend=(a,b,c) -- the whole fitted |S21| curve rather than one anchor point, which is what
+        a real board's loss SHAPE needs (see `physics.lossy_channel`)."""
         return self._add("lossy", **params)
 
     def sparam(self, **params):
@@ -550,6 +561,16 @@ class Signal:
         """Scope digitization. params: n_out, snr_db (noise vs signal span) | noise_rms
         (absolute noise floor), enob, interleave=dict(m_cores, gain_mm, ...)."""
         return self._add("digitize", **params)
+
+    def store(self, **params):
+        """The instrument's EXPORT step: write the record as integer codes. params: bits,
+        full_scale (default 1.0 = the normalized +/-1 full scale), clip.
+
+        This is not `digitize` twice. `digitize` is the converter, in the middle of the chain;
+        every DSP stage after it (the selected-bandwidth filter above all) smears its lattice
+        back into a continuum. `store` is the lattice the FILE is on, and it is what gives a
+        real capture its noise floor -- see `instrument.store_record`."""
+        return self._add("store", **params)
 
     def events(self, kind, on="symbols", **params):
         """Place a localized mechanism on the current waveform (a needle, not a

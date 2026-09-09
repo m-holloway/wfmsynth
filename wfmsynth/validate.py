@@ -1366,6 +1366,136 @@ _det_int = _OPT.mpi(np.abs(_cwm) ** 2, delay_samples=_d, reflectivity=0.2)      
 check("field-domain optical MPI produces a coherent detected beat (an intensity ghost does not)",
       np.var(_det_field[_ov]) > 1e-3 and np.var(_det_int[_ov]) < 1e-9)
 
+# ===================================================================================================
+# The loss TREND, and the storage lattice — the two realism gaps, each measured by an instrument
+# that was first made to recover an answer we constructed.
+# ===================================================================================================
+from wfmsynth import instrument as INST
+
+print("== insertion-loss instrument: does it recover a loss curve we constructed? ==")
+_gt = Grid(fs=64e9, baud=16e9, n=1 << 14)
+
+
+def _il_db(f_ghz_want, **kw):
+    """Measure a channel's insertion loss in dB at a stated frequency, by rendering an impulse
+    through it and reading the rfft back. The ONLY loss instrument used below."""
+    imp = np.zeros(_gt.n); imp[0] = 1.0
+    H = np.abs(np.fft.rfft(P.lossy_channel(imp, grid=_gt, **kw)))
+    f = np.fft.rfftfreq(_gt.n) * _gt.fs / 1e9
+    k = int(np.argmin(np.abs(f - f_ghz_want)))
+    return -20.0 * np.log10(H[k] + 1e-300)
+
+
+# CONSTRUCTED CASE: a trend whose loss at 4 and 8 GHz is arithmetic we can do by hand.
+# trend=(a,b,c) means |S21|dB = a*sqrt(f)+b*f+c, so IL(f) = -(a*sqrt(f)+b*f+c).
+# (a,b,c) = (0, -2, 0) is exactly 2 dB per GHz: 8 dB at 4 GHz, 16 dB at 8 GHz, ratio 0.5.
+_known = (0.0, -2.0, 0.0)
+check("loss instrument recovers a CONSTRUCTED trend at 4 GHz (8.00 dB by hand)",
+      abs(_il_db(4.0, trend=_known) - 8.0) < 0.02, f"measured {_il_db(4.0, trend=_known):.4f} dB")
+check("loss instrument recovers a CONSTRUCTED trend at 8 GHz (16.00 dB by hand)",
+      abs(_il_db(8.0, trend=_known) - 16.0) < 0.02, f"measured {_il_db(8.0, trend=_known):.4f} dB")
+# and the sqrt term alone: (a,b,c)=(-4,0,0) is 4*sqrt(f) dB -> 8.00 at 4 GHz, 11.3137 at 8 GHz
+check("loss instrument recovers a CONSTRUCTED sqrt-only trend (4*sqrt(f): 8.000 / 11.314 dB)",
+      abs(_il_db(4.0, trend=(-4.0, 0.0, 0.0)) - 8.0) < 0.02
+      and abs(_il_db(8.0, trend=(-4.0, 0.0, 0.0)) - 4.0 * np.sqrt(8.0)) < 0.02)
+# NEGATIVE CONTROL: the instrument must not report a loss a channel does not have.
+check("loss instrument reports ~0 dB on a constructed transparent channel (no false positive)",
+      abs(_il_db(8.0, trend=(0.0, 0.0, 0.0))) < 1e-9)
+
+print("== the fixed skin/dielectric mix: one anchor cannot set a shape (the measured defect) ==")
+# The anchored model's L(4)/L(8) is a CONSTANT, whatever loss is requested — that is the whole bug.
+_ratios = [_il_db(4.0, loss_db=d, loss_at_ghz=8.0) / _il_db(8.0, loss_db=d, loss_at_ghz=8.0)
+           for d in (7.18, 15.07, 21.75, 26.05, 34.06)]
+check("anchored loss_db has ONE hard-wired L(4)/L(8) for every channel it can make",
+      max(_ratios) - min(_ratios) < 1e-6 and abs(_ratios[0] - 0.617) < 0.005,
+      f"ratio {_ratios[0]:.4f} across 7.2-34.1 dB, spread {max(_ratios) - min(_ratios):.2e}")
+# Real measured backplanes (wfmplan spike `real_channel`, from the 802.3ap/Molex/TE files) run
+# 0.468-0.678. `trend` reaches that range; the anchored model cannot leave 0.617.
+_r_lo = _il_db(4.0, trend=(0.0, -2.0, 0.0)) / _il_db(8.0, trend=(0.0, -2.0, 0.0))     # pure dielectric
+_r_hi = _il_db(4.0, trend=(-4.0, 0.0, 0.0)) / _il_db(8.0, trend=(-4.0, 0.0, 0.0))     # pure skin
+check("trend spans the measured 0.468-0.678 band of real boards (0.500 dielectric -> 0.707 skin)",
+      abs(_r_lo - 0.5) < 0.002 and abs(_r_hi - 0.7071) < 0.002,
+      f"L4/L8 {_r_lo:.4f} .. {_r_hi:.4f}, vs the anchored model's fixed {_ratios[0]:.4f}")
+# Passivity: a fit whose c > 0 would otherwise deliver GAIN at DC.
+check("a trend that fits to GAIN is clamped to a passive channel (IL >= 0 everywhere)",
+      _il_db(0.5, trend=(-1.0, 1.0, 20.0)) >= -1e-9 and _il_db(4.0, trend=(-1.0, 1.0, 20.0)) >= -1e-9)
+# `trend` ignores the per-inch knobs rather than scaling by them: a fitted curve is not dB/in.
+check("trend ignores length_in/tand (a fitted curve is a whole channel, not a per-inch coefficient)",
+      abs(_il_db(8.0, trend=_known, length_in=1.0, tand=0.001)
+          - _il_db(8.0, trend=_known, length_in=20.0, tand=0.03)) < 1e-9)
+
+print("== the storage lattice: a stored record is int16 codes, and that IS its noise floor ==")
+_fs_store = 256e9
+# CONSTRUCTED CASE 1 — the lattice detector. A signal we quantised ourselves to a pitch we chose.
+_rs = np.random.default_rng(4)
+_cont = np.cumsum(_rs.normal(0, 1e-3, 1 << 16))                      # a continuous wander
+_qknown = 4.88e-4
+_lat = np.round(_cont / _qknown) * _qknown
+
+
+def _on_lattice(y, q):
+    return float(np.mean(np.abs(y / q - np.round(y / q)) < 1e-9))
+
+
+check("lattice detector recovers a CONSTRUCTED pitch (on-lattice fraction 1.0000)",
+      _on_lattice(_lat, _qknown) > 0.9999, f"{_on_lattice(_lat, _qknown):.4f}")
+check("lattice detector does NOT fire on the same signal unquantised (negative control)",
+      _on_lattice(_cont, _qknown) < 0.01, f"{_on_lattice(_cont, _qknown):.4f}")
+
+
+def _stopband_psd_db_per_hz(y, fs_hz, lo_frac=0.80, hi_frac=0.98):
+    """One-sided PSD averaged over an empty band, in dB/Hz. The floor instrument."""
+    n = len(y)
+    Y = np.fft.rfft(y - y.mean())
+    psd = (np.abs(Y) ** 2) * (2.0 / (n * n)) * (n / fs_hz)          # one-sided, per Hz
+    f = np.fft.rfftfreq(n, 1.0 / fs_hz)
+    band = (f > lo_frac * fs_hz / 2) & (f < hi_frac * fs_hz / 2)
+    return float(10.0 * np.log10(np.mean(psd[band]) + 1e-300))
+
+
+# CONSTRUCTED CASE 2 — the floor instrument, on pure quantisation error of a known step.
+# A quantiser of step q contributes q^2/12 spread flat over fs/2: that is the closed form the
+# three real captures matched to under 0.1 dB, and it is what this must recover.
+for _qk in (2.1227e-4, 4.8904e-4):
+    _err = _rs.uniform(-_qk / 2, _qk / 2, 1 << 18)
+    _pred = INST.quantisation_floor_db_per_hz(_qk, _fs_store)
+    _meas = _stopband_psd_db_per_hz(_err, _fs_store)
+    check(f"floor instrument recovers q^2/12/(fs/2) for a CONSTRUCTED q={_qk * 1e6:.1f} uV",
+          abs(_meas - _pred) < 0.2, f"predicted {_pred:.2f}, measured {_meas:.2f} dB/Hz")
+
+# THE MECHANISM. Same recipe, rendered twice: without the export step and with it.
+_gst = Grid(fs=_fs_store, baud=16e9, n=1 << 16, v_full=0.846)
+_base = (Signal(seed=17, grid=_gst).carrier(kind="nrz", pattern="prbs13")
+         .lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
+         .scope(bw_hz=110e9).digitize(noise_rms=0.0032, enob=10.0).scope(bw_hz=32e9))
+_smeared = _base.waveform()
+_stored = (Signal(seed=17, grid=_gst).carrier(kind="nrz", pattern="prbs13")
+           .lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
+           .scope(bw_hz=110e9).digitize(noise_rms=0.0032, enob=10.0).scope(bw_hz=32e9)
+           .store(bits=11)).waveform()
+_q11 = 2.0 / 2 ** 11
+check("without the export step the DSP filter smears the converter lattice away (the defect)",
+      _on_lattice(_smeared, _q11) < 0.02 and len(np.unique(_smeared)) > len(_smeared) // 2,
+      f"{len(np.unique(_smeared))} distinct values, on-lattice {_on_lattice(_smeared, _q11):.4f}")
+check("`store` puts the record back on a lattice, fully (occupancy, not a sparse set)",
+      _on_lattice(_stored, _q11) > 0.9999
+      and 1500 < len(np.unique(_stored)) < 2600,
+      f"{len(np.unique(_stored))} distinct values on a {_q11 * 0.5 * _gst.v_full * 1e6:.0f} uV lattice "
+      f"(real captures: 1851-2035 in 8 M samples)")
+_pred_floor = INST.quantisation_floor_db_per_hz(_q11, _fs_store)
+_meas_floor = _stopband_psd_db_per_hz(_stored, _fs_store)
+check("the stored record's stop band sits at its own lattice's q^2/12/(fs/2)",
+      abs(_meas_floor - _pred_floor) < 1.0,
+      f"predicted {_pred_floor:.2f}, measured {_meas_floor:.2f} dB/Hz "
+      f"(unstored: {_stopband_psd_db_per_hz(_smeared, _fs_store):.1f})")
+check("the export step is a rounding, not a rewrite: no sample moves by more than half an LSB",
+      float(np.max(np.abs(_stored - _smeared))) <= _q11 / 2 + 1e-12,
+      f"max move {float(np.max(np.abs(_stored - _smeared))) / _q11:.4f} LSB")
+check("`store` is idempotent — storing a stored record changes nothing",
+      np.array_equal(_stored, INST.store_record(_stored, bits=11, full_scale=1.0)))
+check("`store` clips to the representable code range (a real export has no room beyond it)",
+      float(np.max(np.abs(INST.store_record(np.array([-4.0, 4.0]), bits=8)))) <= 1.0 + 1e-12)
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

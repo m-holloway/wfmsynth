@@ -37,7 +37,8 @@ from .events import (Event, EventList, place_events, apply_events, defect_symbol
 from .grammar import sample, generate, CARRIERS, ENVELOPES
 from .pam4 import deep_capture, PATHOLOGIES
 from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_adc,
-                         digitize as digitize_adc, scope_bandwidth, probe_loading, timebase_jitter)
+                         digitize as digitize_adc, scope_bandwidth, probe_loading, timebase_jitter,
+                         store_record, quantisation_floor_db_per_hz)
 from .compose import Signal, dataset, rederive_anchor, canonicalize, op_kind
 from .measure import (eye_height, best_phase, attributes, align_symbols, ground_truth,
                       pattern_period)
@@ -81,7 +82,8 @@ __all__ = [
     "MECHANISMS", "PLACEMENTS",
     "sample", "generate", "CARRIERS", "ENVELOPES", "deep_capture", "PATHOLOGIES",
     "interleave_adc", "shaped_noise_floor", "clip_adc", "quantize_adc", "digitize_adc",
-    "scope_bandwidth", "probe_loading", "timebase_jitter",
+    "scope_bandwidth", "probe_loading", "timebase_jitter", "store_record",
+    "quantisation_floor_db_per_hz",
     "Signal", "dataset", "rederive_anchor", "canonicalize", "op_kind",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",
