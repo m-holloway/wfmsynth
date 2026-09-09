@@ -406,6 +406,28 @@ clock, residual = ws.recover_clock(jitter_phase, baud=50e9, loop_bw=1e6, order=2
 ws.tracked_out_fraction(jitter_phase, baud=50e9, loop_bw=1e6)   # 0..1
 ```
 
+## The recorded eye (folded on the clock recovered from the record)
+`recover_clock` is the loop; `eye_density` is the picture that loop makes. It finds the
+threshold crossings, fits the symbol period and phase to them, runs the CDR over the
+per-symbol timing phase, and folds the record at the decision instants that come out —
+so the period comes from the **edges**, not from the rate the grid states, and a timing
+impairment shows up instead of being assumed away.
+
+```python
+img, meta = ws.eye_density(x, grid, w=128, h=96, ui_span=2.0, max_traces=400)
+img.shape                       # (96, 128) uint32 counts, row 0 = highest volts
+meta["clock"]["samplesPerUi"]   # the period the EDGES determined
+meta["clock"]["residualRmsUi"]  # the jitter this picture therefore shows
+meta["clock"]["source"]         # 'recovered', or 'nominal' + a stated reason
+```
+
+Tell the grid a symbol rate 1.7x or 0.5x the truth and the density is byte-identical:
+the picture is folded on what was measured. Built for long records — 3 M UI (48 Mpt) is
+152 ms and 1.2 GB peak, against 555 ms and 3.0 GB for the straightforward transcription
+of the same arithmetic, with every count identical. `spikes/eye3m/` has the measurements,
+including which techniques did nothing. Threads are used where the work partitions
+(`threads=1` disables them; Pyodide gets one automatically) and never change a count.
+
 ## Measured S-parameter channels (Touchstone)
 Drive synthesis through a real `.sNp` channel — resonances the analytic model can't make:
 
