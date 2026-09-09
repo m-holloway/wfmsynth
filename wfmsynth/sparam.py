@@ -108,11 +108,16 @@ def write_touchstone(path, freqs_hz, S, fmt="RI", funit="HZ"):
         fh.write("\n".join(lines) + "\n")
 
 
-def sparam_channel(x, freqs, s21, grid=None, dt=None):
+def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None):
     """Apply a measured transfer ``s21`` (complex, sampled at ``freqs`` in Hz) to ``x`` as a
     frequency-domain channel. Provide the sample spacing via ``grid=Grid(...)`` or ``dt``.
-    The response is interpolated (real/imag) onto the signal's FFT grid and zeroed outside
-    the measured band. Unlike the analytic model this reproduces resonances and structure."""
+    The response is interpolated (real/imag) onto the transform's FFT grid and zeroed outside
+    the measured band. Unlike the analytic model this reproduces resonances and structure.
+
+    The convolution is LINEAR (`physics.apply_transfer`): the record is zero-padded past the
+    response's own length before transforming, so the channel's answer to the record's tail
+    does not wrap onto its head. ``linear=False`` restores the pinned-length circular form."""
+    from . import physics as P
     x = np.asarray(x, float)
     if dt is None:
         if grid is None:
@@ -120,16 +125,22 @@ def sparam_channel(x, freqs, s21, grid=None, dt=None):
         dt = grid.dt
     freqs = np.asarray(freqs, float)
     s21 = np.asarray(s21, complex)
-    fg = np.fft.rfftfreq(len(x), d=dt)
-    H = np.interp(fg, freqs, s21.real) + 1j * np.interp(fg, freqs, s21.imag)
-    H[(fg < freqs.min()) | (fg > freqs.max())] = 0.0        # no extrapolation beyond the trace
-    return np.fft.irfft(np.fft.rfft(x) * H, len(x))
+
+    def make_H(nfft):
+        fg = np.fft.rfftfreq(nfft, d=dt)
+        H = np.interp(fg, freqs, s21.real) + 1j * np.interp(fg, freqs, s21.imag)
+        H[(fg < freqs.min()) | (fg > freqs.max())] = 0.0    # no extrapolation beyond the trace
+        return H
+
+    return P.apply_transfer(x, make_H, linear=linear, guard=guard)
 
 
-def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None):
+def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
+                       linear=True, guard=None):
     """Read a Touchstone file and apply ``S[ports[0]-1, ports[1]-1]`` (default S21) to ``x``."""
     freqs, S = read_touchstone(path, n_ports=n_ports)
-    return sparam_channel(x, freqs, S[:, ports[0] - 1, ports[1] - 1], grid=grid, dt=dt)
+    return sparam_channel(x, freqs, S[:, ports[0] - 1, ports[1] - 1], grid=grid, dt=dt,
+                          linear=linear, guard=guard)
 
 
 # =====================================================================================
@@ -415,7 +426,8 @@ def first_order_echoes(path, eps_r_default=4.0):
     return out
 
 
-def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0):
+def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0,
+                    linear=True, guard=None):
     """Apply a CASCADED channel to `x`: sections of line with their own loss, separated by
     discontinuities with their own reflection coefficients.
 
@@ -430,9 +442,16 @@ def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0)
                     the plane a near-end echo is seen at, and the one TDR-style distance
                     estimation reads.
 
-    The sections are built directly on the signal's own rfft grid, so there is no interpolation
+    The sections are built directly on the transform's rfft grid, so there is no interpolation
     of an analytic path and the delays are exact (a linear phase, not a rounded sample count —
-    `physics.multi_reflection` rounds `td_ps` to the nearest sample)."""
+    `physics.multi_reflection` rounds `td_ps` to the nearest sample).
+
+    The convolution is LINEAR (`physics.apply_transfer`): the record is zero-padded past the
+    cascade's own impulse-response length — which for a path with structure is dominated by the
+    LAST echo's round trip — so no echo of the record's tail is delivered to its head. A path
+    whose echoes take longer than the record itself simply pads further. ``linear=False``
+    restores the pinned-length circular form for comparison."""
+    from . import physics as P
     x = np.asarray(x, float)
     if dt is None:
         if grid is None:
@@ -440,10 +459,11 @@ def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0)
         dt = grid.dt
     if node not in ("load", "source"):
         raise ValueError("node must be 'load' or 'source'")
-    freqs = np.fft.rfftfreq(len(x), d=dt)
-    tp = cascade(path, freqs)
-    H = tp.s21 if node == "load" else (1.0 + tp.s11)
-    del tp                         # only H is needed past here; the other three ports are not
-    X = np.fft.rfft(x)
-    X *= H                         # in place: the same product, one fewer record-sized temporary
-    return np.fft.irfft(X, len(x))
+
+    def make_H(nfft):
+        tp = cascade(path, np.fft.rfftfreq(nfft, d=dt))
+        H = tp.s21 if node == "load" else (1.0 + tp.s11)
+        del tp                     # only H is needed past here; the other three ports are not
+        return H
+
+    return P.apply_transfer(x, make_H, linear=linear, guard=guard)

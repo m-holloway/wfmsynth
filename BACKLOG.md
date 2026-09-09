@@ -21,6 +21,61 @@ Priority order is: measured fidelity, ground-truth correctness, consolidation, t
 
 ## P0 — canonical pipelines and trustworthy provenance
 
+### #52 The record's head after U-16 — a lead-in the composer renders and discards
+
+**Status:** Open. Owner: whoever owns `compose.py` / `instrument.py`; NOT a `physics.py` change.
+
+U-16 made every frequency-domain stage a LINEAR convolution: the response to the record's last
+samples no longer wraps onto its first. That is the correct convolution, and it has a
+consequence that has to be owned somewhere. Before sample 0 there is now a quiescent line, so a
+record that begins mid-pattern begins with a TURN-ON EDGE — the line was never high before the
+capture started. A real deep-memory capture is a window on a link that was already running and
+has no such edge.
+
+Three measured consequences, on the shipped full-chain recipe (carrier -> channel -> reflection
+-> timing -> supply -> crosstalk -> front end -> converter -> export):
+
+- the turn-on is a step in the record's periodic extension, and an unwindowed whole-record FFT
+  spreads it flat: the 11-bit stored record's stop band reads **−165.3 dB/Hz instead of its
+  lattice's −182.1**. `validate.py`'s floor instrument now windows, which recovers −182.3 and
+  still recovers both constructed quantisation floors to 0.03 dB — but a downstream consumer
+  measuring the record's PSD without a window will see the edge.
+- `scope(kind="brickwall")` is still a CIRCULAR frequency-domain stage, so it rings on that step.
+  The overshoot lands on the record's LAST samples at **6.8 % above** anything the link does, and
+  the ranged 11-bit code count falls from **1949 to 1830**, outside the 1851–2035 band the three
+  real captures set. `validate.py` trims 1024 samples off each end to measure the interior.
+- a zero-phase (non-causal) stage additionally rolls the record's TAIL off, because its
+  pre-cursor reaches for samples past the end that are not there.
+
+**Done when:** a chain renders `guard` extra samples of the same pattern before the record (and,
+for a non-causal stage, after it), applies the channel, and discards the lead-in — so the
+delivered record is a window on a running link and carries neither a turn-on nor its ringing;
+and `validate.py`'s edge trims and windows are no longer load-bearing.
+
+Sizing it needs no new estimate: `physics.response_extent` already measures exactly how many
+samples the lead-in has to be.
+
+### #53 `_op_lossy` and `_op_resonant` drop the `linear` and `guard` keywords
+
+**Status:** Open. Owner: whoever owns `compose.py`.
+
+`compose._op_lossy` whitelists the keys it forwards to `physics.lossy_channel`, so a recipe
+cannot ask for `linear=False` (the pinned-length circular convolution) or set `guard=`. The
+same is true of the other frequency-domain ops. That makes the U-16 comparison impossible to do
+from a recipe, and it means a caller who knows their channel's impulse-response length cannot
+skip the probe. Add both keys to the whitelist and to the recipe schema.
+
+### #54 `scope`/`brickwall` and the other frequency-domain stages outside `physics`/`sparam`
+still wrap
+
+**Status:** Open. Owner: whoever owns `instrument.py`.
+
+U-16 covered `physics.lossy_channel`, `physics.resonant_reflection`, `sparam.sparam_channel`
+and `sparam.cascade_channel`. `instrument.scope`'s frequency-domain kinds (`brickwall`, the
+Gaussian mask) are still `irfft(rfft(x) * H)` at the record length and still wrap. They are
+also the stages that now ring on the head that #52 describes. `physics.apply_transfer` is the
+shared implementation; pointing them at it is the whole change.
+
 ### #27 Unify `Signal.digitize()` with `instrument.digitize()`
 
 **Status:** Open.
@@ -168,6 +223,13 @@ Keep these statements synchronized with user-facing documentation:
   future work.
 - `simreal.separability()` provides a diagnostic method, but the repository does not ship a
   measured-capture benchmark corpus.
+- Frequency-domain stages in `physics` and `sparam` apply a LINEAR convolution and pad to a
+  5-smooth transform length; the guard is MEASURED (`physics.response_extent`, -100 dB below
+  the impulse response's peak) and capped at twice the record, so a channel with an algebraic
+  tail keeps a residual bounded at that level -- ~3e-5 of a record's span, about a fifteenth of
+  one LSB at 11 bits. `guard=` overrides it.
+- A record now begins on a quiescent line, so it carries a turn-on edge at its head (#52), and
+  the frequency-domain stages outside `physics`/`sparam` still wrap (#54).
 
 ## Delivered milestones
 

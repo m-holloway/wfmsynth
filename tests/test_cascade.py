@@ -118,11 +118,18 @@ def test_the_echo_carries_the_segments_attenuation_not_the_channels(d):
     """The realised echo equals the closed form Gamma*H_seg^2 applied to the launched pulse."""
     x, _ = _pulse()
     k0 = int(np.argmax(np.abs(x)))
-    y = SP.cascade_channel(x, _path(d), grid=GRID, node="source")
+    # The realisation and the closed form are applied the same way -- a LINEAR convolution
+    # (`physics.apply_transfer`) at the SAME transform length. Both parts matter: comparing a
+    # linear realisation against a circular closed form differs by the wrapped tail (5e-8 here,
+    # and far more on a shorter record), and `line(causal=True)` folds its minimum phase at the
+    # transform length, so evaluating the two at different lengths differs by 4e-7. Neither is
+    # the claim under test, which is the echo's ATTENUATION.
+    pad = GRID.n
+    y = SP.cascade_channel(x, _path(d), grid=GRID, node="source", guard=pad)
     sk = k0 + int(0.6 * 2 * d * PPI * 1e-12 * GRID.fs)
     got = np.abs((y - x)[sk:]).max()
-    H = SP.line(FREQ, length_in=d, eps_r=EPS).s21
-    exact = np.abs(np.fft.irfft(np.fft.rfft(x) * (GAM * H ** 2), GRID.n)).max()
+    seg = lambda nf: GAM * SP.line(np.fft.rfftfreq(nf, d=GRID.dt), length_in=d, eps_r=EPS).s21 ** 2
+    exact = np.abs(P.apply_transfer(x, seg, guard=pad)).max()
     assert got == pytest.approx(exact, abs=1e-12)
 
 

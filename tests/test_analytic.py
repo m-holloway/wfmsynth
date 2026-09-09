@@ -51,7 +51,18 @@ def _tone_loss_db(fn, grid, f_hz):
 
 
 def _transfer(fn, grid, seed=0):
-    """|H| and H measured from a broadband record: rfft(y)/rfft(x) on the realised output."""
+    """|H| and H measured from a broadband record: rfft(y)/rfft(x) on the realised output.
+
+    MEASURED ON THE PINNED-LENGTH PATH. `rfft(y)/rfft(x)` recovers H exactly only when y is the
+    CIRCULAR convolution of x with h -- that is the eigen-relation the ratio relies on. The ops'
+    default is now a linear convolution (`physics.apply_transfer`), whose output is the same H
+    applied with a zero lead-in and truncated, and a whole-record DFT of that is H plus an edge
+    term (0.002-0.02 dB on the channels below, and up to 0.6 in |H| where |H| is small). So the
+    transfer-function assertions here pass `linear=False` and read H off the eigen-path.
+
+    What that leaves uncovered -- that the padded path applies this same H, and applies it as a
+    linear convolution -- is `tests/test_linear_convolution.py`, against `np.convolve` and
+    against a two-tap echo whose closed form is written out by hand."""
     x = np.random.default_rng(seed).standard_normal(grid.n)
     y = fn(x)
     return np.fft.rfft(y) / np.fft.rfft(x), np.fft.rfftfreq(grid.n, d=grid.dt)
@@ -88,7 +99,8 @@ def test_loss_across_the_band_is_the_skin_plus_dielectric_law(f_ghz):
     length_in, tand, eps_r, loss_db, at_ghz = 6.0, 0.02, 4.3, 12.0, 8.0
     meas, f = _tone_loss_db(
         lambda x: P.lossy_channel(x, grid=g, length_in=length_in, tand=tand, eps_r=eps_r,
-                                  loss_db=loss_db, loss_at_ghz=at_ghz, causal=True),
+                                  loss_db=loss_db, loss_at_ghz=at_ghz, causal=True,
+                                  linear=False),
         g, f_ghz * 1e9)
     a_skin, b_diel = 0.35, 2.3 * np.sqrt(eps_r) * tand
     shape = lambda fg: (a_skin * np.sqrt(fg) + b_diel * fg) * length_in
@@ -101,8 +113,8 @@ def test_loss_across_the_band_is_the_skin_plus_dielectric_law(f_ghz):
 def test_a_fitted_trend_measures_its_own_polynomial(trend, f_ghz):
     """`trend=(a,b,c)` claims |S21|(f)[dB] = a*sqrt(f) + b*f + c. Measure it and check."""
     g = Grid(fs=256e9, baud=16e9, n=1 << 14)
-    meas, f = _tone_loss_db(lambda x: P.lossy_channel(x, grid=g, trend=trend, causal=True),
-                            g, f_ghz * 1e9)
+    meas, f = _tone_loss_db(lambda x: P.lossy_channel(x, grid=g, trend=trend, causal=True,
+                                                      linear=False), g, f_ghz * 1e9)
     a, b, c = trend
     want = -(a * np.sqrt(f / 1e9) + b * (f / 1e9) + c)
     assert abs(meas - want) < 1e-6, f"measured {meas:.6f} dB, trend says {want:.6f} dB"
@@ -115,11 +127,11 @@ def test_the_trend_stop_band_floor_is_exactly_the_stated_cap():
     trend, floor = (-8.0, -2.0, 0.0), 40.0
     unbounded = lambda fg: -(trend[0] * np.sqrt(fg) + trend[1] * fg)
     f_hit = next(fg for fg in np.arange(1.0, 128.0, 0.1) if unbounded(fg) > floor)
-    below, _ = _tone_loss_db(lambda x: P.lossy_channel(x, grid=g, trend=trend,
+    below, _ = _tone_loss_db(lambda x: P.lossy_channel(x, grid=g, trend=trend, linear=False,
                                                        trend_floor_db=floor), g, 2e9)
     assert abs(below - unbounded(2.0)) < 1e-6                 # under the cap: the fit itself
     for f_ghz in (f_hit + 5.0, f_hit + 20.0, 120.0):
-        deep, _ = _tone_loss_db(lambda x: P.lossy_channel(x, grid=g, trend=trend,
+        deep, _ = _tone_loss_db(lambda x: P.lossy_channel(x, grid=g, trend=trend, linear=False,
                                                           trend_floor_db=floor), g, f_ghz * 1e9)
         assert abs(deep - floor) < 1e-6, f"{f_ghz:.1f} GHz measured {deep:.4f} dB, cap {floor}"
 
@@ -128,7 +140,7 @@ def test_the_causal_channel_keeps_the_magnitude_and_moves_the_energy_after_t0():
     """Minimum phase is a PHASE claim: |H| must be untouched (Kramers-Kronig links them, it
     does not trade them), and the impulse response must sit after t=0."""
     g = Grid(fs=256e9, baud=16e9, n=1 << 14)
-    kw = dict(grid=g, loss_db=14.0, loss_at_ghz=8.0)
+    kw = dict(grid=g, loss_db=14.0, loss_at_ghz=8.0, linear=False)   # see `_transfer`
     for f_ghz in (1.0, 4.0, 8.0, 20.0):
         zp, _ = _tone_loss_db(lambda x: P.lossy_channel(x, causal=False, **kw), g, f_ghz * 1e9)
         cz, _ = _tone_loss_db(lambda x: P.lossy_channel(x, causal=True, **kw), g, f_ghz * 1e9)
@@ -239,7 +251,7 @@ def test_a_quarter_wave_notch_survives_into_the_waveform():
     lossless = dict(eps_r=eps_r, causal=False, loss_length_in=0.0)
     path = [{"disc": {"gamma": 0.5}}, {"line": {"length_in": L, **lossless}},
             {"disc": {"gamma": -0.5}}]
-    H, f = _transfer(lambda x: SP.cascade_channel(x, path, grid=g), g)
+    H, f = _transfer(lambda x: SP.cascade_channel(x, path, grid=g, linear=False), g)
     band = (f > 0.5 * quarter) & (f < 1.5 * quarter)
     f_notch = f[band][int(np.argmin(np.abs(H)[band]))]
     assert abs(f_notch - quarter) / quarter < 0.01, (
@@ -264,7 +276,7 @@ def test_resonant_gamma_is_the_second_order_bandpass_it_claims(f0_ghz, q):
     g = Grid(fs=200e9, n=1 << 14)
     td_ps, gamma0 = 40.0, 0.5
     H, f = _transfer(lambda x: P.resonant_reflection(x, grid=g, td_ps=td_ps, f0_ghz=f0_ghz,
-                                                     q=q, gamma0=gamma0), g)
+                                                     q=q, gamma0=gamma0, linear=False), g)
     meas = (H - 1.0) * np.exp(1j * 2 * np.pi * f * td_ps * 1e-12)
     s = 1j * (f / (f0_ghz * 1e9))
     want = gamma0 * (s / q) / (s ** 2 + s / q + 1.0)

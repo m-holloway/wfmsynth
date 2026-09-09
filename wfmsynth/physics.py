@@ -28,6 +28,198 @@ T = np.linspace(0.0, 1.0, N, endpoint=False)
 # millions of points, and nothing here should care how long the record is.
 
 
+# ------------------------------------------- transform length and LINEAR convolution
+# Every frequency-domain stage below applies its response as ``irfft(rfft(x) * H)``. That
+# product is a CIRCULAR convolution: the response to the record's last samples wraps around
+# the end and lands on its first ones. A physical channel has no such periodicity -- before a
+# record starts there is a quiescent line, not the record's own tail. The textbook treatment
+# is to zero-pad to at least the linear-convolution length ``len(x) + len(h) - 1``, transform
+# there, and truncate back to ``len(x)``. That is what `apply_transfer` does, and it is the
+# default for every stage that calls it.
+#
+# The corruption the padding removes is CONFINED to the RECORD'S EDGES -- the wrapped tail lands
+# on the first ``len(h) - 1`` samples, and for a response that is not causal the record's own
+# tail loses the pre-cursor it should have had. It is a large error in a short prefix, not a
+# small error everywhere. Measured on a 131,056-sample record, as the difference between the two
+# paths against the record's peak-to-peak: a causal analytic channel moves by 7.1 % and only in
+# its first 128 samples; a zero-phase one by 11.4 %, in its first 57 and last 238; a cascade read
+# at the driver plane by 2.9 % in its first 850, and at the load by 29.3 % in its first 1047.
+# Trim 2000 samples from each end of any of them and nothing moves by more than 0.02 % of span.
+#
+# The same padding also removes a performance cliff that has nothing to do with physics.
+# Pinning the transform to exactly the record length hands the FFT whatever factorisation that
+# length happens to have, and a record is very often a whole number of periods of some pattern:
+# if the period carries a large prime factor, so does the record, and numpy falls back to
+# Bluestein's algorithm (a chirp-z transform -- three transforms at a larger length, plus
+# several arrays that size). Since the record is being padded anyway, it costs nothing to pad
+# to the next 5-smooth length rather than to the exact minimum, and the cliff goes away.
+#
+# ``len(h)`` is not known in advance: a response is supplied as a function of frequency, not as
+# a tap list. So it is MEASURED rather than assumed -- `response_extent` builds H on a short
+# probe grid, transforms it to an impulse response, and takes the shortest arc of that circle
+# holding everything above `rel` of the peak (an arc, not a prefix, because a response is not
+# always causal). The probe doubles until the answer fits inside half of it, so the measurement
+# is not itself corrupted by the wrap it exists to avoid.
+
+# HOW FAR DOWN "OVER" IS, AND WHAT IT COSTS. A channel with a sqrt(f) term is not analytic at
+# DC, so its impulse response does not end -- it decays algebraically, and the guard is a choice
+# of where to stop paying for it, not a fact. Measured on a 131,056-sample record (16 samples/UI
+# x an 8191-UI pattern period) against a reference padded to 4x the record, as
+# max|y - y_ref| / peak-to-peak of the record:
+#
+#   threshold      lossy causal        lossy zero-phase     cascade, echoes     cascade, thru
+#   (below peak)   guard  nfft/n err   guard  nfft/n err    guard nfft/n err    guard  nfft/n err
+#   -80 dB  1e-4    2543   1.03  1.6e-5  3265  1.03  3.4e-5  1008  1.03 6.5e-6    9125  1.07 6.5e-5
+#   -100 dB 1e-5   17564   1.14  1.2e-5 15389  1.13  2.0e-5  1548  1.03 6.5e-6   43987  1.35 3.3e-5
+#   -120 dB 1e-6   66405   1.53  7.0e-6 73633  1.56  8.1e-6  4520  1.05 5.9e-6  217555  2.67 1.1e-5
+#
+# The CIRCULAR path those columns replace is wrong by 7.1 %, 11.4 %, 2.9 % and 29.3 % of the same
+# record's span, so every row above is three to four orders of magnitude better than the thing it
+# replaces. -100 dB is the default: it holds the residual below 3.3e-5 of span -- roughly a
+# fifteenth of one LSB of an 11-bit record -- for at most a 35 % longer transform. Callers who
+# want the algebraic tail chased further pass `guard=` (or a smaller `rel`) and pay for it.
+
+SMOOTH_RADIX = (2, 3, 5)       # "5-smooth"/regular lengths: the FFT's fast path
+RESPONSE_REL = 1e-5            # -100 dB below the peak: where an impulse response is "over"
+PROBE_N0 = 4096                # first probe length for the response-extent measurement
+PROBE_MAX = 1 << 21            # stop doubling the probe here, and warn
+
+
+def next_smooth_length(n, radix=SMOOTH_RADIX):
+    """The smallest integer >= `n` whose prime factors all lie in `radix`.
+
+    With the default ``(2, 3, 5)`` these are the 5-smooth (regular) numbers, which is the set
+    of lengths a mixed-radix FFT has a direct algorithm for. The overhead is small: no gap
+    between consecutive 5-smooth numbers above 1000 exceeds ~6 %."""
+    n = int(n)
+    if n <= 1:
+        return 1
+    radix = sorted({int(r) for r in radix})
+    if radix[0] < 2:
+        raise ValueError("radix entries must be >= 2")
+    best = None
+
+    def rec(i, val):
+        nonlocal best
+        if best is not None and val >= best:
+            return                                   # this branch can only grow
+        if i == len(radix) - 1:
+            r = radix[-1]
+            while val < n:
+                val *= r
+            if best is None or val < best:
+                best = val
+            return
+        while True:
+            rec(i + 1, val)
+            if val >= n:
+                return
+            val *= radix[i]
+
+    rec(0, 1)
+    return best
+
+
+def response_extent(make_H, rel=RESPONSE_REL, n0=PROBE_N0, probe_max=PROBE_MAX, warn=True):
+    """Measure the impulse-response length, in samples, of the response ``make_H(nfft)``.
+
+    `make_H` takes a transform length and returns that response on the ``rfft`` grid of that
+    length, at a FIXED sample interval -- so a longer probe is a finer frequency resolution
+    over the same physical band, not a different channel. The extent is the width of the
+    shortest arc of that impulse response holding every sample at or above `rel` times its
+    peak -- an arc rather than a prefix, because the response may reach back before t=0.
+
+    The measurement is itself a circular transform, so it doubles the probe until the answer
+    fits in the probe's first half; only then is the tail known not to have wrapped onto the
+    head. If `probe_max` is reached first the result is a LOWER BOUND and a warning says so --
+    `warn=False` for a caller that is imposing `probe_max` as a deliberate cap and has said so
+    in its own documentation (`apply_transfer` does exactly that)."""
+    n = int(n0)
+    while True:
+        h = np.fft.irfft(np.asarray(make_H(n), complex), n)
+        peak = float(np.abs(h).max())
+        if peak == 0.0:
+            return 1
+        extent = _circular_support(np.abs(h) >= rel * peak)
+        if extent <= n // 2:
+            return extent
+        if n >= probe_max:
+            if not warn:
+                return extent
+            warnings.warn(
+                f"response_extent: response still fills the probe at n={n} "
+                f"(support {extent}); padding with a lower bound, so a little wrap may remain",
+                RuntimeWarning, stacklevel=2)
+            return extent
+        n *= 2
+
+
+def _circular_support(loud):
+    """Width of the shortest arc of the circle that contains every True in `loud`.
+
+    An impulse response on an FFT grid lives on a circle, and it is not always one-sided: a
+    zero-phase response is symmetric about t=0 and a reflection can have a small pre-cursor,
+    both of which put samples at NEGATIVE time -- stored at the END of the array. Measuring
+    "the last index above threshold" would call those a late tail and report the whole record.
+    The support is instead the complement of the LONGEST quiet run, which is the same number
+    for a causal response and the right one for a two-sided one."""
+    loud = np.asarray(loud, bool)
+    n = len(loud)
+    idx = np.nonzero(loud)[0]
+    if idx.size == 0:
+        return 1
+    if idx.size == n:
+        return n
+    first = int(idx[0])
+    rolled = np.nonzero(np.roll(loud, -first))[0]     # index 0 is now loud, so no run wraps it
+    gaps = np.diff(rolled) - 1
+    quiet = max(int(gaps.max()) if gaps.size else 0, n - 1 - int(rolled[-1]))
+    return n - quiet
+
+
+def linear_fft_length(n_signal, n_response, radix=SMOOTH_RADIX):
+    """The transform length for a LINEAR convolution of `n_signal` samples with an
+    `n_response`-sample impulse response: the next `radix`-smooth length at or above
+    ``n_signal + n_response - 1``."""
+    return next_smooth_length(int(n_signal) + int(n_response) - 1, radix)
+
+
+def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
+                   rel=RESPONSE_REL, n0=PROBE_N0, probe_max=PROBE_MAX):
+    """Apply a frequency response to `x` as a LINEAR convolution, and return ``len(x)`` samples.
+
+    `make_H(nfft)` returns the response on the ``rfft`` grid of length `nfft` (same sample
+    interval whatever `nfft` is). The record is zero-padded to a 5-smooth length at or above
+    ``len(x) + len(h) - 1``, multiplied there, and truncated back -- so no part of the response
+    to the record's tail lands on its head.
+
+    `guard` fixes ``len(h)`` in samples instead of measuring it (`response_extent` does the
+    measuring). ``linear=False`` restores the pinned-length CIRCULAR convolution, which is what
+    this module did before and is kept so the two paths can be compared directly."""
+    x = np.asarray(x, float)
+    n = len(x)
+    if not linear:
+        return np.fft.irfft(np.fft.rfft(x) * make_H(n), n)
+    if guard is None:
+        # The guard is capped at TWICE the record. A response that long is one whose level at
+        # those lags is already at `rel`, so each further doubling of the transform buys less
+        # than the last; without the cap a pathological channel (a steep fit against a deep
+        # stop-band floor) pads an 8 k record to 1.1 M and spends 0.22 s doing it. Past the cap
+        # the remaining wrap is bounded by the response's own level there; `guard=` overrides.
+        cap = int(min(probe_max, max(4 * n, 4 * n0)))
+        guard = min(response_extent(make_H, rel=rel, n0=min(n0, max(8, n)), probe_max=cap,
+                                    warn=False), 2 * n)
+    nfft = linear_fft_length(n, max(1, int(guard)), radix)
+    xp = np.zeros(nfft)
+    xp[:n] = x
+    X = np.fft.rfft(xp)
+    del xp
+    X *= make_H(nfft)                       # in place: one fewer record-sized temporary
+    y = np.fft.irfft(X, nfft)
+    del X
+    return y[:n].copy()                     # a copy, not a view on the padded buffer
+
+
 # ---------------------------------------------------------------- channel physics
 def _min_phase_H(Hmag, n=None):
     """Causal minimum-phase complex response from a real magnitude |H| (rfft bins),
@@ -96,7 +288,7 @@ def insertion_loss_db(f_ghz, length_in=6.0, tand=0.02, eps_r=4.3, skin_k=0.0,
 
 def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
                   skin_k=0.0, causal=False, grid=None, loss_db=None, loss_at_ghz=None,
-                  trend=None, trend_floor_db=80.0):
+                  trend=None, trend_floor_db=80.0, linear=True, guard=None):
     """Apply a frequency-dependent SI channel: insertion loss
         IL(f)[dB] = (a_skin*sqrt(f_GHz) + b_diel*f_GHz) * length_in
     with dielectric-loss coefficient b_diel = 2.3*sqrt(eps_r)*tand (dB/in/GHz)
@@ -148,20 +340,43 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
     receiver on B12: uncapped, the eye reads 116.69 mV; capped at 80 dB, 128.08 mV, which is
     the number the smooth-fit arm of the measurement that motivated this reports (127.99). The
     cap is also physically honest -- no real channel's stop band is bottomless, and 80 dB is
-    already ~14 dB below the noise floor of an 11-bit stored record."""
+    already ~14 dB below the noise floor of an 11-bit stored record.
+
+    LINEAR, NOT CIRCULAR
+    --------------------
+    The response is applied as a LINEAR convolution: the record is zero-padded past the
+    channel's own impulse-response length, transformed there, and truncated back, so the
+    channel's answer to the record's last samples does not wrap onto its first. See
+    `apply_transfer` for the mechanics and `response_extent` for how the padding is sized.
+    `guard=` states that length in samples instead of measuring it; ``linear=False`` restores
+    the pinned-length circular convolution this function used to do, which is what a
+    transfer-function measurement wants (an input tone is an eigenvector of the circular
+    product and of nothing else) and is otherwise kept only for comparison.
+
+    Note what the linear form implies at the record's HEAD: with nothing before sample 0 the
+    line is quiescent, so a record that begins mid-pattern starts with a turn-on edge. That is
+    the honest answer for a link that starts transmitting at t=0, and the wrong one for a
+    record that is a WINDOW on a link that was already running -- for which the fix is a
+    lead-in the caller renders and discards, not a wrap. `BACKLOG.md` carries that item."""
     x = np.asarray(x, float)
-    n = len(x)
     if grid is not None:
         f_nyq_ghz = grid.f_nyquist / 1e9                  # real frequency axis from the grid
-    f_ghz = np.fft.rfftfreq(n) * 2.0 * f_nyq_ghz          # 0..f_nyq_ghz at Nyquist
-    il_db = insertion_loss_db(f_ghz, length_in=length_in, tand=tand, eps_r=eps_r,
-                              skin_k=skin_k, loss_db=loss_db, loss_at_ghz=loss_at_ghz,
-                              trend=trend, trend_floor_db=trend_floor_db)
-    Hmag = 10.0 ** (-il_db / 20.0)
-    if causal:
-        Hc = _min_phase_H(Hmag, n)                        # full-spectrum complex H
-        return np.fft.ifft(np.fft.fft(x) * Hc).real
-    return np.fft.irfft(np.fft.rfft(x) * Hmag, n=n)
+
+    def make_H(nfft):
+        # rfftfreq is NORMALIZED here, so the physical band is the same at any `nfft` -- a
+        # longer transform is finer resolution over that band, not a different channel.
+        f_ghz = np.fft.rfftfreq(nfft) * 2.0 * f_nyq_ghz   # 0..f_nyq_ghz at Nyquist
+        il_db = insertion_loss_db(f_ghz, length_in=length_in, tand=tand, eps_r=eps_r,
+                                  skin_k=skin_k, loss_db=loss_db, loss_at_ghz=loss_at_ghz,
+                                  trend=trend, trend_floor_db=trend_floor_db)
+        Hmag = 10.0 ** (-il_db / 20.0)
+        if not causal:
+            return Hmag
+        # the minimum-phase fold is itself a transform of length `nfft`, so padding makes the
+        # cepstrum resolve the response instead of time-aliasing it.
+        return _min_phase_H(Hmag, nfft)[:nfft // 2 + 1]
+
+    return apply_transfer(x, make_H, linear=linear, guard=guard)
 
 
 def crosstalk(x, aggressor, coupling=0.12, kind="fext", td_frac=0.05):
@@ -313,29 +528,37 @@ def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
 
 
 def resonant_reflection(x, grid=None, td_ps=None, td_frac=0.12, f0_ghz=None, f0_frac=0.25,
-                        q=10.0, gamma0=0.4):
+                        q=10.0, gamma0=0.4, linear=True, guard=None):
     """A single RESONANT discontinuity. `multi_reflection` uses a frequency-flat Γ; real
     discontinuities (a stub, an open) resonate — their reflection coefficient has
     frequency-dependent magnitude AND phase, peaking near a resonant frequency. Here Γ(f)
     is a 2nd-order band-pass shape peaking at f0 with quality `q`, delayed by td.
 
     Absolute units: pass grid=Grid(...) + td_ps + f0_ghz. Otherwise td_frac (of the record)
-    and f0_frac (of Nyquist) are used. `gamma0` scales the peak reflection."""
+    and f0_frac (of Nyquist) are used. `gamma0` scales the peak reflection.
+
+    Applied as a LINEAR convolution (`apply_transfer`): the echo of the record's tail does not
+    wrap onto its head. ``linear=False`` restores the pinned-length circular form."""
     x = np.asarray(x, float)
     n = len(x)
     if grid is not None:
         if td_ps is None or f0_ghz is None:
             raise ValueError("grid path needs td_ps and f0_ghz")
-        f = np.fft.rfftfreq(n, d=grid.dt)
-        f0 = f0_ghz * 1e9
-        phase = 2 * np.pi * f * (td_ps * 1e-12)
+        dt, f0 = grid.dt, f0_ghz * 1e9
+        td = td_ps * 1e-12
     else:
-        f = np.fft.rfftfreq(n, 1.0)                       # cycles/sample, 0..0.5
-        f0 = f0_frac * 0.5
-        phase = 2 * np.pi * f * (td_frac * n)
-    s = 1j * (f / f0)
-    G = gamma0 * (s / q) / (s ** 2 + s / q + 1.0)         # |Γ| peaks at f0, with phase
-    return np.fft.irfft(np.fft.rfft(x) * (1.0 + G * np.exp(-1j * phase)), n)
+        # the record-fraction convention: the delay is `td_frac` of THIS record, in samples.
+        # It is pinned to the signal's own length here so a longer transform does not move it.
+        dt, f0 = 1.0, f0_frac * 0.5
+        td = td_frac * n
+
+    def make_H(nfft):
+        f = np.fft.rfftfreq(nfft, d=dt)
+        sv = 1j * (f / f0)
+        G = gamma0 * (sv / q) / (sv ** 2 + sv / q + 1.0)  # |Γ| peaks at f0, with phase
+        return 1.0 + G * np.exp(-1j * (2 * np.pi * f * td))
+
+    return apply_transfer(x, make_H, linear=linear, guard=guard)
 
 
 def nominal_nonlinearity(x, compression=0.05, level_noise=0.0, rise_fall_ratio=1.0,

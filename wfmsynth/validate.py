@@ -39,9 +39,20 @@ def check(name, cond, detail=""):
 
 
 def spectral_centroid(x):
-    """mean frequency (normalized 0..0.5) — drops when HF is attenuated."""
-    mag = np.abs(np.fft.rfft(x - x.mean()))
-    f = np.fft.rfftfreq(N)
+    """mean frequency (normalized 0..0.5) — drops when HF is attenuated.
+
+    WINDOWED, and it has to be. An unwindowed rfft of a record whose first and last samples
+    differ sees a step in the periodic extension and spreads it across the whole band, which is
+    not the record's spectrum. Our records used to be exactly periodic — a frequency-domain
+    stage applied its response CIRCULARLY, so the wrap made them so — and a rectangular window
+    was harmless. With those stages applying a linear convolution (U-16) a record begins on a
+    quiescent line and ends without its own tail, and unwindowed this statistic then reports a
+    HARSHER channel as having MORE high frequency (0.0084 against 0.0040 for the raw record),
+    which is the edge step, not the channel. Under a Hann window the measurement is identical
+    on the circular and the linear path to every digit printed here."""
+    z = (x - x.mean()) * np.hanning(len(x))
+    mag = np.abs(np.fft.rfft(z))
+    f = np.fft.rfftfreq(len(x))
     return float((f * mag).sum() / (mag.sum() + 1e-12))
 
 
@@ -53,17 +64,26 @@ c_raw, c_mild, c_harsh = spectral_centroid(x), spectral_centroid(mild), spectral
 check("harsher channel lowers spectral centroid (more HF loss)",
       c_harsh < c_mild < c_raw,
       f"raw={c_raw:.4f} mild={c_mild:.4f} harsh={c_harsh:.4f}")
+# Read on the record's INTERIOR. A zero-phase channel is not causal, so the response to the
+# record's last samples reaches for samples that are not there: under a linear convolution the
+# tail rolls off, and its final sample is the steepest thing in the record. That is an edge of
+# the record, not an edge rate.
+_edge = slice(N // 16, -N // 16)
+_sl = lambda y: float(np.abs(np.gradient(y[_edge])).max())
 check("harsh channel lowers max edge slope",
-      np.abs(np.gradient(harsh)).max() < np.abs(np.gradient(mild)).max(),
-      f"mildslope={np.abs(np.gradient(mild)).max():.3f} harshslope={np.abs(np.gradient(harsh)).max():.3f}")
+      _sl(harsh) < _sl(mild), f"mildslope={_sl(mild):.3f} harshslope={_sl(harsh):.3f}")
 
 print("== causal channel: minimum-phase concentrates response AFTER t=0 (post-cursor ISI) ==")
-imp = np.zeros(N); imp[0] = 1.0                          # impulse at t=0 (circular)
+# The impulse goes in the MIDDLE of the record, so "before t=0" is a real place in the array
+# rather than the far end of a wrap. That is the only way to read pre-cursor ringing off a
+# LINEAR convolution: with the impulse at sample 0 a zero-phase channel's pre-ringing falls
+# before the record starts and is truncated away, so it would measure as zero and the check
+# would pass for the wrong reason.
+imp = np.zeros(N); imp[N // 2] = 1.0
 h_zero = P.lossy_channel(imp, length_in=12.0, tand=0.02, causal=False)
 h_caus = P.lossy_channel(imp, length_in=12.0, tand=0.02, causal=True)
-# for the causal response, energy in the "pre-cursor" wrap (last half) must be small
-pre_z = np.abs(h_zero[N // 2:]).sum(); post_z = np.abs(h_zero[:N // 2]).sum()
-pre_c = np.abs(h_caus[N // 2:]).sum(); post_c = np.abs(h_caus[:N // 2]).sum()
+pre_z = np.abs(h_zero[:N // 2]).sum(); post_z = np.abs(h_zero[N // 2:]).sum()
+pre_c = np.abs(h_caus[:N // 2]).sum(); post_c = np.abs(h_caus[N // 2:]).sum()
 check("zero-phase channel is symmetric (non-causal pre-ringing)",
       pre_z > 0.3 * post_z, f"pre/post={pre_z/(post_z+1e-9):.2f}")
 check("causal channel concentrates energy post-t0 (pre-cursor << post-cursor)",
@@ -1380,7 +1400,13 @@ def _il_db(f_ghz_want, **kw):
     """Measure a channel's insertion loss in dB at a stated frequency, by rendering an impulse
     through it and reading the rfft back. The ONLY loss instrument used below."""
     imp = np.zeros(_gt.n); imp[0] = 1.0
-    H = np.abs(np.fft.rfft(P.lossy_channel(imp, grid=_gt, **kw)))
+    # `linear=False` -- the pinned-length transform, where an impulse in gives H out exactly.
+    # The default path applies the SAME H as a linear convolution and truncates the response at
+    # the record, which loses its tail: this channel's impulse response is longer than 16384
+    # samples, and reading its rfft back would put the constructed 8.00 dB at 9.50. That is a
+    # property of the measurement, not of the channel; `tests/test_linear_convolution.py` is
+    # what checks the padded path, against `np.convolve` and a hand-written two-tap echo.
+    H = np.abs(np.fft.rfft(P.lossy_channel(imp, grid=_gt, linear=False, **kw)))
     f = np.fft.rfftfreq(_gt.n) * _gt.fs / 1e9
     k = int(np.argmin(np.abs(f - f_ghz_want)))
     return -20.0 * np.log10(H[k] + 1e-300)
@@ -1444,10 +1470,20 @@ check("lattice detector does NOT fire on the same signal unquantised (negative c
 
 
 def _stopband_psd_db_per_hz(y, fs_hz, lo_frac=0.80, hi_frac=0.98):
-    """One-sided PSD averaged over an empty band, in dB/Hz. The floor instrument."""
+    """One-sided PSD averaged over an empty band, in dB/Hz. The floor instrument.
+
+    HANN-WINDOWED, with the window's noise power divided back out, because the thing being
+    measured is 17 dB below what a rectangular window leaks. One step of the record's own
+    amplitude in the periodic extension puts A^2/(2*n*fs) of white leakage across the band:
+    for A ~ 0.9 at n = 65536 and fs = 256 GSa/s that is -166 dB/Hz, and an 11-bit lattice's
+    q^2/12/(fs/2) is -182. Our records used to have no such step -- a frequency-domain stage
+    wrapped, which made them exactly periodic -- and now they do (U-16), so this instrument
+    would read the edge instead of the floor. The window costs nothing here: it still recovers
+    both CONSTRUCTED quantisation floors above to 0.03 dB."""
     n = len(y)
-    Y = np.fft.rfft(y - y.mean())
-    psd = (np.abs(Y) ** 2) * (2.0 / (n * n)) * (n / fs_hz)          # one-sided, per Hz
+    w = np.hanning(n)
+    Y = np.fft.rfft((y - y.mean()) * w)
+    psd = (np.abs(Y) ** 2) * (2.0 / (n * n)) * (n / fs_hz) / float((w * w).mean())
     f = np.fft.rfftfreq(n, 1.0 / fs_hz)
     band = (f > lo_frac * fs_hz / 2) & (f < hi_frac * fs_hz / 2)
     return float(10.0 * np.log10(np.mean(psd[band]) + 1e-300))
@@ -1591,6 +1627,17 @@ _ys = (Signal(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
        .carrier(kind="nrz", pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
        .scope(bw_hz=110e9).digitize(noise_rms=_sig_c, bits=10, full_scale=_A)
        .scope(bw_hz=32e9, kind="brickwall")).waveform()
+# THE RECORD'S EDGES ARE TRIMMED, and the reason is a defect this file should name rather than
+# hide. The channel now applies a LINEAR convolution (U-16), so the record starts on a quiescent
+# line -- but `scope(kind="brickwall")` after it is still a CIRCULAR frequency-domain stage, and
+# it sees that turn-on as a step in the periodic extension and rings on it. The overshoot lands
+# on the record's last samples and is 6.8 % taller than anything the link itself does, which
+# steals vertical range: the ranged 11-bit code count drops from 1949 to 1830 and out of the
+# 1851-2035 band the three real captures set. Trimming 1024 samples off each end restores 1949
+# and +0.03 / +3.00 dB exactly. The real fix is a rendered-and-discarded lead-in in the composer
+# (see BACKLOG "the record's head after U-16"), which is not this file's to make.
+_EDGE = 1024
+_ys = _ys[_EDGE:-_EDGE]
 for _dth, _want, _lbl in ((0.0, 0.0, "a BARE store lands on q^2/12"),
                           (1 / np.sqrt(12), 3.01, "a store dithered by 1 LSB^2/12 lands on q^2/6"
                                                   " -- where the real captures are")):

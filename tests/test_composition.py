@@ -207,22 +207,32 @@ REFLECT = ("reflect", dict(td_ps=281.25, gamma_s=0.055, gamma_l=0.055, n_bounce=
 
 
 def test_lumped_loss_and_reflection_commute_which_is_why_they_carry_no_position():
-    """`lossy` and `reflect` are both LTI, so composing them either way is the same operator
-    (they differ only within a round trip of the record edges, where one wraps and the other
-    zero-pads). That is not a bug in either op -- it is the statement that the LUMPED pair
-    carries no information about WHERE the discontinuity is, which is what
+    """`lossy` and `reflect` are both LTI, so composing them either way is the same operator.
+    That is not a bug in either op -- it is the statement that the LUMPED pair carries no
+    information about WHERE the discontinuity is, which is what
     `test_a_cascade_knows_where_the_discontinuity_is...` then measures.
 
     Asserting the commutation is the half that keeps the next test honest: if this ever stops
     holding, the two ops have acquired positional physics and the reason for the cascade has
     changed.
+
+    IT NOW HOLDS OVER THE WHOLE RECORD, which it did not. `reflect` has always been a
+    zero-padded time-domain shift; `lossy` used to be a CIRCULAR convolution, so the two
+    disagreed at the record edges by the wrapped tail -- max 4.26e-2, whole-record relative rms
+    3.74e-3, against an interior of 2.48e-4. With `lossy` applying its response as a linear
+    convolution (U-16) both operators zero-pad and the disagreement collapses to 1.50e-7 / rel
+    rms 1.17e-7 across the whole record, ~30,000x smaller and no longer edge-shaped. The
+    residual is that each op truncates to the record: composing two truncations is not quite
+    truncating the composition, which is why the head is still slightly worse than the tail.
     """
     a, b = _chain(LOSSY, REFLECT), _chain(REFLECT, LOSSY)
     guard = 2 * round(281.25e-12 * GRID.fs) * 6          # the whole reflection train's span
     interior = slice(guard, -guard)
     assert _rel_rms(a[interior], b[interior]) < 5e-4, (
         f"interior rel rms {_rel_rms(a[interior], b[interior]):.3e}")
-    assert np.abs(a - b).max() > 10 * np.abs(a[interior] - b[interior]).max()   # edges differ
+    assert _rel_rms(a, b) < 1e-6, (
+        f"whole-record rel rms {_rel_rms(a, b):.3e}: the edges are wrapping again")
+    assert np.abs(a - b).max() < 1e-5, f"max |a-b| {np.abs(a - b).max():.3e}"
 
 
 def test_a_cascade_knows_where_the_discontinuity_is_and_the_lumped_pair_does_not():
