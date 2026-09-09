@@ -55,6 +55,33 @@ def _min_phase_H(Hmag, n=None):
     return np.exp(np.fft.fft(c * w))                      # complex min-phase, length n
 
 
+def insertion_loss_db(f_ghz, length_in=6.0, tand=0.02, eps_r=4.3, skin_k=0.0,
+                      loss_db=None, loss_at_ghz=None, trend=None, trend_floor_db=80.0):
+    """The insertion-loss MAGNITUDE, in dB, on an arbitrary frequency axis `f_ghz`.
+
+    This is the loss law of `lossy_channel` lifted out of it, so that a lumped channel and one
+    SECTION of a cascaded path (`wfmsynth.sparam.cascade`) compute their loss with the same
+    arithmetic instead of two implementations that agree until someone edits one of them. The
+    argument meanings, and why `trend` beats `loss_db`+`loss_at_ghz`, are documented on
+    `lossy_channel`; nothing here is new physics.
+
+    Returns a non-negative array (dB of loss, so `|H| = 10**(-il/20)`)."""
+    f_ghz = np.asarray(f_ghz, float)
+    if trend is not None:
+        a, b, c = (float(t) for t in trend)
+        il_db = -(a * np.sqrt(f_ghz) + b * f_ghz + c)
+        # passive (a channel cannot amplify) and bounded (see `lossy_channel`'s `trend_floor_db`)
+        return np.clip(il_db, 0.0, float(trend_floor_db))
+    b_diel = 2.3 * np.sqrt(eps_r) * tand
+    a_skin = skin_k if skin_k > 0 else 0.35               # ~dB/in/sqrt(GHz) typ
+    il_db = (a_skin * np.sqrt(f_ghz) + b_diel * f_ghz) * length_in
+    if loss_db is not None and loss_at_ghz is not None:
+        # keep the skin+dielectric SHAPE; scale so IL(loss_at_ghz) == loss_db exactly
+        shape_at = (a_skin * np.sqrt(loss_at_ghz) + b_diel * loss_at_ghz) * length_in
+        il_db = il_db * (loss_db / (shape_at + 1e-12))
+    return il_db
+
+
 def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
                   skin_k=0.0, causal=False, grid=None, loss_db=None, loss_at_ghz=None,
                   trend=None, trend_floor_db=80.0):
@@ -115,19 +142,9 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
     if grid is not None:
         f_nyq_ghz = grid.f_nyquist / 1e9                  # real frequency axis from the grid
     f_ghz = np.fft.rfftfreq(n) * 2.0 * f_nyq_ghz          # 0..f_nyq_ghz at Nyquist
-    if trend is not None:
-        a, b, c = (float(t) for t in trend)
-        il_db = -(a * np.sqrt(f_ghz) + b * f_ghz + c)
-        # passive (a channel cannot amplify) and bounded (see `trend_floor_db`)
-        il_db = np.clip(il_db, 0.0, float(trend_floor_db))
-    else:
-        b_diel = 2.3 * np.sqrt(eps_r) * tand
-        a_skin = skin_k if skin_k > 0 else 0.35           # ~dB/in/sqrt(GHz) typ
-        il_db = (a_skin * np.sqrt(f_ghz) + b_diel * f_ghz) * length_in
-        if loss_db is not None and loss_at_ghz is not None:
-            # keep the skin+dielectric SHAPE; scale so IL(loss_at_ghz) == loss_db exactly
-            shape_at = (a_skin * np.sqrt(loss_at_ghz) + b_diel * loss_at_ghz) * length_in
-            il_db = il_db * (loss_db / (shape_at + 1e-12))
+    il_db = insertion_loss_db(f_ghz, length_in=length_in, tand=tand, eps_r=eps_r,
+                              skin_k=skin_k, loss_db=loss_db, loss_at_ghz=loss_at_ghz,
+                              trend=trend, trend_floor_db=trend_floor_db)
     Hmag = 10.0 ** (-il_db / 20.0)
     if causal:
         Hc = _min_phase_H(Hmag, n)                        # full-spectrum complex H
