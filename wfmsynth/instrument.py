@@ -304,22 +304,24 @@ def store_record(x, bits=11, full_scale=None, headroom=1.05, clip=True,
                   it has no room for). Set False to keep an out-of-range sample on-lattice
                   but out-of-range, which is a rendering, not an acquisition.
       dither_lsb  rms, in LSB, of independent noise added immediately BEFORE the rounding.
-                  MEASURED, not assumed: the three real captures' stop bands sit at
-                  **+2.68 / +3.00 / +3.08 dB above** their own lattice's `q**2/12/(fs/2)`, flat
-                  from the instrument's DSP corner to Nyquist, on a PSD whose normalisation is
-                  Parseval-exact (integral = variance to 1.0000). A bare rounder cannot produce
-                  that: its error power IS `q**2/12`. A rounder whose input carries an extra
-                  `q**2/12` of independent noise -- one LSB of RPDF dither, or a fixed-point DSP
-                  stage rounding at the same word width just upstream -- gives `q**2/6`, i.e.
-                  **+3.01 dB**, in the same place, and matches all three within 0.33 dB.
-                  `1/sqrt(12) = 0.2887` is that value. Default 0.0 keeps a bare rounder.
+                  A real converter chain may carry dither -- a fixed-point DSP stage rounding at
+                  the same word width just upstream contributes one more `q**2/12` and lands the
+                  floor at `q**2/6`, i.e. +3.01 dB. `1/sqrt(12) = 0.2887` is that value.
+                  **Default 0.0, a bare rounder, and that is what matches real captures.**
 
-    NOTE ON THE +3 dB. An earlier unit reported these same three captures matching `q**2/12`
-    to "under 0.1 dB, 3 of 3". That measurement is off by a factor of two (a one-sided /
-    two-sided PSD convention); re-measured with an instrument checked by Parseval AND by
-    recovering the closed form on constructed uniform error of a known step to 0.02 dB, the
-    real floor is 2.0x the bare-rounding prediction. A model that reproduces `q**2/12` exactly
-    is therefore 3 dB SHORT of a real record, not on it.
+    THE +3 dB CLAIM THAT WAS HERE WAS WRONG, and how it went wrong is worth keeping. Two units
+    reported the three real captures' stop bands sitting +2.68 / +3.00 / +3.08 dB above their own
+    lattice's `q**2/12/(fs/2)`, and concluded a real store must be dithered. Re-measured with a
+    Hann window on the same band of the same records, all three land on `q**2/12` to
+    **0.00 / 0.00 / -0.03 dB**. The +3 dB was spectral leakage from an in-band signal ~80 dB above
+    the floor, through the rectangular window's sidelobes.
+
+    Both estimators that produced it were gated -- Parseval-exact, and recovering the closed form
+    on constructed uniform error to 0.02 dB -- and both gates were blind, because neither
+    constructed case had a signal in it to leak. The gate that catches it is a KNOWN floor
+    measured underneath a LARGE in-band signal; a windowed estimator recovers it to 0.02 dB and an
+    unwindowed one reads 3 dB high. An estimator is only as good as the hardest case it was gated
+    on.
 
     A NOTE ON THE "COMB RATIO", because it is the metric most likely to be aimed at here.
     `mean|diff(hist)|/mean(hist)` at 2000 bins is NOT a physics measurement: it is the beat

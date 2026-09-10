@@ -1620,9 +1620,10 @@ except ValueError:
     _guard = True
 check("converter_noise_rms REFUSES an ENOB a converter's depth cannot reach", _guard)
 
-# THE TERMINAL STORE'S FLOOR. Three real Keysight exports sit +2.68 / +3.00 / +3.08 dB ABOVE
-# their own lattice's q^2/12/(fs/2) -- flat from the DSP corner to Nyquist. A bare rounder cannot
-# do that; a rounder whose input carries one more LSB^2/12 of independent noise lands at q^2/6.
+# THE TERMINAL STORE'S FLOOR. Three real exports land on their own lattice's q^2/12/(fs/2) --
+# a BARE rounder, no dither. An earlier revision of this file asserted +2.68 / +3.00 / +3.08 dB
+# above it; that was spectral leakage from an in-band signal through a rectangular window, and a
+# Hann window on the same band of the same records reads q^2/12 to 0.00 / 0.00 / -0.03 dB.
 _ys = (Signal(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
        .carrier(kind="nrz", pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
        .scope(bw_hz=110e9).digitize(noise_rms=_sig_c, bits=10, full_scale=_A)
@@ -1638,13 +1639,13 @@ _ys = (Signal(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
 # (see BACKLOG "the record's head after U-16"), which is not this file's to make.
 _EDGE = 1024
 _ys = _ys[_EDGE:-_EDGE]
-for _dth, _want, _lbl in ((0.0, 0.0, "a BARE store lands on q^2/12"),
-                          (1 / np.sqrt(12), 3.01, "a store dithered by 1 LSB^2/12 lands on q^2/6"
-                                                  " -- where the real captures are")):
+for _dth, _want, _lbl in ((0.0, 0.0, "a BARE store lands on q^2/12 -- where the real captures are"),
+                          (1 / np.sqrt(12), 3.01, "and dither is a real mechanism, worth 3 dB when a"
+                                                  " chain actually has it")):
     _r = INST.store_record(_ys, bits=11, dither_lsb=_dth, rng=np.random.default_rng(5))
     _u = np.unique(_r); _qs = float(np.min(np.diff(_u)))
     _d = _stopband_psd_db_per_hz(_r, _FSAMP) - INST.quantisation_floor_db_per_hz(_qs, _FSAMP)
-    check(_lbl, abs(_d - _want) < 0.4, f"{_d:+.2f} dB above q^2/12/(fs/2) (real: +2.68/+3.00/+3.08)")
+    check(_lbl, abs(_d - _want) < 0.4, f"{_d:+.2f} dB above q^2/12/(fs/2) (real, windowed: +0.00/+0.00/-0.03)")
     check(f"  ... and it is still a lattice ({_dth:.4f} LSB of dither does not smear it)",
           _on_lattice(_r, _qs) > 0.9999 and 1851 <= len(_u) <= 2035,
           f"{len(_u)} distinct, on-lattice {_on_lattice(_r, _qs):.4f}")
