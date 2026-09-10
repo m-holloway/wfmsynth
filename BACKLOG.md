@@ -23,7 +23,9 @@ Priority order is: measured fidelity, ground-truth correctness, consolidation, t
 
 ### #52 The record's head after U-16 — a lead-in the composer renders and discards
 
-**Status:** Open. Owner: whoever owns `compose.py` / `instrument.py`; NOT a `physics.py` change.
+**Status:** DELIVERED in `compose.py` as `Signal(lead_in=...)` / `.with_lead_in()`, default OFF
+(off is byte-identical: 7 of 7 sampled chains, waveform and recipe hash). See the closing
+notes at the end of this item for what it did and did not fix.
 
 U-16 made every frequency-domain stage a LINEAR convolution: the response to the record's last
 samples no longer wraps onto its first. That is the correct convolution, and it has a
@@ -55,6 +57,52 @@ and `validate.py`'s edge trims and windows are no longer load-bearing.
 Sizing it needs no new estimate: `physics.response_extent` already measures exactly how many
 samples the lead-in has to be.
 
+**What was delivered, measured.** `Signal(lead_in=True)` renders `guard` extra samples of the same
+pattern before the record and after it, runs the chain on the longer record and delivers the middle;
+the guard is `physics.response_extent` on the chain's own combined impulse response (the LTI ops
+applied to a unit impulse), rounded UP to a whole UI so samples-per-UI (`n/n_ui`, exact rational)
+cannot move. On an exactly periodic constructed record whose steady-state answer is `np.convolve`'s
+and nothing of ours, a 5-UI lead-in recovers the WHOLE record to 4.4e-16, where the same record
+without one is wrong by 0.696 of a +/-1 signal in 106 samples split across its two ends. The sizer
+recovers a closed-form extent exactly (a lumped reflection's echo train: measured 433 = 2*td*k_max+1).
+On the shipped chain, with NOTHING TRIMMED: the ranged 11-bit code count is 1950 against 1840
+(1851-2035 is the band the three real captures set), the Hann-windowed stop band is -0.02 dB on its own
+lattice's `q**2/12` and +3.02 dB with dither, and the brickwall's 6.2 % edge overshoot is gone.
+`validate.py`'s 1024-sample edge trim is removed. The guard is also floored at the SOURCE's own
+settling (`32 * tr`), which no impulse probe can see because a carrier is not a filter of the record --
+without that floor `lead_in='auto'` is zero on a chain whose other ops are all memoryless, and the
+record's last edge stays missing.
+
+**What it costs.** The render is `(n + lead + tail)/n` longer, and the extent probe adds a few FFTs.
+Measured on a 1 M-sample record at 256 GSa/s: a grid-consistent carrier (16 samples/UI) pays 1.087x
+the samples and 0.28 s against 0.10 s; the shipped recipe's 32-UI carrier pays 1.312x and 0.18 s
+against 0.09 s -- more, because its rise time is 4,915 samples (`tr_frac` of a 32,768-sample UI) and
+the source's own settling floor is what sizes it, not the channel.
+
+**Three things it also fixed that the item did not name.** (a) The record's LAST samples were wrong
+before any channel at all: `physics._shape_edges` is `sosfiltfilt`, whose padding invents the samples
+past the end, so a constructed record's final falling edge was simply MISSING -- its last four samples
+read 1.0/1.0/1.0/1.0 where the running link's are 0.961/0.824/0.568/0.204 (0.796 of full scale, 68
+samples across the two ends). A lead-in delivers them to 0.0e+00. (b) The vertical: `store`/`digitize`
+with an automatic full scale must range to the DELIVERED WINDOW, not to the guard -- ranging to the
+guard gives 1850 codes against 1950, i.e. the same defect wearing a different hat. (c) #54's wrap is
+confined to the guard (see #54).
+
+**What it does NOT fix, stated so nobody re-discovers it.** The record's stop band read on an
+UNWINDOWED whole-record periodogram is still not `q**2/12`, and a lead-in makes it worse, not better:
+a window on a running link starts and ends mid-pattern, so its periodic extension has a step of order
+the signal amplitude (measured |x[-1]-x[0]| = 1.13 against 0.15 without a lead-in) and a rectangular
+window leaks it flat across the band (+7.4 dB at n = 1 M, +3.1 dB at n = 65 k, against +0.00 / +0.12 dB
+Hann-windowed). This is not a defect the lead-in should chase: REAL captures are windows on running
+links and are not periodic either, so a window is the correct instrument for any record's PSD. The
+only reason a rectangular window ever worked here is that the pre-U-16 circular convolution made
+records exactly periodic. `validate.py`'s floor and centroid instruments stay windowed for that
+reason, and that is no longer a workaround.
+
+**Not covered, deliberately.** A lead-in REFUSES `events`, `drift`, `acquire`, `digitize(n_out=)` and
+every record-fraction knob (`td_frac`, `fc_frac`, `f0_frac`, `dfe(phase=)`), because a lead-in moves
+the record's origin and lengthens the record those fractions are fractions of -- see #55.
+
 ### #53 `_op_lossy` and `_op_resonant` drop the `linear` and `guard` keywords
 
 **Status:** Open. Owner: whoever owns `compose.py`.
@@ -75,6 +123,62 @@ and `sparam.cascade_channel`. `instrument.scope`'s frequency-domain kinds (`bric
 Gaussian mask) are still `irfft(rfft(x) * H)` at the record length and still wrap. They are
 also the stages that now ring on the head that #52 describes. `physics.apply_transfer` is the
 shared implementation; pointing them at it is the whole change.
+
+**Measured against the lead-in (#52), because "a lead-in makes it harmless" is a claim, not a fact.**
+The shipped 1 M-sample chain through the same 32 GHz brickwall, applied circularly and applied as a
+linear convolution, differs by **362 LSB** of an 11-bit record INSIDE the delivered record with no
+lead-in. With an auto-sized lead-in (163,840 samples each end) the difference inside the delivered window is
+**0.005 LSB**, and 0.027 LSB at 16,384 samples of guard -- a fortieth of a code or less, so it cannot
+move a stored code except on a rounding tie. Guard sweep on a second 1 M record on the same grid (a 65,536-UI carrier, so the guard quantum
+is 16 samples rather than 32,768): no lead-in 220 LSB; guard 4,096 -> 0.086 LSB, 16,384 -> 0.027,
+45,840 -> 0.014, 131,072 -> 0.006. The wrap falls only as ~1/guard, because the stage's impulse
+response is a sinc -- 243,269 samples long at -100 dB, a quarter of the record -- which is also why
+containing it fully is not the bar; being under one code is.
+
+So: a lead-in CONFINES this defect to the samples that are thrown away; it does not fix the stage.
+The 362-LSB error is still there, in the guard, and every caller who uses `scope(kind="brickwall")`
+or the Gaussian mask WITHOUT a lead-in still receives it. This item stays open, and it is the single
+biggest remaining reason a record needs a lead-in at all.
+
+### #55 The ops a lead-in refuses: shift the record's origin instead of rejecting
+
+**Status:** Open. Owner: whoever owns `compose.py` (`_LEAD_REJECT` / `_LEAD_RELATIVE`).
+
+`Signal(lead_in=...)` refuses five things rather than silently changing what they mean, and each is a
+real gap:
+
+- `events` places a mechanism at an absolute position in the record; a lead-in moves the origin, so
+  every anchor (`sample`, `t`, `frac`, and the realized times `EventList` reports) needs shifting by
+  the lead-in and the mask needs slicing to the window. This is the one that matters most -- a fault
+  dataset cannot use a lead-in today.
+- `drift`'s profile is defined ACROSS the record ("0 to 1 over the capture"), so a guarded render is a
+  different drift; it needs to be told the window rather than the array.
+- `acquire` resamples onto a second rate, so the guard's sample count is not the record's; the window
+  has to be sliced on the OUTPUT rate.
+- `digitize(n_out=)` changes the record length for the same reason.
+- the record-fraction knobs (`reflect(td_frac=)`, `resonant_reflect(td_frac=/f0_frac=)`,
+  `ac_couple(fc_frac=)`, `dfe(phase=)`) are fractions of a record the lead-in lengthens. These have
+  absolute-unit equivalents already; the refusal names them.
+
+Also unfixed, and NOT refused because it only changes an amplitude scale: ops that scale themselves by
+`np.ptp(x)` of the whole array -- `physics.crosstalk`'s coupling and `impairments.drift(kind="dc")` --
+see the guarded render's span, not the window's, and the guarded span is larger by whatever the turn-on
+does. Only `store` and `digitize` are window-ranged today (`_LEAD_WINDOW_RANGED`). Threading the window
+into those primitives is a `physics`/`impairments` change, not a composer one.
+
+### #56 A dataset-wide lead-in policy, and whether it should be the default
+
+**Status:** Open. Owner: dataset/authoring layer.
+
+`lead_in` is off by default, because turning it on changes every rendered record and this kernel is
+pinned by SHA and diffed sample-for-sample downstream. But a record without one is a record that begins
+on a step no link makes, and #52's measurements say the cost of the truth is 6 % of the render for a
+typical chain (1.062x-1.125x on the shipped recipe). The decision that has to be made deliberately,
+with a version label: which datasets are rendered with a lead-in, and whether v5 flips the default. Note
+that a lead-in ADVANCES the pattern by `lead_ui` symbols (the history has to be genuine), so a v4 record
+rendered with one is not the same record -- unless the lead-in is a whole multiple of the pattern's
+period, in which case the symbols are identical and only the history is added. A dataset that wants both
+should size its lead-in up to the next multiple of its pattern period.
 
 ### #27 Unify `Signal.digitize()` with `instrument.digitize()`
 
@@ -228,8 +332,13 @@ Keep these statements synchronized with user-facing documentation:
   the impulse response's peak) and capped at twice the record, so a channel with an algebraic
   tail keeps a residual bounded at that level -- ~3e-5 of a record's span, about a fifteenth of
   one LSB at 11 bits. `guard=` overrides it.
-- A record now begins on a quiescent line, so it carries a turn-on edge at its head (#52), and
-  the frequency-domain stages outside `physics`/`sparam` still wrap (#54).
+- A record rendered WITHOUT `Signal(lead_in=...)` begins on a quiescent line, so it carries a
+  turn-on edge at its head, its last edge is missing (`sosfiltfilt` padding), and the
+  frequency-domain stages outside `physics`/`sparam` still wrap 362 LSB of an 11-bit record onto it
+  (#52 delivers the lead-in, #54 is the stage that still wraps). `lead_in` is off by default (#56).
+- A record's PSD must be measured through a window. A window on a running link is not periodic, so
+  a rectangular whole-record periodogram reads its own edge step, not the record's floor: +7.4 dB
+  above `q**2/12` at n = 1 M, against +0.01 dB Hann-windowed (#52).
 
 ## Delivered milestones
 

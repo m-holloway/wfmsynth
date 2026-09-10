@@ -17,6 +17,11 @@ waveform — and makes datasets reproducible, diffable and auditable.
     x, recipe = sig.waveform(), sig.recipe()        # samples + full provenance (JSON-able)
     assert (Signal.from_recipe(recipe).waveform() == x).all()   # exact round-trip
 
+`lead_in=True` renders a LEAD-IN and discards it, so the delivered record never contains the
+chain's turn-on: the samples before index 0 are a quiescent line, and a record that begins
+mid-pattern otherwise begins on a step no running link has. The guard length is measured from the
+chain's own impulse response. Default off, and off is bit-identical (see `Signal.with_lead_in`).
+
 Ops compose over the validated primitives (`physics`, `instrument`), so every knob is a
 real, documented parameter — nothing is hidden or randomized-but-unrecorded. Randomness
 (jitter, ADC noise) is driven by the Signal's single seed, threaded through the ops in
@@ -25,6 +30,7 @@ order, which is what makes the round-trip exact.
 from __future__ import annotations
 from dataclasses import asdict as _asdict, dataclass, field
 from typing import Optional
+import warnings
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -219,8 +225,16 @@ def _op_probe(x, p, streams, grid, idx):
                       rng=streams.role(f"probe/{idx}"))
 
 
-def _op_store(x, p, streams, grid, idx):
-    return INST.store_record(x, bits=p.get("bits", 11), full_scale=p.get("full_scale"),
+def _op_store(x, p, streams, grid, idx, win=None):
+    # `win`: range the EXPORT to the delivered window of a lead-in render, not to the guard.
+    # `instrument.store_record(full_scale=None)` uses `headroom * max|x|`; this restates that
+    # one expression on the window and passes it explicitly. win=None is bit-identical.
+    full_scale = p.get("full_scale")
+    if full_scale is None and win is not None:
+        peak = float(np.max(np.abs(x[win])))
+        if peak > 0.0:
+            full_scale = float(p.get("headroom", 1.05)) * peak
+    return INST.store_record(x, bits=p.get("bits", 11), full_scale=full_scale,
                              headroom=p.get("headroom", 1.05), clip=p.get("clip", True),
                              dither_lsb=p.get("dither_lsb", 0.0), rng=streams.role(f"store/{idx}"))
 
@@ -333,11 +347,16 @@ def _op_cascade(x, p, streams, grid, idx):
     return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"))
 
 
-def _op_digitize(x, p, streams, grid, idx):
+def _op_digitize(x, p, streams, grid, idx, win=None):
+    # `win` is the delivered window of a lead-in render (see `Signal.lead_in`): the vertical
+    # this stage sets must be ranged to the samples the CALLER receives, not to the discarded
+    # guard -- the guard is where the turn-on and the still-circular stages' ringing live, and
+    # letting it set the range would move the defect instead of removing it. win=None is the
+    # default path and every reference below is then the whole record, bit-identically.
     n_out = p.get("n_out")
     if n_out and n_out != len(x):
         x = resample_poly(x, n_out, len(x))
-    span = float(np.ptp(x)) + 1e-9
+    span = float(np.ptp(x if win is None else x[win])) + 1e-9
     if "noise_rms" in p:                      # absolute noise floor (signal-independent)
         x = x + streams.role(f"noise/{idx}").normal(0.0, p["noise_rms"], len(x))
     elif "snr_db" in p:                       # noise relative to the signal span
@@ -349,7 +368,8 @@ def _op_digitize(x, p, streams, grid, idx):
                          "effective-bits lattice), not both")
     if "bits" in p:                           # the CONVERTER's real lattice, on its full scale
         fs = p.get("full_scale")
-        fs = float(np.max(np.abs(x))) + 1e-12 if fs is None else float(fs)
+        fs = (float(np.max(np.abs(x if win is None else x[win]))) + 1e-12
+              if fs is None else float(fs))
         lsb = 2.0 * fs / 2 ** int(p["bits"])
         x = lsb * np.round(x / lsb)
     elif "enob" in p:
@@ -409,12 +429,288 @@ def canonicalize(ops):
     return sorted(ops, key=lambda o: KIND_RANK[op_kind(o["op"])])
 
 
+# --------------------------------------------------------------- the rendered-and-discarded lead-in
+# WHY A RECORD NEEDS A HEAD IT NEVER SHOWS YOU.
+#
+# Every frequency-domain stage applies a LINEAR convolution (U-16): the response to the record's
+# last samples no longer wraps onto its first. That is the correct convolution, and it means the
+# samples before index 0 are a QUIESCENT LINE -- so a record that begins mid-pattern begins with a
+# turn-on edge, and every stage with memory answers that edge instead of answering the link. A real
+# deep-memory capture is a window on a link that was already running and has no such edge.
+#
+# The fix is not to filter the edge, it is to not deliver it: render `lead` extra samples of the
+# same pattern BEFORE the record and `tail` extra AFTER it, run the whole chain on that longer
+# record, and hand back only the middle. Whatever the head does -- the turn-on, a zero-phase
+# stage's pre-cursor reaching for samples that are not there, a still-circular stage's wrap --
+# happens in samples the caller never receives.
+#
+# HOW LONG. Long enough that the chain's impulse response, started at the extended record's edge,
+# is over before the window begins. That length is MEASURED, not assumed: `physics.response_extent`
+# is handed the chain's own combined impulse response (the LTI ops applied to a unit impulse) and
+# returns the width of the shortest arc holding everything at or above `rel` (1e-5, -100 dB) of its
+# peak. The measurement is the same instrument the linear-convolution guard uses, on the same
+# threshold, so the lead-in and the guard agree by construction.
+#
+# WHERE IT LIVES. On the Signal, not on the Grid and not on the render call. `Grid` states what the
+# record IS (rate, length, full scale); the lead-in is a property of the CHAIN, because its length
+# is a property of the chain's memory -- two Signals on the same Grid need different lead-ins. And
+# it has to be in the recipe, or `from_recipe(r).waveform()` would not reproduce the samples.
+#
+# WHAT IT COSTS, AND WHAT IT CHANGES. The render is (n + lead + tail) / n longer. The delivered
+# record is a DIFFERENT record from the same recipe without a lead-in -- necessarily so, since the
+# head now has history -- in three ways worth stating plainly:
+#   * `carrier` extends the pattern FORWARD, so the window holds symbols[lead_ui : lead_ui+n_ui] of
+#     the same PRBS instead of symbols[0 : n_ui]. That is genuine history: those symbols really did
+#     precede these. When `lead_ui` is a whole multiple of the pattern's period the window's symbols
+#     are unchanged and ONLY the history is added -- which is what the constructed check below uses.
+#     (The alternative -- prepending the record's own tail as a cyclic prefix -- would keep the
+#     symbols identical for any length, but it would be inventing a history the link never had.)
+#   * `symbols` is an explicit, repeating stream, so its own tail IS its history: the lead-in is the
+#     cyclic prefix and the window holds exactly the stream the caller passed.
+#   * anything whose phase is measured from the record's start (SSC, periodic jitter, a supply tone)
+#     now starts mid-cycle, because the link was already running. Random draws are longer, so a
+#     jittered or noisy chain draws different numbers.
+# Default is OFF (`lead_in=None`) and the recipe carries no lead-in key, so every existing recipe
+# renders and hashes exactly as before. Turning it on by default is a versioned change.
+LEAD_IN_REL = P.RESPONSE_REL              # -100 dB below the peak: the same threshold as the guard
+
+# THE SOURCE HAS MEMORY TOO, and the extent probe cannot see it: a carrier is not a filter of the
+# record, it IS the record, so it contributes no impulse response to measure -- and its edge shaping
+# (`physics._shape_edges`, a 4th-order Bessel run forwards AND backwards by `sosfiltfilt`) invents
+# the samples past both ends. When a symbol transition falls at the record boundary the record's
+# final edge is simply MISSING. MEASURED, as max |record - the same record's steady state|, on a
+# constructed periodic pattern with a transition at the wrap, at tr_frac=0.15:
+#
+#   samples/UI   tr [samples]     no lead-in   1 UI      2 UI      3 UI      4 UI
+#        8         2.0 (clamped)     0.76      5.1e-4    8.5e-6    3.5e-8    4.0e-12
+#       16         2.4               0.80      3.4e-5    2.7e-9    2.7e-13   0
+#       64         9.6               0.95      8.8e-6    4.9e-10   6.0e-14   0
+#      256        38.4               0.99      8.0e-6    7.5e-10   8.2e-14   3.8e-14
+#
+# So the reach is ~13*tr for 1e-9 and ~27*tr to float64 exactness, i.e. it scales with the RISE
+# TIME, not with the UI -- a caller who asks for tr_frac=0.5 needs three times the guard a
+# tr_frac=0.15 caller does. `lead_in='auto'` therefore takes the LARGER of the measured chain extent
+# and `LEAD_SOURCE_TR * tr`, and this floor is why `lead_in='auto'` is never zero on a chain whose
+# ops are all memoryless.
+LEAD_SOURCE_TR = 32.0                     # multiples of the source's rise time (measured: 27 is exact)
+
+# The ops the extent probe runs: LTI, deterministic, length-preserving, real-valued. These are the
+# ops that HAVE an impulse response, and they are exactly the ops that ring on a turn-on.
+_LEAD_LTI = {"lossy", "reflect", "resonant_reflect", "ac_couple", "sparam", "cascade", "tx_ffe",
+             "de_emphasis", "ctle", "rx_ffe", "scope", "probe", "intra_pair_skew"}
+# Ops that are skipped by the probe rather than rejected: memoryless (or a fraction of a UI of
+# interpolation), so they do not lengthen the chain's memory, or nonlinear/stochastic, so they have
+# no impulse response to measure. An OPTICAL chain is skipped because the field is complex and this
+# probe is real -- size an optical chain's lead-in explicitly.
+_LEAD_SKIP = {"carrier", "symbols", "nonlinearity", "crosstalk", "crosstalk_matrix", "digitize",
+              "store", "timebase", "timing", "ssc", "supply_coupling", "dfe",
+              "optical", "dispersion", "eo", "fiber", "optical_mpi", "edfa", "photodetect", "tia"}
+# Ops a lead-in cannot host, each with the reason. Refusing is the honest answer: the alternative is
+# to silently move where these land, and a fault placed at sample 5000 of the record is not the same
+# fault at sample 5000 of the record-plus-guard.
+_LEAD_REJECT = {
+    "acquire": "it resamples the record onto a second rate, so the guard's sample count is not the "
+               "record's and the window cannot be sliced back out",
+    "events": "it places a localized mechanism at an absolute position in the record, and a lead-in "
+              "moves the record's origin (BACKLOG: shift event anchors by the lead-in)",
+    "drift": "its profile is defined ACROSS the record ('0 to 1 over the capture'), so a longer "
+             "render is a different drift",
+}
+# (op, key) pairs whose value is a FRACTION OF THE RECORD -- a fraction is not a physical quantity,
+# and a lead-in changes the record it is a fraction of. State these in absolute units instead.
+_LEAD_RELATIVE = {
+    ("reflect", "td_frac"): "state the round-trip delay as td_ps= or td_samples=",
+    ("resonant_reflect", "td_frac"): "state the delay as td_ps=",
+    ("resonant_reflect", "f0_frac"): "state the resonance as f0_ghz=",
+    ("ac_couple", "fc_frac"): "state the corner as fc_hz=",
+    ("digitize", "n_out"): "a resample changes the record length, so the window cannot be sliced "
+                           "back out; resample before the chain instead",
+    ("dfe", "phase"): "a fixed decision phase is an absolute sample offset into the record",
+}
+# The two ops that SET THE RECORD'S VERTICAL. They must range to the delivered window: the guard is
+# where the ringing lives, and a vertical ranged to the guard would spend the record's codes on
+# samples the caller never sees -- which is the very defect the lead-in exists to remove.
+_LEAD_WINDOW_RANGED = {"digitize", "store"}
+
+
+def _lead_source_geometry(ops, grid):
+    """``(n, n_ui, p, q)`` for the source op: the record's sample count, its symbol count, and
+    ``n/n_ui`` in lowest terms.
+
+    A lead-in must not change samples-per-UI -- that would re-time the whole record, not add
+    history to its head -- and the source's samples-per-UI is exactly ``n / n_ui``. So the lead-in
+    is quantized to a whole number of UI: with ``n/n_ui == p/q`` in lowest terms, adding ``k*q``
+    symbols and ``k*p`` samples leaves the ratio EXACTLY equal (``(n+kp)/(n_ui+kq) == p/q``), which
+    is rational arithmetic, not a tolerance. ``p`` is therefore the lead-in's quantum in samples."""
+    from fractions import Fraction
+    if not ops:
+        raise ValueError("a lead-in needs a source op (add a carrier first)")
+    src = ops[0]
+    if src["op"] not in ("carrier", "symbols"):
+        raise ValueError(f"a lead-in needs the first op to be the source; ops[0] is "
+                         f"{src['op']!r}. The lead-in is rendered BY the source.")
+    n = _grid_n(grid, src)
+    if n is None:
+        raise ValueError("a lead-in needs the record length: pass grid=Grid(n=...) or n= on the "
+                         "source op")
+    n_ui = (int(src.get("n_ui", 32)) if src["op"] == "carrier" else len(src["symbols"]))
+    if n_ui < 1:
+        raise ValueError("a lead-in needs at least one symbol in the source")
+    fr = Fraction(int(n), int(n_ui))
+    return int(n), int(n_ui), fr.numerator, fr.denominator
+
+
+def _lead_check_ops(ops):
+    """Refuse, with the reason, any op whose meaning a lead-in would silently change -- and refuse
+    an op that has not been CLASSIFIED at all. Every op in `_EXEC` is in exactly one of
+    `_LEAD_LTI` (it has an impulse response, so it sizes the guard), `_LEAD_SKIP` (memoryless,
+    nonlinear or stochastic, so it does not) or `_LEAD_REJECT` (a lead-in would change what it
+    means). A new op therefore has to be reasoned about before it can be rendered with a lead-in,
+    rather than defaulting into the safe-looking pile."""
+    for o in ops:
+        if o["op"] not in _LEAD_LTI and o["op"] not in _LEAD_SKIP and o["op"] not in _LEAD_REJECT:
+            raise ValueError(f"lead_in: the {o['op']!r} op has no lead-in classification -- add it "
+                             f"to _LEAD_LTI (it has an impulse response), _LEAD_SKIP (it has none) "
+                             f"or _LEAD_REJECT (a lead-in changes what it means) in compose.py")
+        why = _LEAD_REJECT.get(o["op"])
+        if why is not None:
+            raise ValueError(f"lead_in: the {o['op']!r} op cannot be rendered with a lead-in "
+                             f"because {why}")
+        for key, fix in _LEAD_RELATIVE.items():
+            if o["op"] == key[0] and o.get(key[1]) is not None:
+                raise ValueError(f"lead_in: {o['op']}({key[1]}=...) is relative to the record, "
+                                 f"which a lead-in lengthens -- {fix}")
+        if o["op"] == "crosstalk" and o.get("kind", "fext") == "next":
+            raise ValueError("lead_in: crosstalk(kind='next') delays the aggressor by td_frac, a "
+                             "fraction of the record, which a lead-in lengthens")
+
+
+def _lead_extent(ops, grid, seed, n, rel=LEAD_IN_REL):
+    """MEASURE how many samples of history this chain needs, in samples.
+
+    The chain's LTI ops are applied to a unit impulse at index 0 on a probe grid; the transform of
+    that is the chain's combined response on the probe's rfft grid, which is exactly what
+    `physics.response_extent` consumes -- so the doubling-until-it-fits logic, the shortest-arc
+    support rule and the -100 dB threshold are the audited ones, not a second estimator.
+
+    The impulse goes at index 0 deliberately. Placed anywhere else, a causal response fills the
+    buffer from the impulse to the end, the longest quiet run is the part BEFORE it, and
+    `response_extent`'s "does it fit in half the probe" test passes at every probe length while
+    reporting half of it -- measured 2048 / 4096 / 8192 / 21025 for one lossy channel at probe
+    lengths 4096 / 8192 / 16384 / 65536, against 21025 from every probe length with the impulse at 0."""
+    import dataclasses
+    todo = [o for o in ops if o["op"] in _LEAD_LTI]
+    if not todo:
+        return 0
+    st = Streams(int(seed))
+
+    def make_H(nfft):
+        nfft = int(nfft)
+        d = np.zeros(nfft); d[0] = 1.0
+        g = None if grid is None else dataclasses.replace(grid, n=nfft, segments=None)
+        for i, o in enumerate(todo):
+            if o["op"] == "probe" and o.get("noise_rms"):
+                o = {k: v for k, v in o.items() if k != "noise_rms"}   # noise is not a response
+            d = _EXEC[o["op"]](d, o, st, g, i)
+        return np.fft.rfft(d)
+
+    cap = int(min(P.PROBE_MAX, max(4 * n, 4 * P.PROBE_N0)))
+    return int(P.response_extent(make_H, rel=rel, n0=min(P.PROBE_N0, max(8, n)),
+                                 probe_max=cap, warn=False))
+
+
+def _lead_source_reach(src, n, n_ui):
+    """The source's OWN settling reach in samples: `LEAD_SOURCE_TR` times its rise time, with the
+    same clamp `physics.resolve_rise_time` applies (warn=False -- the render itself warns about a
+    clamped rise time; the sizer must not warn a second time for the same recipe)."""
+    tr, _ = P.resolve_rise_time(float(src.get("tr_frac", 0.15)), n / n_ui, warn=False)
+    return int(np.ceil(LEAD_SOURCE_TR * float(tr)))
+
+
+def _lead_quantum(req, p_quantum):
+    """Round a requested guard UP to a whole number of UI (a multiple of `p_quantum` samples)."""
+    req = int(max(0, req))
+    if req == 0:
+        return 0, 0
+    k = -(-req // int(p_quantum))                       # ceil
+    return k * int(p_quantum), k
+
+
+def _lead_size(spec, ops, grid, seed, n, p_quantum, measured=None, floor=0):
+    """Resolve a lead-in spec to ``(samples, k_ui_multiples, measured_or_None)``.
+
+    ``None``/``False``/``0`` -> off. ``True``/``'auto'`` -> the measured chain extent, CAPPED at
+    one record: a response still above 1e-5 of its peak a whole record later is one whose level
+    THERE bounds what the cap leaves behind, and past that cap each further doubling of the render
+    buys less than the last. An explicit integer is honoured as given (the caller has said so),
+    rounded up to a whole UI."""
+    if spec is None or spec is False or spec == 0:
+        return 0, 0, measured
+    if spec is True or spec == "auto":
+        first = measured is None
+        if first:
+            measured = _lead_extent(ops, grid, seed, n)
+        req = max(measured, int(floor))          # the source's own settling, which no probe sees
+        if req > n:
+            if not first:
+                return _lead_quantum(n, p_quantum) + (measured,)   # already warned for the lead-in
+            warnings.warn(
+                f"lead_in='auto': the chain's measured impulse-response extent is {req} samples, "
+                f"longer than the {n}-sample record; capping the lead-in at one record. The "
+                f"response is at or below {LEAD_IN_REL:g} of its peak past that point, which "
+                f"bounds the residual; pass lead_in={req} to render it in full.",
+                RuntimeWarning, stacklevel=3)
+            req = n
+    else:
+        req = int(spec)
+        if req < 0:
+            raise ValueError("lead_in must be a non-negative number of samples, True/'auto', or None")
+    L, k = _lead_quantum(req, p_quantum)
+    return L, k, measured
+
+
+@dataclass
+class LeadPlan:
+    """What a lead-in render will do, resolved and reportable BEFORE it is rendered: the guard
+    lengths in samples and UI, the measured extent they came from, the extended geometry, and the
+    op list and grid the extended render uses. `Signal.lead_plan()` returns it."""
+    lead: int
+    tail: int
+    lead_ui: int
+    tail_ui: int
+    measured: object
+    floor: int
+    n: int
+    n_ui: int
+    n_ext: int
+    quantum: int
+    ops: list
+    grid: object
+
+    @property
+    def window(self):
+        return slice(self.lead, self.lead + self.n)
+
+    def summary(self):
+        return (f"lead {self.lead} + record {self.n} + tail {self.tail} = {self.n_ext} samples "
+                f"({self.n_ext / self.n:.3f}x the render), guard measured "
+                f"{'n/a' if self.measured is None else self.measured} samples against the "
+                f"source's own {self.floor}-sample settling, quantised to {self.quantum} (1 UI)")
+
+
 # --------------------------------------------------------------- the Signal builder
 @dataclass
 class Signal:
     seed: int = 0
     grid: Optional[Grid] = None
     ops: list = field(default_factory=list)
+    # A RENDERED-AND-DISCARDED LEAD-IN (see the block above `KIND_RANK`). None = off, and off is
+    # byte-identical to every recipe ever rendered. True/"auto" = measure the chain's own
+    # impulse-response extent. An integer = that many samples. `lead_out` mirrors `lead_in` unless
+    # it is given: a zero-phase stage reaches FORWARD as well as back, and the frequency-domain
+    # stages that are still circular wrap the record's tail onto its head, so both ends need guard.
+    lead_in: object = None
+    lead_out: object = None
 
     def _add(self, op, **params):
         self.ops.append({"op": op, **params}); return self
@@ -706,18 +1002,118 @@ class Signal:
                     params = dict(params, n_ui=len(car["symbols"]))
         return self._add("events", kind=kind, on=on, **params)
 
-    def _run(self, streams=None, collect_events=False):
+    def with_lead_in(self, lead_in=True, lead_out=None):
+        """Render a LEAD-IN and discard it, so the record the caller receives never contains the
+        chain's turn-on. Chainable; returns self.
+
+        A linear convolution (U-16) means the samples before index 0 are a quiescent line, so a
+        record that begins mid-pattern begins with a step no running link has, and every stage with
+        memory answers that step. This renders `lead_in` extra samples of the same pattern before
+        the record and `lead_out` after it, runs the whole chain on the longer record, and hands
+        back only the middle -- so the turn-on, a zero-phase stage's missing pre-cursor and any
+        still-circular stage's wrap all land in samples that are thrown away.
+
+          lead_in=True / "auto"  MEASURE it: the larger of `physics.response_extent` on the
+                                 chain's own combined impulse response (-100 dB below its peak) and
+                                 the SOURCE's own settling, `LEAD_SOURCE_TR * tr`, which no impulse
+                                 probe can see because a carrier is not a filter of the record.
+                                 Capped at one record, with a warning naming the measurement when
+                                 the cap bites.
+          lead_in=<int>          that many samples, honoured as given.
+          lead_in=None / 0       off, and off is bit-identical to no lead-in at all.
+          lead_out=None          the same length as the lead-in. 0 for none.
+
+        Either guard is rounded UP to a whole number of UI, because samples-per-UI is ``n/n_ui``
+        and a lead-in that changed it would re-time the record instead of adding history to its
+        head. `lead_plan()` reports the resolved lengths and the measurement they came from without
+        rendering. Ops whose knobs are a fraction of the record, or that change the record's
+        length, or that place something at an absolute position in it, are REFUSED with the reason
+        rather than silently moved -- see `_LEAD_REJECT` / `_LEAD_RELATIVE`.
+
+        THE RECORD IS A DIFFERENT RECORD, and that is the point: its head now has history. With a
+        `carrier` the pattern is extended FORWARD, so the window holds symbols[lead_ui:] of the
+        same PRBS -- genuine history, and identical symbols when `lead_ui` is a multiple of the
+        pattern period. With `symbols` (an explicit repeating stream) the lead-in is that stream's
+        own cyclic prefix, so the window holds exactly the stream that was passed."""
+        self.lead_in = lead_in
+        self.lead_out = lead_out
+        return self
+
+    def lead_plan(self):
+        """The resolved `LeadPlan` for this Signal's lead-in, or None when it is off. Reports the
+        guard lengths, the measured extent behind them and the extended geometry WITHOUT rendering,
+        so a caller can see (and a dataset can record) what a render is about to pay for."""
+        if not self.lead_in and not self.lead_out:
+            return None
+        n, n_ui, quantum, q_ui = _lead_source_geometry(self.ops, self.grid)
+        if self.grid is not None and getattr(self.grid, "segments", None):
+            raise ValueError("lead_in: a segmented grid's anchors are resolved from the record's "
+                             "start, which a lead-in moves; not supported")
+        _lead_check_ops(self.ops)
+        floor = _lead_source_reach(self.ops[0], n, n_ui)
+        L, kl, meas = _lead_size(self.lead_in, self.ops, self.grid, self.seed, n, quantum,
+                                 floor=floor)
+        spec_out = self.lead_in if self.lead_out is None else self.lead_out
+        T, kt, meas = _lead_size(spec_out, self.ops, self.grid, self.seed, n, quantum,
+                                 measured=meas, floor=floor)
+        if L == 0 and T == 0:
+            return None
+        lead_ui, tail_ui = kl * q_ui, kt * q_ui
+        n_ext = L + n + T
+        src = dict(self.ops[0])
+        src["n"] = n_ext
+        if src["op"] == "carrier":
+            # forward extension: the same PRBS, `lead_ui` symbols earlier in the record
+            src["n_ui"] = n_ui + lead_ui + tail_ui
+        else:
+            # an explicit stream repeats, so its own tail is its history: a cyclic prefix/suffix
+            sym = np.asarray(src["symbols"], float)
+            j = np.arange(-lead_ui, n_ui + tail_ui)
+            src["symbols"] = list(sym[j % n_ui])
+        ops = [src] + [dict(o) for o in self.ops[1:]]
+        import dataclasses
+        grid = None if self.grid is None else dataclasses.replace(self.grid, n=n_ext)
+        return LeadPlan(lead=L, tail=T, lead_ui=lead_ui, tail_ui=tail_ui, measured=meas,
+                        floor=floor, n=n, n_ui=n_ui, n_ext=n_ext, quantum=quantum, ops=ops,
+                        grid=grid)
+
+    def rendered_lead(self, streams=None):
+        """``(x_extended, plan)`` — the WHOLE lead-in render, guard included, and the plan that
+        sized it; ``(waveform(), None)`` when no lead-in is set.
+
+        This is the audit hook: `waveform()` hands back ``x_extended[plan.window]`` and throws the
+        rest away, and the rest is where the turn-on, a zero-phase stage's missing pre-cursor and
+        any still-circular stage's wrap live. Look at it rather than taking the mechanism's word
+        for it -- and range nothing to it."""
+        plan = self.lead_plan()
+        if plan is None:
+            return self._run(streams), None
+        return self._run(streams, _extended=True, _plan=plan), plan
+
+    def _run(self, streams=None, collect_events=False, _extended=False, _plan=None):
         from .events import EventList
         st = streams if streams is not None else Streams(self.seed)
+        plan = _plan if _plan is not None else self.lead_plan()
+        ops = self.ops if plan is None else plan.ops
+        grid = self.grid if plan is None else plan.grid
+        win = None if plan is None else plan.window
         x = None
         sink = [] if collect_events else None
-        for i, op in enumerate(self.ops):
+        for i, op in enumerate(ops):
             if collect_events and op["op"] == "events":
-                x = _op_events(x, op, st, self.grid, i, sink=sink)
+                x = _op_events(x, op, st, grid, i, sink=sink)
+            elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
+                x = _EXEC[op["op"]](x, op, st, grid, i, win=win)   # range the vertical to the window
             else:
-                x = _EXEC[op["op"]](x, op, st, self.grid, i)
+                x = _EXEC[op["op"]](x, op, st, grid, i)
         if x is None:
             raise ValueError("empty Signal: add a carrier first")
+        if win is not None:
+            if len(x) != plan.n_ext:
+                raise ValueError(f"lead_in: the chain returned {len(x)} samples for a "
+                                 f"{plan.n_ext}-sample render, so the window cannot be sliced out")
+            if not _extended:
+                x = x[win].copy()
         if collect_events:
             return x, EventList(sink, n=len(x), grid=self.grid)
         return x
@@ -790,6 +1186,12 @@ class Signal:
         from wfmsynth import __version__
         r = {"wfmsynth_version": __version__, "seed": int(self.seed),
              "ops": [dict(o) for o in self.ops]}
+        # only when a lead-in is actually set, so an existing recipe's JSON -- and therefore its
+        # sha256 content address -- is byte-identical to what it was before the lead-in existed
+        if self.lead_in:
+            r["lead_in"] = self.lead_in
+        if self.lead_out is not None:
+            r["lead_out"] = self.lead_out
         if self.grid is not None:
             g = self.grid
             r["grid"] = {"fs": g.fs, "baud": g.baud, "n": g.n, "v_full": g.v_full}
@@ -803,7 +1205,7 @@ class Signal:
         """A new Signal with the ops homed into canonical stage-kind order (a stable sort). The
         default `waveform()` runs in insertion order and is unchanged; this is the opt-in Fabric
         view where cross-kind authoring order commutes by construction."""
-        s = Signal(seed=self.seed, grid=self.grid)
+        s = Signal(seed=self.seed, grid=self.grid, lead_in=self.lead_in, lead_out=self.lead_out)
         s.ops = canonicalize(self.ops)
         return s
 
@@ -824,7 +1226,7 @@ class Signal:
     def from_recipe(cls, r):
         """Reconstruct a Signal from a recipe; `.waveform()` reproduces bit-for-bit."""
         grid = Grid(**r["grid"]) if r.get("grid") else None
-        s = cls(seed=r["seed"], grid=grid)
+        s = cls(seed=r["seed"], grid=grid, lead_in=r.get("lead_in"), lead_out=r.get("lead_out"))
         s.ops = [dict(o) for o in r["ops"]]
         return s
 

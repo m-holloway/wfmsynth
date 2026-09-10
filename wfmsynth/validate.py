@@ -1620,25 +1620,262 @@ except ValueError:
     _guard = True
 check("converter_noise_rms REFUSES an ENOB a converter's depth cannot reach", _guard)
 
+from wfmsynth.compose import _lead_extent
+print()
+print("== the record's head: a rendered-and-discarded lead-in (U-16's turn-on, removed) ==")
+# A linear convolution (U-16) means the samples before index 0 are a quiescent line, so a record
+# that begins mid-pattern begins with a TURN-ON EDGE no running link has, every stage with memory
+# answers that edge, and a still-circular stage rings on it. `Signal(lead_in=...)` renders extra
+# samples of the same pattern before AND after the record, runs the chain on that longer record and
+# delivers only the middle. These checks are the ground truth for that mechanism, and they are built
+# from an EXACTLY PERIODIC record, because a periodic record is the one case where the answer for a
+# link that has been running forever can be written down: it is the steady-state response, and
+# `np.convolve` on the tiled source gives it with nothing of ours in the computation.
+_LP, _LSPB = 508, 16                                   # 508 symbols x 16 samples/UI, exactly periodic
+_LN = _LP * _LSPB
+_LSYM = list(np.where(np.random.default_rng(11).random(_LP) > 0.5, 1.0, -1.0))
+_LG = Grid(fs=64e9, baud=64e9 / _LSPB, n=_LN)
+_LTAPS, _LPRE = [-0.10, 1.00, -0.25, 0.05], 1          # a hand-written FIR: 4 taps, 1 pre-cursor
+
+
+def _lsrc(n_rec, syms, **kw):
+    return Signal(seed=3, grid=Grid(fs=_LG.fs, baud=_LG.baud, n=n_rec), **kw).symbols(syms)
+
+
+# One period of the SHAPED source, taken from the interior of a three-period render so no filtfilt
+# edge padding is inside it. Tiling this is the source a link that never started would carry.
+_lper = _lsrc(3 * _LN, _LSYM * 3).waveform()[_LN:2 * _LN]
+_lh = np.zeros((len(_LTAPS) - 1) * _LSPB + 1)
+_lh[np.arange(len(_LTAPS)) * _LSPB] = _LTAPS
+_lconv = np.convolve(np.tile(_lper, 7), _lh)           # numpy's convolution, not ours
+_LTRUTH = _lconv[3 * _LN + _LPRE * _LSPB:4 * _LN + _LPRE * _LSPB]
+check("the CONSTRUCTED steady state is stationary (so it is the answer for a link that never "
+      "started)",
+      np.abs(_LTRUTH - _lconv[4 * _LN + _LPRE * _LSPB:5 * _LN + _LPRE * _LSPB]).max() < 1e-15,
+      f"{np.abs(_LTRUTH - _lconv[4 * _LN + _LPRE * _LSPB:5 * _LN + _LPRE * _LSPB]).max():.2e}")
+
+
+def _lffe(**kw):
+    s = _lsrc(_LN, _LSYM, **kw)
+    s.tx_ffe(_LTAPS, pre=_LPRE)
+    return s.waveform()
+
+
+def _lerr(y, tol=1e-9):
+    """(max |error| against the constructed steady state, where the wrong samples are)."""
+    e = np.abs(np.asarray(y, float) - _LTRUTH)
+    bad = np.nonzero(e > tol)[0]
+    head = int(np.count_nonzero(bad < _LN // 2))
+    where = ("none" if bad.size == 0 else
+             f"{bad.size} ({head} in the head, {bad.size - head} in the tail; "
+             f"first {bad.min()}, last {_LN - 1 - bad.max()} from the end)")
+    return float(e.max()), where
+
+
+_e5, _w5 = _lerr(_lffe(lead_in=5 * _LSPB))
+check("a 5-UI lead-in RECOVERS np.convolve's steady-state answer for the whole record",
+      _e5 < 1e-12, f"max |err| {_e5:.2e}, corrupted: {_w5}")
+_e0, _w0 = _lerr(_lffe())
+check("  ... and WITHOUT it the record is wrong, at both ends (negative control)",
+      _e0 > 0.5, f"max |err| {_e0:.3f} of a +/-1 signal, corrupted: {_w0}")
+# GATE OBSERVED FAILING: a guard one UI short of the FIR's own post-cursor reach.
+_e1, _w1 = _lerr(_lffe(lead_in=1 * _LSPB))
+check("  ... a guard 1 UI SHORT of the FIR's 2-UI post-cursor reach is still wrong (the length is "
+      "load-bearing, not decorative)", 1e-3 < _e1 < 0.5, f"max |err| {_e1:.3f}, corrupted: {_w1}")
+_e2, _w2 = _lerr(_lffe(lead_in=2 * _LSPB))
+check("  ... and 2 UI, its exact reach, leaves only the tail (which is what lead_out is for)",
+      _e2 < 1e-5, f"max |err| {_e2:.2e}, corrupted: {_w2}")
+_et, _wt = _lerr(_lffe(lead_in=5 * _LSPB, lead_out=0))
+check("the LEAD-OUT is load-bearing too: lead_out=0 leaves the record's TAIL wrong, because a "
+      "pre-cursor tap (and zero-phase edge shaping) reach FORWARD into samples that are not there",
+      _et > 0.5, f"max |err| {_et:.3f}, corrupted: {_wt}")
+
+# THE SOURCE'S OWN EDGES, before any channel at all. `physics._shape_edges` is `sosfiltfilt`, whose
+# padding invents the samples beyond the record: the record's last edge is simply MISSING.
+_s0, _s1 = _lsrc(_LN, _LSYM).waveform(), _lsrc(_LN, _LSYM, lead_in=5 * _LSPB).waveform()
+_d0, _d1 = np.abs(_s0 - _lper), np.abs(_s1 - _lper)
+check("the CARRIER ITSELF is wrong at both edges without a lead-in -- its last edge is missing, "
+      "not slow", _d0.max() > 0.5 and _d1.max() < 1e-12,
+      f"no lead-in: max {_d0.max():.3f} in {np.count_nonzero(_d0 > 1e-9)} samples; last four "
+      f"samples read {np.round(_s0[-4:], 3).tolist()} where the running link's are "
+      f"{np.round(_lper[-4:], 3).tolist()}. With a lead-in: {_d1.max():.1e}")
+
+# THE SIZER, against a CLOSED FORM. A lumped reflection's impulse response is a delta plus echoes at
+# 2*td*k with weight gamma_l*(gamma_s*gamma_l)**k, so the extent at the -100 dB threshold is exactly
+# 2*td*k_max+1 for the largest k whose weight is still >= 1e-5. Nothing is approximated here.
+_ltd, _lgs, _lgl, _lnb = 72, 0.25, 0.2, 4
+_lops = [dict(op="symbols", symbols=_LSYM),
+         dict(op="reflect", td_samples=_ltd, gamma_s=_lgs, gamma_l=_lgl, n_bounce=_lnb)]
+_lkmax = max(k for k in range(_lnb + 1) if _lgl * (_lgs * _lgl) ** k >= P.RESPONSE_REL)
+_lmeas = _lead_extent(_lops, _LG, 3, _LN)
+check("the lead-in SIZER recovers a CONSTRUCTED impulse-response extent exactly",
+      _lmeas == 2 * _ltd * _lkmax + 1,
+      f"measured {_lmeas}, closed form {2 * _ltd * _lkmax + 1} (last echo above "
+      f"{P.RESPONSE_REL:g} is k={_lkmax} at weight {_lgl * (_lgs * _lgl) ** _lkmax:.1e}; k="
+      f"{_lkmax + 1} would be {_lgl * (_lgs * _lgl) ** (_lkmax + 1):.1e})")
+
+
+# GATE OBSERVED FAILING: the probe's impulse MUST sit at index 0. Placed anywhere else, a causal
+# response runs from the impulse to the end of the buffer, the longest quiet run is the part BEFORE
+# it, and `response_extent`'s "does it fit in half the probe" test passes at every probe length
+# while reporting half of it. This is the estimator failure mode that would have under-sized every
+# lead-in by 10x, and it is checked rather than commented.
+def _lext_at(pos, n0):
+    def make_H(m):
+        m = int(m)
+        d = np.zeros(m)
+        d[int(pos * m)] = 1.0
+        return np.fft.rfft(P.lossy_channel(d, grid=Grid(fs=_FSAMP, baud=16e9, n=m),
+                                          loss_db=12.0, loss_at_ghz=8.0, causal=True))
+    return P.response_extent(make_H, rel=P.RESPONSE_REL, n0=n0, probe_max=1 << 22, warn=False)
+
+
+_lz = [_lext_at(0.0, m) for m in (4096, 8192, 16384)]
+_lm = [_lext_at(0.5, m) for m in (4096, 8192, 16384)]
+check("the sizer's probe puts its impulse at index 0, and a mid-buffer impulse is REJECTED by "
+      "this check: it reports half the probe at every probe length",
+      len(set(_lz)) == 1 and _lm == [m // 2 for m in (4096, 8192, 16384)] and _lm[-1] < _lz[0],
+      f"impulse at 0: {_lz} (stable); impulse at the middle: {_lm} (= half the probe, every time)")
+
+# THE FULL CHAIN, on the shipped recipe, with NO TRIM ANYWHERE. This is what replaced a 1024-sample
+# edge trim in this file: the trim measured the interior of a spoiled record, the lead-in delivers a
+# record that is not spoiled.
+_lchain = dict(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
+
+
+def _lfull(**kw):
+    return (Signal(**_lchain, **kw)
+            .carrier(kind="nrz", pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
+            .scope(bw_hz=110e9).digitize(noise_rms=_sig_c, bits=10, full_scale=_A))
+
+
+_lsig = _lfull(lead_in=True).scope(bw_hz=32e9, kind="brickwall")
+_lplan = _lsig.lead_plan()
+_lwith = _lsig.waveform()
+_lwout = _lfull().scope(bw_hz=32e9, kind="brickwall").waveform()
+_lpk = (np.abs(_lwout).max() / np.abs(_lwout[1024:-1024]).max() - 1) * 100
+check("a lead-in removes the ringing the STILL-CIRCULAR brickwall puts on the record's edges",
+      abs(np.abs(_lwith).max() / np.abs(_lwith[1024:-1024]).max() - 1) < 1e-9 and _lpk > 5.0,
+      f"with: peak {np.abs(_lwith).max():.4f} = interior peak; without: {np.abs(_lwout).max():.4f}, "
+      f"{_lpk:+.2f} % above its own interior. Plan: {_lplan.summary()}")
+for _dth, _want, _lbl in ((0.0, 0.0, "the stored record's floor is its own lattice's q^2/12, on the "
+                                     "WHOLE record with no trim"),
+                          (1 / np.sqrt(12), 3.01, "  ... and dither still moves it by 3 dB")):
+    _lr = INST.store_record(_lwith, bits=11, dither_lsb=_dth, rng=np.random.default_rng(5))
+    _lu = np.unique(_lr)
+    _lq = float(np.min(np.diff(_lu)))
+    _ld = _stopband_psd_db_per_hz(_lr, _FSAMP) - INST.quantisation_floor_db_per_hz(_lq, _FSAMP)
+    check(_lbl, abs(_ld - _want) < 0.4 and 1851 <= len(_lu) <= 2035,
+          f"{_ld:+.2f} dB above q^2/12/(fs/2), {len(_lu)} distinct codes (real: 1851/1880/2035), "
+          f"on-lattice {_on_lattice(_lr, _lq):.4f}")
+_lru = np.unique(INST.store_record(_lwout, bits=11, rng=np.random.default_rng(5)))
+check("  ... and the same recipe WITHOUT a lead-in is outside the real captures' code band "
+      "(negative control)", len(_lru) < 1851,
+      f"{len(_lru)} distinct codes against 1851-2035, because the edge ringing takes "
+      f"{(np.abs(_lwout).max() / np.abs(_lwith).max() - 1) * 100:.1f} % of the vertical range")
+
+# THE VERTICAL MUST BE RANGED TO THE DELIVERED WINDOW, NOT TO THE GUARD. The guard is where the
+# ringing lives; a `store` ranged to it would spend the record's codes on samples nobody receives,
+# which is the same defect wearing a different hat. `rendered_lead()` hands over the whole render so
+# this can be checked on the artifact rather than on the intention.
+_lxe, _lpl = _lfull(lead_in=True).scope(bw_hz=32e9, kind="brickwall").rendered_lead()
+_lwin_codes = len(np.unique(INST.store_record(_lxe[_lpl.window], bits=11,
+                                             rng=np.random.default_rng(5))))
+_lgrd_codes = len(np.unique(INST.store_record(_lxe, bits=11,
+                                              rng=np.random.default_rng(5))[_lpl.window]))
+check("the export ranges to the WINDOW, and ranging it to the guard instead is observed to lose "
+      "the codes again", 1851 <= _lwin_codes <= 2035 and _lwin_codes - _lgrd_codes > 50,
+      f"window-ranged {_lwin_codes} codes, guard-ranged {_lgrd_codes} "
+      f"({_lwin_codes - _lgrd_codes} lost); the guard peaks at "
+      f"{np.abs(_lxe).max():.4f} against the window's {np.abs(_lxe[_lpl.window]).max():.4f}")
+
+# BACKLOG #54: `instrument.scope`'s frequency-domain kinds are STILL circular. The lead-in does not
+# fix them -- it moves their wrap into the samples that are thrown away. Measured, not asserted: the
+# same record through the same brickwall applied circularly and applied as a linear convolution.
+_LSB11 = 2 * 1.05 / 2 ** 11                            # one code of an 11-bit record ranged to +/-1
+_lbw, _lwn = 32e9, (32e9 / _NYQ) / 2.0
+
+
+def _lbrick(x, nfft=None):
+    n = len(x)
+    xp = x if nfft is None else np.concatenate([x, np.zeros(int(nfft) - n)])
+    X = np.fft.rfft(xp)
+    X[np.fft.rfftfreq(len(xp)) > _lwn] = 0.0
+    return np.fft.irfft(X, len(xp))[:n]
+
+
+_lpre_e, _lpre_pl = _lfull(lead_in=True).rendered_lead()
+_lpre_0 = _lfull().waveform()
+_lguard = P.response_extent(lambda m: np.fft.rfft(_lbrick(np.eye(1, int(m), 0).ravel())),
+                            rel=P.RESPONSE_REL, probe_max=1 << 22, warn=False)
+_lw_in = np.abs(_lbrick(_lpre_e) - _lbrick(_lpre_e, P.linear_fft_length(len(_lpre_e), _lguard)))
+_lw_no = np.abs(_lbrick(_lpre_0) - _lbrick(_lpre_0, P.linear_fft_length(len(_lpre_0), _lguard)))
+check("#54: a lead-in makes the STILL-CIRCULAR brickwall's wrap harmless in the DELIVERED window "
+      "(it does not fix the stage -- the wrap is still there, in the guard)",
+      _lw_in[_lpre_pl.window].max() / _LSB11 < 0.1 and _lw_no.max() / _LSB11 > 10,
+      f"circular vs linear, inside the delivered record: {_lw_in[_lpre_pl.window].max() / _LSB11:.3f} "
+      f"LSB with a lead-in against {_lw_no.max() / _LSB11:.1f} LSB without; the wrap in the guard "
+      f"itself is still {_lw_in.max() / _LSB11:.0f} LSB, and the brickwall's own sinc is "
+      f"{_lguard} samples long at {P.RESPONSE_REL:g}")
+
+# THE RECIPE IS THE GROUND TRUTH, so it has to carry the lead-in.
+_lrs = _lsrc(_LN, _LSYM, lead_in=True)
+_lrs.lossy(loss_db=8.0, loss_at_ghz=8.0, causal=True)
+_lrr = _lrs.recipe()
+check("a lead-in round-trips through the recipe bit-for-bit, and a Signal without one adds no "
+      "recipe key (so every existing recipe hashes exactly as before)",
+      np.array_equal(Signal.from_recipe(_lrr).waveform(), _lrs.waveform())
+      and _lrr.get("lead_in") is True and "lead_in" not in _lsrc(_LN, _LSYM).recipe(),
+      f"recipe lead_in={_lrr.get('lead_in')!r}, plan: {_lrs.lead_plan().summary()}")
+
+# REFUSALS OBSERVED FIRING. A knob that is a fraction of the record, an op that changes the record's
+# length, and an op that places something at an absolute position in it all mean something different
+# once the record is longer. Refusing is the honest answer; silently moving them is not.
+_lref = []
+for _lname, _lmk in (("reflect(td_frac=)", lambda: _lsrc(_LN, _LSYM, lead_in=True)
+                      .reflect(td_frac=0.1, gamma_l=0.2)),
+                     ("ac_couple(fc_frac=)", lambda: _lsrc(_LN, _LSYM, lead_in=True)
+                      .ac_couple(fc_frac=1e-4)),
+                     ("digitize(n_out=)", lambda: _lsrc(_LN, _LSYM, lead_in=True)
+                      .digitize(n_out=_LN // 2)),
+                     ("acquire", lambda: _lsrc(_LN, _LSYM, lead_in=True)
+                      .acquire(dict(sample_rate_hz=1e9, record_length=1024))),
+                     ("events", lambda: _lsrc(_LN, _LSYM, lead_in=True).events("runt", count=2))):
+    try:
+        _lmk().waveform()
+        _lref.append(f"{_lname}: NOT REFUSED")
+    except ValueError:
+        pass
+check("a lead-in REFUSES every op whose meaning it would change (5 of 5 observed refusing)",
+      not _lref, "; ".join(_lref) or "reflect(td_frac), ac_couple(fc_frac), digitize(n_out), "
+                                     "acquire, events")
+from wfmsynth.compose import _LEAD_LTI, _LEAD_SKIP, _LEAD_REJECT, _EXEC as _LEXEC
+_lunc = sorted(set(_LEXEC) - (_LEAD_LTI | _LEAD_SKIP | set(_LEAD_REJECT)))
+check("every composable op is CLASSIFIED for the lead-in (has an impulse response / has none / "
+      "cannot be guarded), so a new op cannot default into the safe-looking pile",
+      not _lunc, f"{len(_LEXEC)} ops: {len(_LEAD_LTI)} sized, {len(_LEAD_SKIP)} skipped, "
+                 f"{len(_LEAD_REJECT)} refused" + (f"; UNCLASSIFIED {_lunc}" if _lunc else ""))
+
+
 # THE TERMINAL STORE'S FLOOR. Three real exports land on their own lattice's q^2/12/(fs/2) --
 # a BARE rounder, no dither. An earlier revision of this file asserted +2.68 / +3.00 / +3.08 dB
 # above it; that was spectral leakage from an in-band signal through a rectangular window, and a
 # Hann window on the same band of the same records reads q^2/12 to 0.00 / 0.00 / -0.03 dB.
-_ys = (Signal(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
+# NOTHING IS TRIMMED HERE ANY MORE, and what the trim was for is worth keeping in view. The
+# channel applies a LINEAR convolution (U-16), so a record without a lead-in starts on a quiescent
+# line -- and `scope(kind="brickwall")` after it is still a CIRCULAR frequency-domain stage
+# (BACKLOG #54), so it saw that turn-on as a step in the periodic extension and rang on it. The
+# overshoot landed on the record's last samples 6.2 % above anything the link itself does, which
+# stole vertical range and dropped the ranged 11-bit code count from 1949 to 1840 -- outside the
+# 1851-2035 band the three real captures set. This file used to trim 1024 samples off each end and
+# measure the interior. It now renders a LEAD-IN and discards it (`Signal(lead_in=True)`, sized by
+# the chain's own measured impulse-response extent), so the record delivered here is a window on a
+# link that was already running and there is no spoiled edge to trim: 1950 codes, and the floor on
+# q^2/12 across the WHOLE record. The section above is the ground truth for that mechanism.
+_ys = (Signal(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8), lead_in=True)
        .carrier(kind="nrz", pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
        .scope(bw_hz=110e9).digitize(noise_rms=_sig_c, bits=10, full_scale=_A)
        .scope(bw_hz=32e9, kind="brickwall")).waveform()
-# THE RECORD'S EDGES ARE TRIMMED, and the reason is a defect this file should name rather than
-# hide. The channel now applies a LINEAR convolution (U-16), so the record starts on a quiescent
-# line -- but `scope(kind="brickwall")` after it is still a CIRCULAR frequency-domain stage, and
-# it sees that turn-on as a step in the periodic extension and rings on it. The overshoot lands
-# on the record's last samples and is 6.8 % taller than anything the link itself does, which
-# steals vertical range: the ranged 11-bit code count drops from 1949 to 1830 and out of the
-# 1851-2035 band the three real captures set. Trimming 1024 samples off each end restores 1949
-# and +0.03 / +3.00 dB exactly. The real fix is a rendered-and-discarded lead-in in the composer
-# (see BACKLOG "the record's head after U-16"), which is not this file's to make.
-_EDGE = 1024
-_ys = _ys[_EDGE:-_EDGE]
 for _dth, _want, _lbl in ((0.0, 0.0, "a BARE store lands on q^2/12 -- where the real captures are"),
                           (1 / np.sqrt(12), 3.01, "and dither is a real mechanism, worth 3 dB when a"
                                                   " chain actually has it")):
