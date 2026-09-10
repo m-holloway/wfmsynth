@@ -180,6 +180,14 @@ rendered with one is not the same record -- unless the lead-in is a whole multip
 period, in which case the symbols are identical and only the history is added. A dataset that wants both
 should size its lead-in up to the next multiple of its pattern period.
 
+One naming hazard to settle before wiring this up: the standard-specific dataset generator already
+has a `lead_in` (and a `LEAD_IN_UI`) meaning *unit intervals of warm-up an analysis SKIPS when
+scoring*. `Signal(lead_in=...)` means *samples of extra record the composer RENDERS and discards*.
+They are different quantities in different units, and passing one to the other would be silently
+accepted (an integer is honoured as samples, rounded up to one UI). Whoever wires a dataset to a
+lead-in should pass `Signal(lead_in=True)` and read the resolved lengths back from `lead_plan()`
+rather than sharing a constant between the two.
+
 ### #27 Unify `Signal.digitize()` with `instrument.digitize()`
 
 **Status:** Open.
