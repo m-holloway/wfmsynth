@@ -1673,14 +1673,15 @@ for _et in (5.0, 6.5, 9.0, 11.0):
           abs(_enob_meas(_sine + _n) - _et) < 0.05, f"{_enob_meas(_sine + _n):.2f}")
 
 # ONE fixed converter floor, sized ONCE from the widest published setting, RENDERED through the
-# whole chain at every other setting. The Keysight UXR1104A data sheet (5992-3132) publishes 13
-# bandwidth/ENOB pairs for a 10-bit converter; a white converter-referred floor shaped only by
-# the selected-bandwidth filter has to reproduce all of them or the split is wrong.
-_UXR = [(10, 7.0), (13, 6.8), (16, 6.7), (20, 6.5), (25, 6.2), (32, 5.9), (40, 5.8),
-        (50, 5.6), (59, 5.5), (67, 5.4), (80, 5.3), (90, 5.1), (110, 5.0)]
+# whole chain at every other setting. A 110 GHz four-channel real-time oscilloscope's published
+# data sheet gives these 13 bandwidth/ENOB pairs for its 10-bit converter; a white
+# converter-referred floor shaped only by the selected-bandwidth filter has to reproduce all of
+# them or the split between quantisation and converter noise is wrong.
+_BW_ENOB = [(10, 7.0), (13, 6.8), (16, 6.7), (20, 6.5), (25, 6.2), (32, 5.9), (40, 5.8),
+            (50, 5.6), (59, 5.5), (67, 5.4), (80, 5.3), (90, 5.1), (110, 5.0)]
 _sig_c = INST.converter_noise_rms(5.0, _A, 110e9, _NYQ, bits=10)    # anchored at 110 GHz -> 5.0
 _dev = []
-for _B, _pub in _UXR:
+for _B, _pub in _BW_ENOB:
     _y = INST.scope_bandwidth(_sine, _gE, 110e9, kind="bessel")     # analog front end
     _y = _y + np.random.default_rng(11).normal(0.0, _sig_c, _NE)    # the converter's own noise
     _y, _ = INST.clip_adc(_y, _A)

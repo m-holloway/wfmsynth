@@ -311,7 +311,7 @@ sigma = converter_noise_rms(enob=5.0, full_scale=0.423,     # published at ...
 ```
 
 One fixed converter floor, shaped only by the selected-bandwidth filter, renders **all thirteen**
-published UXR1104A bandwidth/ENOB settings (10→110 GHz, 7.0→5.0 bits) to **−0.29…+0.09 bits**.
+published bandwidth/ENOB settings (10→110 GHz, 7.0→5.0 bits) to **−0.29…+0.09 bits**.
 That is the evidence the converter is fixed and ENOB is emergent. Two consequences:
 
 * the 10-bit lattice sits **9.96 LSB below** the noise that sets ENOB — 0.084 % of the power, so
@@ -319,7 +319,7 @@ That is the evidence the converter is fixed and ENOB is emergent. Two consequenc
   lattice **17× coarser** than the real converter's, and after the DSP filter a real DSO runs
   *after* its converter it measures **7.81** bits, not the 5.9 it was handed.
 * the record's visible lattice is not the converter's at all — it is the **terminal store**
-  (`.store()`), and the real geometry is measurable: the three Keysight exports carry stride-8
+  (`.store()`), and the real geometry is measurable: the three real oscilloscope exports carry stride-8
   int16 codes with the screen at ±8192, i.e. **2^11 = 2048 steps across the vertical**, of which
   the records span 1851–2038.
 

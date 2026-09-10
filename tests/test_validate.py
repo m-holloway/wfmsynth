@@ -1330,7 +1330,7 @@ def test_quantisation_and_enob_are_two_mechanisms():
 
     Three properties, each of which fails if they are conflated again:
       1. one fixed converter-referred noise floor, shaped only by the selected-bandwidth
-         filter, reproduces a published bandwidth/ENOB table (UXR1104A, 5992-3132);
+         filter, reproduces a published 13-setting bandwidth/ENOB table;
       2. the converter's own lattice is ~10 LSB BELOW that noise, so it is dithered and
          contributes < 0.2 % of the power ENOB measures;
       3. rounding to a 2**ENOB lattice instead does not survive the DSP filter a real DSO
@@ -1395,7 +1395,7 @@ def test_quantisation_and_enob_are_two_mechanisms():
 
 
 def test_terminal_store_floor_matches_the_real_captures_not_bare_rounding():
-    """Three real Keysight exports sit +2.68/+3.00/+3.08 dB above their own lattice's
+    """Three real oscilloscope exports sit +2.68/+3.00/+3.08 dB above their own lattice's
     q**2/12/(fs/2), flat from the DSP corner to Nyquist. A bare rounder lands on q**2/12
     and is 3 dB short; one more LSB**2/12 of noise before the rounding lands on q**2/6."""
     import numpy as np

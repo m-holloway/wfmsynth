@@ -168,8 +168,11 @@ def _corner_through_record(x, fs, fn, fc, nperseg=1 << 15):
 
 
 # ------------------------------------------------------------------ real captures (optional)
-_REALCAPS = "/Users/michaelholloway/dev/wfmreverse/realcaps"
-_WFMREVERSE = "/Users/michaelholloway/dev/wfmreverse"
+# These live outside this repo, which ships no binary fixtures, so absent is a SKIP rather than a
+# failure. Point WFMSYNTH_REALCAPS at a directory of .wfm captures and WFMSYNTH_WFM_TOOLS at a
+# checkout that exposes `load_waveform` to run the on-disk half of this file.
+_REALCAPS = os.environ.get("WFMSYNTH_REALCAPS", "")
+_WFMREVERSE = os.environ.get("WFMSYNTH_WFM_TOOLS", "")
 
 
 def _load_real(window=1 << 19):
@@ -181,7 +184,7 @@ def _load_real(window=1 << 19):
     if not caps:
         return None
     import sys
-    if _WFMREVERSE not in sys.path:
+    if _WFMREVERSE and _WFMREVERSE not in sys.path:
         sys.path.insert(0, _WFMREVERSE)
     try:
         import wfm as _wfm

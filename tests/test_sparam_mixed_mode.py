@@ -40,8 +40,7 @@ from wfmsynth.grid import Grid
 # The two .s4p files these tests read. They live outside this repo (this repo ships no binary
 # fixtures), so absent is a SKIP, never a failure — point `WFMSYNTH_S4P_DIR` at a directory
 # holding a pair of 4-port differential files to run the on-disk half of this file.
-_REAL = os.environ.get("WFMSYNTH_S4P_DIR",
-                       "/Users/michaelholloway/dev/wfmreverse/scratch/sparam_assess")
+_REAL = os.environ.get("WFMSYNTH_S4P_DIR", "")
 REAL_A = os.path.join(_REAL, "stub_diff_A.s4p")      # pairs (1,3) and (2,4) -> "13_24"
 REAL_B = os.path.join(_REAL, "stub_diff_B.s4p")      # pairs (1,2) and (3,4) -> "12_34"
 needs_real = pytest.mark.skipif(
