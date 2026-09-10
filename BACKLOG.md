@@ -478,6 +478,65 @@ of the raw samples would fix it without a parameter.
 when the decisions were taken on a clock that was not uniform. The decisions and their instants
 are right (`compose.dfe_decisions` returns both); only the waveform rendering is nominal.
 
+### `physics._edge_disp` realises DCD at -2x the request, quantised to whole samples
+
+Not this unit's file (`wfmsynth/physics.py`), so it is logged rather than changed. `dcd` is now a
+first-class knob (`Signal.dcd(ps=)`, `compose._op_dcd`) with the standard definition; the SOURCE
+route still carries two defects. MEASURED on a 1024 UI clock pattern, fs=256e9, baud=16e9, as
+`mean(high pulse width) - mean(low pulse width)` at the constructed 0 V threshold:
+
+| `jitter=dict(dcd=...)` (samples) | stated | realised high-minus-low | ratio |
+|---|---|---|---|
+| 0.256 | 1.000 ps | -7.672703 ps | -7.67 |
+| 1.024 | 4.000 ps | -7.672703 ps | -1.92 |
+| 2.000 | 7.813 ps | -15.338243 ps | -1.96 |
+| 4.000 | 15.625 ps | -30.656340 ps | -1.96 |
+
+1. **Sign and scale.** `_edge_disp` adds `(jitter.dcd/2)*sign(diff(levels))`, i.e. rising edges
+   LATER by dcd/2 and falling EARLIER by dcd/2, which makes each high pulse `2*dcd` SHORTER. By
+   the standard definition the realised DCD is therefore about `-2x` the number asked for. The
+   fix is `-(dcd/4)*sign(...)`, which makes `dcd` the high-minus-low width directly.
+2. **Sub-sample quantisation.** `_place_symbols` lays the displaced edges down with
+   `searchsorted` on the INTEGER sample grid, so `dcd=0.256` and `dcd=1.024` produce a
+   BIT-IDENTICAL record (asserted in `tests/test_link_physics.py::
+   test_the_indirect_route_quantises_sub_sample_dcd_to_a_bit_identical_record`). Every
+   sub-sample DCD -- 1 ps is 0.256 samples on this grid, so all of them -- is unreachable. The
+   same quantisation applies to Rj and Pj at the source, which is the larger problem: a 200 fs
+   Rj request is 0.05 samples. The fix is to shape the edges on a sub-sample grid (or warp with
+   `instrument.resample_at`, which is now available) instead of re-indexing integer samples.
+
+Both gates are live and reachable in `tests/test_link_physics.py`; fixing either will fail them,
+which is the intended signal.
+
+### `acquire.acquire_record` samples the acquisition grid with LINEAR interpolation
+
+`np.interp(t_acq, t_sim, conditioned)` -- not this unit's file (`wfmsynth/acquire.py`). Linear
+interpolation of a bandlimited record is a lowpass with a large, frequency-dependent error.
+MEASURED against the analytic tone at a half-sample offset, max absolute error on a unit tone:
+
+| f/fs | `np.interp` | `instrument.resample_at` |
+|---|---|---|
+| 0.020 | 1.97e-03 | 1.11e-07 |
+| 0.100 | 4.89e-02 | 1.01e-07 |
+| 0.200 | 1.85e-01 | 1.22e-07 |
+| 0.300 | 4.12e-01 | 1.30e-08 |
+
+i.e. 18 % of full scale at 0.2 fs, six orders of magnitude worse than the windowed sinc. The
+acquisition grid is exactly the place a real two-rate capture needs bandlimited resampling, and
+the primitive now exists. Replace the `np.interp` call and add the tone-accuracy gate.
+
+`instrument.timebase_jitter` has the same `np.interp` (per-sample random offsets, so the error
+is a per-sample amplitude noise correlated with the local slope); it is in this unit's file but
+changing it changes every record that has ever used it, so it is logged with the same fix.
+
+### the new stages are not exported from `wfmsynth/__init__.py`
+
+Not this unit's file. `instrument.resample_at`, `sample_positions`, `sample_clock`,
+`clock_slip_samples`, `out_of_band_fraction` and `rx.agc`, `agc_gain`, `agc_level`,
+`input_noise` are reachable as `wfmsynth.instrument.*` / `wfmsynth.rx.*` (both modules are
+imported by the package) but are not in the top-level `from .instrument import (...)` /
+`from .rx import ...` lists or `__all__`. Add them alongside `scope_bandwidth` and `ctle`.
+
 ## CI status
 
 The current workflow uses a fast Linux/Python 3.12 gate for pull requests and a scheduled

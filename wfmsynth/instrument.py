@@ -13,6 +13,7 @@ k*fs/M +/- f_in. Set all mismatch to zero for an ideal ADC (no spurs). numpy/sci
 from __future__ import annotations
 import numpy as np
 from scipy import signal as _sig
+from scipy.special import i0 as _i0
 
 from . import physics as _P
 
@@ -162,6 +163,217 @@ def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4, causal=None):
     zi = _sig.sosfilt_zi(sos) * x[0]
     y, _ = _sig.sosfilt(sos, x, zi=zi)
     return y
+
+
+# ------------------------------------------------------- an INDEPENDENT sampling clock (U-09)
+# WHY A RATIONAL RATE CHANGE IS NOT A CLOCK.
+#
+# `compose._op_digitize`'s `n_out=` reaches the acquisition rate through `resample_poly`, which is
+# a RATIONAL rate change: the output's sample times are exactly `k*(down/up)/fs`. That is a
+# PHASE-LOCKED relationship -- the record's timebase is a divided-down copy of the link's, so no
+# matter how long the record is, the two never drift apart. A real instrument's timebase is a
+# DIFFERENT OSCILLATOR from the link's: it has a frequency offset (ppm), it has an arbitrary
+# starting phase within a sample, and it drifts as it warms. Over a long capture that offset is
+# most of why a recovered clock has to keep moving.
+#
+# MEASURED, on a 65536-sample record, asking for a 300 ppm offset:
+#   * default path (no `n_out`)  -- `resample_poly` is not called; the output is BIT-IDENTICAL to
+#     the input, so the realised offset is exactly 0.000000 ppm and the slip exactly 0 samples.
+#   * `n_out=round(n*(1+300e-6))` -- `n_out` is an INTEGER, so the realisable offsets are
+#     quantised to `1/n` = 7.6294 ppm here: 300 ppm becomes 297.5458 ppm, an error of 2.454 ppm
+#     (0.82 % of the request) that depends on the record length.
+#   * a DRIFTING clock is not expressible at all: one integer ratio holds for the whole record.
+#   * and `n_out` changes the record LENGTH at a fixed time span, which is the wrong mechanism --
+#     a clock offset keeps the length and changes the span.
+#
+# `resample_at` is the primitive that can: bandlimited (windowed-sinc) interpolation at ARBITRARY
+# real sample positions, so the sample times can be any function of k at all.
+#
+# WHAT A REAL RECORD HAS THAT THE FIXTURE DOES NOT -- MEASURED, not argued. Three real captures
+# from a real-time sampling oscilloscope, 40 GSa/s, 8 M samples (200 us) each, at three
+# different symbol rates. The realised symbol rate is fitted from ~163k-272k threshold
+# crossings: each crossing is assigned a UI index by rounding its interval to the nearest UI,
+# and one least-squares line through (UI index, crossing position) gives samples-per-UI over the
+# whole record.
+#
+#     capture   crossings   realised samples/UI   offset from nominal   slip over the record
+#     A            272127   14.814844247          -1.987 ppm            -15.89 samples
+#     B            163277   (24.691...)           -1.822 ppm            -14.58 samples
+#     C            215999   ( 7.407...)           -1.983 ppm            -15.87 samples
+#
+# Fit residuals 0.343-0.561 samples (jitter and ISI); on capture A the offset is stable across
+# ten equal segments at -1.751 to -2.435 ppm, i.e. no measurable drift over 200 us. So EVERY
+# real record here carries a ~2 ppm offset between the link's symbol clock and the record's
+# timebase, worth ~16 samples of slip in 200 us, and the modelled scope reproduces 0.000000 ppm
+# and 0 samples.
+#
+# WHAT THIS DOES NOT ESTABLISH: which of the two oscillators is off. The measurement is a RATIO,
+# and all three symbol rates plausibly derive from one reference on the source side, so a common
+# offset is consistent with either the source's reference or the instrument's timebase being the
+# fast one. It establishes that the ratio is offset and stable, which is the mechanism; it does
+# not attribute it.
+
+RESAMPLE_HALF_WIDTH = 32          # taps each side; the kernel is 2*half_width long
+RESAMPLE_CUTOFF = 0.45            # kernel cutoff as a fraction of fs
+RESAMPLE_BETA = 13.0              # Kaiser beta
+RESAMPLE_PASSBAND_FRAC = 0.386    # MEASURED: see resample_at's docstring
+
+
+def resample_at(x, src, half_width=RESAMPLE_HALF_WIDTH, cutoff=RESAMPLE_CUTOFF,
+                beta=RESAMPLE_BETA, chunk=8192):
+    """Bandlimited interpolation of ``x`` at ARBITRARY real sample positions ``src``.
+
+    ``out[k] = x(src[k])`` where ``x(.)`` is the bandlimited continuous-time signal the samples
+    represent. Implemented as a Kaiser-windowed sinc of ``2*half_width`` taps, normalised per
+    output sample so the DC gain is exactly 1. Linear in ``x`` (``src`` does not depend on it),
+    so it obeys superposition.
+
+    MEASURED ACCURACY (fs=256e9, 64 taps, cutoff 0.45, beta 13, a pure tone at three fractional
+    offsets 0.137/0.5/0.9999 samples, compared against the analytic tone at the shifted times,
+    interior samples only):
+
+        f/fs     0.020     0.100     0.200     0.300     0.386     0.420
+        max err  2.5e-07   1.4e-07   3.2e-07   2.5e-07   1.7e-06   4.4e-02
+
+    i.e. exact to about -130 dB out to ``RESAMPLE_PASSBAND_FRAC = 0.386*fs`` (0.77 of Nyquist),
+    which is the Kaiser passband edge for this length, and USELESS above it -- 0.42*fs is off by
+    4.4 % of full scale. Content above the passband is the one way to misuse this: pass a bigger
+    ``half_width`` (the transition narrows as 1/half_width) or resample from a finer grid.
+
+    ENDS: an output sample within ``half_width`` of either end has no kernel support there, and
+    the indices are CLAMPED (a hold at ``x[0]`` / ``x[-1]``). That is exact for a record whose
+    ends are a settled quiescent line -- which is what `Signal.lead_in` renders and discards --
+    and an edge artefact over ``half_width`` samples for a record that starts mid-pattern."""
+    x = np.asarray(x, float)
+    src = np.asarray(src, float)
+    n = len(x)
+    if n < 2:
+        raise ValueError("resample_at needs at least 2 input samples")
+    L = int(half_width)
+    j = np.arange(-L + 1, L + 1)
+    i0b = _i0(float(beta))
+    out = np.empty(len(src), float)
+    for a in range(0, len(src), int(chunk)):
+        s = src[a:a + int(chunk)]
+        base = np.floor(s).astype(np.int64)
+        d = s[:, None] - (base[:, None] + j[None, :])            # tap distances, in samples
+        u = np.clip(d / L, -1.0, 1.0)
+        w = np.sinc(2.0 * cutoff * d) * (_i0(float(beta) * np.sqrt(1.0 - u * u)) / i0b)
+        w /= w.sum(1, keepdims=True)                             # exact DC gain 1
+        idx = np.clip(base[:, None] + j[None, :], 0, n - 1)      # clamp = hold at the ends
+        out[a:a + int(chunk)] = np.einsum("ij,ij->i", w, x[idx])
+    return out
+
+
+def out_of_band_fraction(x, passband_frac=RESAMPLE_PASSBAND_FRAC):
+    """Fraction of ``x``'s energy above ``passband_frac`` of fs -- what `resample_at` cannot
+    interpolate correctly. Reported rather than assumed."""
+    X = np.abs(np.fft.rfft(np.asarray(x, float) - float(np.mean(x)))) ** 2
+    f = np.fft.rfftfreq(len(x))
+    tot = float(X.sum())
+    return 0.0 if tot <= 0 else float(X[f > passband_frac].sum() / tot)
+
+
+def clock_slip_samples(i, ppm=0.0, drift_ppm_per_s=0.0, fs=None):
+    """THE CONVENTION, as a closed form. A feature at LINK sample index ``i`` is recorded by a
+    sample clock running ``ppm`` fast at RECORD index ``i + slip``, with
+
+        slip(i) = p*i + r*i**2/(2*fs),     p = ppm*1e-6,  r = drift_ppm_per_s*1e-6
+
+    ``ppm`` is the offset of the sample clock's FREQUENCY: ``fs_actual = fs*(1 + p + r*t)``.
+    Positive ppm = a fast clock = more record samples per link second, so features drift LATER
+    in the record. ``drift_ppm_per_s`` needs ``fs`` (the second term is quadratic in time).
+
+    This is the number `sample_clock` is asserted against, and it is exact -- not a first-order
+    expansion. 300 ppm over 3 M UI at 16 samples/UI = 48e6 samples is 14,400 samples of slip."""
+    i = np.asarray(i, float)
+    p, r = ppm * 1e-6, drift_ppm_per_s * 1e-6
+    if r != 0.0:
+        if fs is None:
+            raise ValueError("clock_slip_samples needs fs= when drift_ppm_per_s is nonzero")
+        return p * i + r * i ** 2 / (2.0 * float(fs))
+    return p * i
+
+
+def sample_positions(n_out, fs, ppm=0.0, drift_ppm_per_s=0.0, phase0=0.0):
+    """The LINK-grid position at which each of ``n_out`` record samples was taken -- the exact
+    inverse of `clock_slip_samples`.
+
+    The clock's phase accumulator advances at ``fs*(1 + p + r*t)``, so sample ``k`` is taken when
+    it reaches ``k``: ``(r/2)t**2 + (1+p)t = k/fs``. Solved exactly,
+
+        r == 0:  src[k] = k/(1+p)
+        r != 0:  src[k] = fs*(-(1+p) + sqrt((1+p)**2 + 2*r*k/fs))/r
+
+    ``phase0`` is the clock's starting phase in LINK samples (a real timebase has no reason to
+    line up with the link's sample grid, and an integer output length cannot express it)."""
+    p, r = ppm * 1e-6, drift_ppm_per_s * 1e-6
+    k = np.arange(int(n_out), dtype=float)
+    if r == 0.0:
+        return float(phase0) + k / (1.0 + p)
+    return float(phase0) + fs * (-(1.0 + p) + np.sqrt((1.0 + p) ** 2 + 2.0 * r * k / fs)) / r
+
+
+def sample_clock(x, grid, ppm=0.0, drift_ppm_per_s=0.0, phase0_s=0.0, n_out=None,
+                 half_width=RESAMPLE_HALF_WIDTH, band_tol=0.01, span="fit"):
+    """Sample the record on an INDEPENDENT timebase: a free-running sample clock with a ``ppm``
+    frequency offset from the link, an optional drift, and an arbitrary starting phase.
+
+    This is the mechanism `resample_poly` structurally cannot provide (see the block comment
+    above): the sample times are `sample_positions(...)`, an arbitrary real-valued function of
+    the sample number, realised by `resample_at`.
+
+      ppm               sample-clock frequency offset. Positive = fast clock; a feature at link
+                        sample i is recorded at i*(1+ppm*1e-6). See `clock_slip_samples`.
+      drift_ppm_per_s   the offset's rate of change (a warming oscillator). The slip is then
+                        quadratic in time.
+      phase0_s          the clock's starting phase, in SECONDS.
+      n_out             record length. Default (``span="fit"``) is the longest record the input
+                        supports without extrapolating past its last sample, capped at
+                        ``len(x)``. ``span="strict"`` keeps ``len(x)`` and RAISES if that would
+                        run past the input, naming the shortfall -- because holding the last
+                        sample to fill a record is fabricating samples.
+      band_tol          raise if more than this fraction of the input's energy is above the
+                        interpolator's measured passband (0.386*fs), where it cannot be
+                        interpolated. ``None`` to skip the check.
+
+    Returns the record. It is generally NOT ``len(x)`` long -- that is the point: a clock with a
+    frequency offset covers a different span of link time than the link's own grid does."""
+    x = np.asarray(x, float)
+    n = len(x)
+    p = ppm * 1e-6
+    if (ppm, drift_ppm_per_s, phase0_s) == (0.0, 0.0, 0.0) and n_out in (None, n):
+        return x.copy()      # the same clock == the same samples, not a re-interpolation of them
+    if p <= -1.0:
+        raise ValueError(f"ppm={ppm} means a stopped or reversed sample clock")
+    if band_tol is not None:
+        frac = out_of_band_fraction(x)
+        if frac > band_tol:
+            raise ValueError(
+                f"{frac:.3%} of the record's energy is above {RESAMPLE_PASSBAND_FRAC}*fs, the "
+                f"windowed-sinc passband, where bandlimited interpolation is wrong by up to "
+                f"4 % of full scale. Raise half_width=, resample from a finer grid, or pass "
+                f"band_tol=None if you accept it.")
+    phase0 = float(phase0_s) * grid.fs
+    if n_out is None:
+        # the largest k whose sample time is still inside the input
+        want = n
+        if span == "fit":
+            src_full = sample_positions(want, grid.fs, ppm, drift_ppm_per_s, phase0)
+            ok = np.nonzero(src_full <= n - 1)[0]
+            if len(ok) == 0:
+                raise ValueError("no requested sample time falls inside the input record")
+            want = int(ok[-1]) + 1
+        n_out = want
+    src = sample_positions(int(n_out), grid.fs, ppm, drift_ppm_per_s, phase0)
+    if src[-1] > n - 1 or src[0] < 0:
+        short = max(float(src[-1]) - (n - 1), -float(src[0]))
+        if span == "strict":
+            raise ValueError(
+                f"a {n_out}-sample record on this clock needs link samples out to "
+                f"{src[-1]:.3f} but the input has {n} -- {short:.3f} samples short. Render a "
+                f"longer input (see Signal.lead_in), pass n_out=, or span='fit'.")
+    return resample_at(x, src, half_width=half_width)
 
 
 def rc_pole_hz(r_ohm, c_f):

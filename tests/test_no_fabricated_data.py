@@ -50,6 +50,21 @@ STAGES = {
     "nonlinearity": dict(compression=0.04),
     "drift": dict(kind="gain", amount=0.004, shape="linear"),
     "probe": dict(c_load_f=0.45e-12, r_source=50.0),
+    # U-09/U-12/U-13. `sample_clock` is LINEAR (the sample positions are a function of k, not of
+    # x) but not time-invariant, so it belongs in LTI below and not in CORNER_CASES. `agc` is
+    # deliberately NOT in LTI: its gain is a functional of the input's own level, so
+    # `agc(3x) == agc(x)` -- deleting the absolute level is the whole point of the stage.
+    # `rx_noise` adds a signal-independent term and `dcd` warps time by a field derived from the
+    # input's own crossings; neither is linear either.
+    # band_tol=None because `test_an_op_that_claims_to_be_linear_obeys_superposition` probes
+    # with WHITE noise, 22.768 % of whose energy is above the interpolator's 0.386*fs passband,
+    # and `sample_clock` correctly refuses that record. The realistic input `_input()` builds is
+    # 0.008769 % out of band and does not trip it; the guard's own gate is
+    # `test_the_interpolator_is_wrong_above_its_passband_and_says_so` in test_link_physics.py.
+    "sample_clock": dict(ppm=300.0, band_tol=None),
+    "agc": dict(target=0.5, metric="rms"),
+    "rx_noise": dict(rms=0.004),
+    "dcd": dict(ps=4.0),
 }
 
 
@@ -82,7 +97,7 @@ def test_every_input_sample_influences_the_output(op):
 
 
 LTI = ["lossy", "reflect", "resonant_reflect", "ctle", "rx_ffe", "tx_ffe", "de_emphasis",
-       "scope", "ac_couple", "probe"]
+       "scope", "ac_couple", "probe", "sample_clock"]
 
 
 @pytest.mark.parametrize("op", LTI)

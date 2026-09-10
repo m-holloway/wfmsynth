@@ -402,6 +402,147 @@ def _op_dfe(x, p, streams, grid, idx):
     return x / scale - fb
 
 
+# ------------------------------------------------------------ DUTY-CYCLE DISTORTION (U-13)
+# DCD IS A FIRST-CLASS TRANSMITTER IMPAIRMENT AND HAD NO DIRECT KNOB.
+#
+# The only way to reach it was `carrier(..., jitter=dict(dcd=<samples>))`, which routes through
+# `physics._edge_disp`'s `(dcd/2)*sign(diff(levels))` and then through `_place_symbols`'s
+# `searchsorted` on the INTEGER sample grid. MEASURED on a 1024 UI clock pattern at
+# fs=256e9/baud=16e9 (mean high pulse width minus mean low pulse width, which is the definition
+# of DCD):
+#
+#     dcd= (samples)   stated      realised mean(high)-mean(low)   ratio to stated
+#     0.256            1.000 ps    -7.672703 ps                    -7.67
+#     1.024            4.000 ps    -7.672703 ps                    -1.92
+#     2.000            7.813 ps   -15.338243 ps                    -1.96
+#     4.000           15.625 ps   -30.656340 ps                    -1.96
+#
+# Two separate faults. The SIGN and SCALE are wrong -- displacing rising edges by +d/2 and
+# falling by -d/2 makes the high pulse SHORTER by 2*d, so the realised DCD is -2x the number
+# asked for. And the request is QUANTISED to whole samples: 0.256 and 1.024 samples produce the
+# BIT-IDENTICAL record above, so any sub-sample DCD -- which is all of them, 1 ps is 0.256
+# samples here -- is unreachable. That defect lives in `physics.py`, which this unit does not
+# own; it is logged in BACKLOG.md with these numbers.
+#
+# `_op_dcd` is the direct knob, in ps, on the waveform, with the standard definition:
+#
+#     dcd_ps == mean(high pulse width) - mean(low pulse width)
+#
+# and it is realised by displacing each threshold crossing: rising EARLIER by dcd/4, falling
+# LATER by dcd/4, which makes each high pulse dcd/2 longer and each low pulse dcd/2 shorter.
+# The displacement is applied as a time warp through `instrument.resample_at`, so it is
+# sub-sample exact instead of quantised.
+#
+# THE ONE SUBTLETY, because getting it wrong costs 3 %: the displacement field cannot simply be
+# interpolated between crossings. A field ramping from +d at a rising crossing to -d at the next
+# falling one has slope s = 2d/T_ui THROUGH the crossing, and warping by a field with slope s
+# moves the crossing by d/(1+s), not d -- 3.2 % short at 1 ps DCD on a 62.5 ps UI. So the field
+# is held FLAT (a plateau) across each crossing and does its ramping in the middle of the bit,
+# where the waveform is settled and warping it does nothing.
+
+
+def _dcd_displacement(x, spb, dcd_samples, threshold=None, plateau_ui=0.25):
+    """The time-warp displacement field for a stated DCD, in samples, one value per sample.
+    Positive at rising crossings (which pulls them earlier) and negative at falling ones."""
+    x = np.asarray(x, float)
+    n = len(x)
+    d = float(dcd_samples) / 4.0
+    thr = 0.5 * (float(np.percentile(x, 1)) + float(np.percentile(x, 99))) \
+        if threshold is None else float(threshold)
+    s = x - thr
+    up = (s[:-1] <= 0) & (s[1:] > 0)
+    dn = (s[:-1] >= 0) & (s[1:] < 0)
+    k = np.nonzero(up | dn)[0]
+    k = k[(k >= 2) & (k < n - 2)]
+    if len(k) == 0:
+        return np.zeros(n)
+    sign = np.where(up[k], 1.0, -1.0)
+    # the crossing position, from a local CUBIC through four samples (t as a cubic in level).
+    # A straight-line read is 12x worse HERE, not just in the measurement: it mis-centres the
+    # plateau, so the displacement seen at the true crossing is no longer exactly the plateau's.
+    c = np.array([np.polyval(np.polyfit(s[i - 1:i + 3], np.arange(i - 1, i + 3, dtype=float), 3),
+                             0.0) for i in k])
+    gap = np.diff(c, prepend=c[0] - spb, append=c[-1] + spb)
+    w = np.minimum(float(plateau_ui) * spb, 0.4 * np.minimum(gap[:-1], gap[1:]))
+    knots = np.empty(2 * len(c)); vals = np.empty(2 * len(c))
+    knots[0::2] = c - w; knots[1::2] = c + w              # a FLAT plateau across each crossing,
+    vals[0::2] = sign * d; vals[1::2] = sign * d          # ramping only where the signal is flat
+    return np.interp(np.arange(n, dtype=float), knots, vals, left=vals[0], right=vals[-1])
+
+
+def _op_dcd(x, p, streams, grid, idx):
+    """Duty-cycle distortion as a direct knob. ``ps`` (or ``frac_ui``) is the DCD by its
+    standard definition: mean high pulse width minus mean low pulse width. Positive = high
+    pulses longer. See the block comment above for the construction and for what the old
+    indirect route realised instead.
+
+    MEASURED, 1024 UI clock pattern, tr_frac=0.35, fs=256e9, baud=16e9:
+
+        asked      realised mean(high)-mean(low)     error
+        +0.125 ps  +0.12506918 ps                    +0.055 %
+        +1.000 ps  +1.00048322 ps                    +0.048 %
+        +4.000 ps  +4.00121205 ps                    +0.030 %
+        -2.500 ps  -2.50102544 ps                    +0.041 %
+
+    ``threshold`` defaults to the midpoint of the record's 1st and 99th percentile. On a record
+    with heavy ISI the crossings are no longer one-per-edge at a fixed level and the realised
+    DCD moves off the request; DCD is a TRANSMITTER impairment, so place it on the source."""
+    from . import instrument as INST
+    spb = grid.samples_per_ui
+    if spb is None:
+        raise ValueError("dcd needs baud set on the Grid (it is defined per unit interval)")
+    if ("ps" in p) == ("frac_ui" in p):
+        raise ValueError("dcd takes exactly one of ps= or frac_ui=")
+    dcd_s = p["ps"] * 1e-12 if "ps" in p else float(p["frac_ui"]) / grid.baud
+    if dcd_s == 0.0:
+        return np.asarray(x, float)          # no impairment asked for == no resampling done
+    disp = _dcd_displacement(x, spb, dcd_s * grid.fs, threshold=p.get("threshold"),
+                             plateau_ui=p.get("plateau_ui", 0.25))
+    n = len(np.asarray(x, float))
+    return INST.resample_at(x, np.arange(n, dtype=float) + disp,
+                            half_width=p.get("half_width", INST.RESAMPLE_HALF_WIDTH))
+
+
+# ------------------------------------------------------------ receiver front end (U-12), clock (U-09)
+def _op_agc(x, p, streams, grid, idx, win=None):
+    """Receiver AGC: normalise to a stated level so everything downstream has a known full
+    scale. Pair it with ``dfe(scale=<the same target>)``. See `rx.agc_gain`.
+
+    ``win`` is the delivered window of a lead-in render: a BLOCK AGC's gain is measured on the
+    samples the caller receives, not on the guard, because the guard is where the turn-on
+    ringing lives and a gain set from it scales the whole record wrong. A TRACKING AGC
+    (``tau_s=``) already produces a per-sample causal gain, which the window slices correctly
+    on its own, so the window does not enter."""
+    from . import rx as RX
+    kw = dict(target=p.get("target", 1.0), metric=p.get("metric", "rms"), q=p.get("q", 99.0),
+              tau_s=p.get("tau_s"), grid=grid, gain_limits=p.get("gain_limits"),
+              on_limit=p.get("on_limit", "raise"))
+    x = np.asarray(x, float)
+    if win is not None and kw["tau_s"] is None:
+        return x * RX.agc_gain(x[win], **kw)
+    return RX.agc(x, **kw)
+
+
+def _op_rx_noise(x, p, streams, grid, idx):
+    """The RECEIVER's own input-referred noise, at the receiver input -- not the instrument's
+    noise floor (`digitize(noise_rms=)`), and not in the same place in the chain. See
+    `rx.input_noise`."""
+    from . import rx as RX
+    return RX.input_noise(x, grid=grid, rms=p.get("rms"), density=p.get("density"),
+                          bw_hz=p.get("bw_hz"), rng=streams.role(f"rx_noise/{idx}"),
+                          exact_rms=p.get("exact_rms", True))
+
+
+def _op_sample_clock(x, p, streams, grid, idx):
+    """An INDEPENDENT sampling clock: a ppm frequency offset from the link, an optional drift,
+    an arbitrary starting phase. See `instrument.sample_clock` for why `resample_poly` cannot."""
+    return INST.sample_clock(x, grid, ppm=p.get("ppm", 0.0),
+                             drift_ppm_per_s=p.get("drift_ppm_per_s", 0.0),
+                             phase0_s=p.get("phase0_s", 0.0), n_out=p.get("n_out"),
+                             half_width=p.get("half_width", INST.RESAMPLE_HALF_WIDTH),
+                             band_tol=p.get("band_tol", 0.01), span=p.get("span", "fit"))
+
+
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
     if "path" in p:
@@ -457,7 +598,9 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "photodetect": _op_photodetect, "tia": _op_tia,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase, "store": _op_store,
          "de_emphasis": _op_de_emphasis, "acquire": _op_acquire, "probe": _op_probe,
-         "events": _op_events}
+         "events": _op_events,
+         "dcd": _op_dcd, "agc": _op_agc, "rx_noise": _op_rx_noise,
+         "sample_clock": _op_sample_clock}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -474,13 +617,16 @@ OP_KIND = {
     "carrier": "source", "symbols": "source",
     "tx_ffe": "shape", "de_emphasis": "shape", "events": "shape", "nonlinearity": "shape",
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
+    "dcd": "shape",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
     "cascade": "channel",
     "crosstalk_matrix": "channel", "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
     "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
     "probe": "probe",
+    "rx_noise": "instrument", "agc": "instrument",
     "ctle": "instrument", "dfe": "instrument", "rx_ffe": "instrument", "tia": "instrument",
+    "sample_clock": "instrument",
     "photodetect": "instrument", "scope": "instrument", "digitize": "instrument",
     "timebase": "instrument", "acquire": "instrument", "store": "instrument",
 }
@@ -569,9 +715,15 @@ _LEAD_LTI = {"lossy", "reflect", "resonant_reflect", "ac_couple", "sparam", "cas
 # interpolation), so they do not lengthen the chain's memory, or nonlinear/stochastic, so they have
 # no impulse response to measure. An OPTICAL chain is skipped because the field is complex and this
 # probe is real -- size an optical chain's lead-in explicitly.
+# `dcd` joins `timebase` here for the same reason: it is a sub-UI time WARP through a 64-tap
+# interpolator, nonlinear (its displacement field comes from the input's own crossings), so it has
+# no impulse response to probe and it does not lengthen the chain's memory. `rx_noise` is
+# stochastic. `agc` is nonlinear and its block gain is a functional of the samples it sees, which
+# is why it is also in `_LEAD_WINDOW_RANGED` below.
 _LEAD_SKIP = {"carrier", "symbols", "nonlinearity", "crosstalk", "crosstalk_matrix", "digitize",
               "store", "timebase", "timing", "ssc", "supply_coupling", "dfe",
-              "optical", "dispersion", "eo", "fiber", "optical_mpi", "edfa", "photodetect", "tia"}
+              "optical", "dispersion", "eo", "fiber", "optical_mpi", "edfa", "photodetect", "tia",
+              "dcd", "rx_noise", "agc"}
 # Ops a lead-in cannot host, each with the reason. Refusing is the honest answer: the alternative is
 # to silently move where these land, and a fault placed at sample 5000 of the record is not the same
 # fault at sample 5000 of the record-plus-guard.
@@ -582,6 +734,10 @@ _LEAD_REJECT = {
               "moves the record's origin (BACKLOG: shift event anchors by the lead-in)",
     "drift": "its profile is defined ACROSS the record ('0 to 1 over the capture'), so a longer "
              "render is a different drift",
+    "sample_clock": "an independent clock covers a DIFFERENT SPAN of link time than the link's "
+                    "own grid, so the guard's sample count is not the record's and the slip "
+                    "moves the window's own boundaries; sample the clock after slicing the "
+                    "window out, or render the whole thing on the clock's grid",
 }
 # (op, key) pairs whose value is a FRACTION OF THE RECORD -- a fraction is not a physical quantity,
 # and a lead-in changes the record it is a fraction of. State these in absolute units instead.
@@ -594,10 +750,13 @@ _LEAD_RELATIVE = {
                            "back out; resample before the chain instead",
     ("dfe", "phase"): "a fixed decision phase is an absolute sample offset into the record",
 }
-# The two ops that SET THE RECORD'S VERTICAL. They must range to the delivered window: the guard is
+# The ops that SET THE RECORD'S VERTICAL. They must range to the delivered window: the guard is
 # where the ringing lives, and a vertical ranged to the guard would spend the record's codes on
-# samples the caller never sees -- which is the very defect the lead-in exists to remove.
-_LEAD_WINDOW_RANGED = {"digitize", "store"}
+# samples the caller never sees -- which is the very defect the lead-in exists to remove. A BLOCK
+# `agc` belongs here for the same reason and it is the sharper case: it does not merely allocate
+# codes, it MULTIPLIES the record, so a gain set from the guard's turn-on ringing puts the whole
+# record at the wrong level and every stated full scale downstream is then wrong.
+_LEAD_WINDOW_RANGED = {"digitize", "store", "agc"}
 
 
 def _lead_source_geometry(ops, grid):
@@ -960,6 +1119,42 @@ class Signal:
         """Slow sub-record drift (thermal/VGA/DC). params: kind('gain'|'amplitude'|'dc'),
         amount, shape('linear'|'sine')."""
         return self._add("drift", **params)
+
+    def dcd(self, **params):
+        """Duty-cycle distortion as a DIRECT knob, at the transmitter. ``ps=`` (or
+        ``frac_ui=``) is DCD by its standard definition -- mean high pulse width minus mean low
+        pulse width -- so ``dcd(ps=4.0)`` makes the high pulses 4 ps wider than the low ones and
+        nothing else. Realised to 0.05 % (see `_op_dcd`), sub-sample.
+
+        The old route, ``carrier(..., jitter=dict(dcd=<samples>))``, is off by -2x AND quantised
+        to whole samples; the numbers are in the block comment above `_dcd_displacement`.
+        params: ps | frac_ui, threshold, plateau_ui."""
+        return self._add("dcd", **params)
+
+    def agc(self, **params):
+        """Receiver AGC -- normalise to a stated level BEFORE equalising, which is what a
+        receiver does and which is what makes an absolute level downstream mean anything.
+        params: target, metric('rms'|'peak'|'amplitude'|'p99'), tau_s (a tracking loop instead
+        of a block gain), gain_limits=(lo,hi), on_limit('raise'|'clip'). Pair with
+        ``dfe(..., scale=<the same target>)``."""
+        return self._add("agc", **params)
+
+    def rx_noise(self, **params):
+        """The RECEIVER's own input-referred noise, added at the receiver input -- i.e. BEFORE
+        the CTLE/DFE, where an equaliser's peaking amplifies it. Distinct from the INSTRUMENT's
+        noise floor (`digitize(noise_rms=)`), in mechanism and in position.
+        params: rms, or density (units/sqrt(Hz)) + bw_hz (the receiver's noise bandwidth)."""
+        return self._add("rx_noise", **params)
+
+    def sample_clock(self, **params):
+        """Sample the record on an INDEPENDENT timebase: the instrument's clock is a different
+        oscillator from the link's. params: ppm (frequency offset), drift_ppm_per_s, phase0_s,
+        n_out, span('fit'|'strict'), band_tol.
+
+        `timebase(rms_ps=)` is the sample clock's random JITTER about its nominal times; this is
+        its systematic OFFSET from them, which accumulates. 300 ppm over 3 M UI at 16 samples/UI
+        is 14,400 samples of slip; the `digitize(n_out=)` path realises 0."""
+        return self._add("sample_clock", **params)
 
     def timing(self, **params):
         """Compose arbitrary clock timing into the carrier (the timing-modulation enabler).

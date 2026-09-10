@@ -66,6 +66,12 @@ EXACT_BYPASS = [
     # term would break, and the one above would not.
     ("reflect", dict(td_ps=281.25, gamma_s=0.0, gamma_l=0.4, n_bounce=6, node="load")),
     ("crosstalk", dict(coupling=0.0)),
+    # asking for no impairment must not spend the interpolator's error budget as one: both of
+    # these short-circuit rather than resampling at integer positions, which is a 0.45-cutoff
+    # lowpass and NOT the identity (it costs 1.9e-07 of full scale).
+    ("dcd", dict(ps=0.0)),
+    ("sample_clock", dict(ppm=0.0)),
+    ("rx_noise", dict(rms=0.0)),
     ("supply_coupling", dict(f_ripple_hz=1e9, am_depth=0.0, psij_ps=0.0)),
     ("intra_pair_skew", dict(skew_ps=0.0, gain_imbalance=0.0)),
     ("ssc", dict(spread=0.0)),
@@ -385,6 +391,16 @@ KNOBS = [
     ("digitize", dict(bits=8, full_scale=1.0), "full_scale", 2.0),
     ("digitize", dict(snr_db=40.0, interleave=dict(m_cores=4, offset_mm=0.01)),
      "interleave", dict(m_cores=4, offset_mm=0.05)),
+    # U-13 / U-12 / U-09
+    ("dcd", dict(ps=2.0), "ps", 5.0),
+    ("dcd", dict(frac_ui=0.02), "frac_ui", 0.06),
+    ("agc", dict(target=0.5), "target", 1.0),
+    ("agc", dict(target=0.5, metric="rms"), "metric", "peak"),
+    ("rx_noise", dict(rms=0.005), "rms", 0.02),
+    ("rx_noise", dict(density=2e-6, bw_hz=20e9), "bw_hz", 40e9),
+    ("sample_clock", dict(ppm=100.0), "ppm", 300.0),
+    ("sample_clock", dict(ppm=100.0), "phase0_s", 1.4e-12),
+    ("sample_clock", dict(ppm=100.0), "drift_ppm_per_s", 5.0e7),
 ]
 
 
