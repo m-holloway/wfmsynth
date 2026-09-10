@@ -44,7 +44,7 @@ STAGES = {
     "dfe": dict(taps=[0.12, 0.05], levels=[-1.0, 1.0]),
     "tx_ffe": dict(taps=[-0.1, 0.75, -0.15], pre=1),
     "de_emphasis": dict(db=3.0),
-    "scope": dict(bw_hz=32e9, kind="bessel", order=4),
+    "scope": dict(bw_hz=32e9, kind="bessel", order=4),   # analog: single-pass causal
     "ac_couple": dict(fc_hz=2e9),
     "supply_coupling": dict(f_ripple_hz=2.5e6, am_depth=0.02),
     "nonlinearity": dict(compression=0.04),
@@ -116,38 +116,100 @@ def test_an_op_that_claims_to_be_linear_obeys_superposition(op):
         f"listed as linear but is not — it decides, clamps, quantises or reconstructs.")
 
 
-@pytest.mark.parametrize("op,fc_key,fc", [
-    ("ac_couple", "fc_hz", 2e9),
-    pytest.param("scope", "bw_hz", 32e9, marks=pytest.mark.xfail(strict=True, reason=(
-        "MEASURED DEFECT, not a tolerance: scope_bandwidth's IIR branch applies a 4th-order "
-        "Bessel through sosfiltfilt, i.e. TWICE, so the realised -3 dB point is HALF the "
-        "requested bandwidth. Asked 32 GHz: |H| = 0.7039 at 16 GHz and 0.1747 (-15.1 dB) at "
-        "32 GHz. A front end set to 32 GHz therefore behaves like a 16 GHz one, and every "
-        "chain that states an instrument bandwidth is stating twice what it gets. The fix is "
-        "a single-pass causal design, which also gives the stage the group delay it currently "
-        "lacks (measured +0.000 ps).")))])
-def test_a_filter_realises_the_corner_it_was_asked_for(op, fc_key, fc):
-    """Catches a silent clamp and a doubly-applied pole. `ac_couple` clamped any corner below
-    1e-4 of Nyquist — a 50 kHz request became 12.8 MHz, 256x off, with nothing said. Assert the
-    realised -3 dB point is within 2x of the request, which a squared response (its -3 dB at
-    1.55x the stated corner) still passes but a 256x clamp does not.
-    """
-    g = _grid()
-    n = len(np.zeros(g.n))
+# (op, corner keyword, corner, the rest of the op's params, allowed ratio band). The scope
+# rows are the analog front end at four settings plus the DIGITAL selected-bandwidth filter,
+# and they are held to 2 % rather than the 2x this test was written with, because a single-pass
+# design designed with `norm='mag'` realises the corner it was asked for and there is no reason
+# to allow it any slack.
+CORNER_CASES = [
+    ("ac_couple", "fc_hz", 2e9, {}, 2.0),
+    ("scope", "bw_hz", 32e9, dict(kind="bessel", order=4), 1.02),
+    ("scope", "bw_hz", 32e9, dict(kind="bessel", order=2), 1.02),
+    ("scope", "bw_hz", 32e9, dict(kind="bessel", order=6), 1.02),
+    ("scope", "bw_hz", 32e9, dict(kind="gaussian"), 1.02),
+    ("scope", "bw_hz", 32e9, dict(kind="brickwall"), 1.02),
+]
+
+
+def _realised_corner(op, fc_key, fc, extra, g, rising):
+    """The -3 dB point of an op, bisected on the realised output. Returns Hz."""
+    n = g.n
     def gain(f_hz):
         k = max(1, round(f_hz * n / FS))
         t = np.sin(2 * np.pi * k * np.arange(n) / n)
-        y = _run(op, {fc_key: fc}, t, g)
-        return abs(np.fft.rfft(y[:n])[k] / np.fft.rfft(t)[k]), k * FS / n
+        y = _run(op, dict(extra, **{fc_key: fc}), t, g)
+        return abs(np.fft.rfft(y[:n])[k] / np.fft.rfft(t)[k])
     lo, hi = fc / 60.0, min(0.45 * FS, fc * 60.0)
     for _ in range(34):                                  # bisect the |H| = 1/sqrt(2) point
         mid = np.sqrt(lo * hi)
-        gn, _fa = gain(mid)
-        rising = op == "ac_couple"
-        if (gn < 0.70710678) == rising:
+        if (gain(mid) < 0.70710678) == rising:
             lo = mid
         else:
             hi = mid
-    realised = np.sqrt(lo * hi)
-    assert 0.5 < realised / fc < 2.0, (f"{op}: asked for {fc:.4g} Hz, realised "
-                                       f"{realised:.4g} Hz ({realised / fc:.1f}x)")
+    return float(np.sqrt(lo * hi))
+
+
+@pytest.mark.parametrize("op,fc_key,fc,extra,tol", CORNER_CASES,
+                         ids=lambda v: str(v) if not isinstance(v, dict) else
+                         "-".join(f"{k}{x}" for k, x in v.items()) or "plain")
+def test_a_filter_realises_the_corner_it_was_asked_for(op, fc_key, fc, extra, tol):
+    """Catches a silent clamp, a doubly-applied pole, and a filter normalised to the wrong
+    thing. `ac_couple` clamped any corner below 1e-4 of Nyquist — a 50 kHz request became
+    12.8 MHz, 256x off, with nothing said. `scope`'s analog kinds were worse in a quieter way:
+    they ran a Bessel forwards AND backwards, squaring |H|, on top of designing it with
+    scipy's default ``norm='phase'`` whose own -3 dB point is at 0.68 of ``Wn``. Asked for
+    32 GHz, a bessel-4 front end realised 15.90 GHz — HALF — so every chain in this library
+    that stated an instrument bandwidth was getting half of it.
+
+    The realised corner is measured on the op's own output, by bisection, and compared with
+    the request. `test_the_zero_phase_opt_out_still_fails_this` is the same measurement
+    observed FAILING."""
+    g = _grid()
+    realised = _realised_corner(op, fc_key, fc, extra, g, rising=(op == "ac_couple"))
+    assert 1.0 / tol < realised / fc < tol, (f"{op} {extra}: asked for {fc:.4g} Hz, realised "
+                                             f"{realised:.4g} Hz ({realised / fc:.4f}x)")
+
+
+# What the pre-fix zero-phase analog path realises, as a fraction of the request. MEASURED at
+# bw_hz=32e9 on fs=256e9. Two independent errors compound: the double pass squares |H|, and
+# `norm='phase'` puts the single-pass -3 dB at 0.68*Wn to begin with.
+ZERO_PHASE_RATIO = {("bessel", 4): 0.497, ("bessel", 2): 0.582, ("bessel", 6): 0.432,
+                    ("gaussian", 4): 0.833}
+
+
+@pytest.mark.parametrize("kind,order", sorted(ZERO_PHASE_RATIO))
+def test_the_zero_phase_opt_out_still_fails_this(kind, order):
+    """THE GATE OBSERVED FAILING. A check never observed failing is not a check, so the defect
+    is kept reachable — `causal=False` — and measured. Each ratio below is what the front end
+    realised before the fix, and the bessel-4 row is the 0.497 that made a 32 GHz front end a
+    15.9 GHz one."""
+    g = _grid()
+    extra = dict(kind=kind, order=order, causal=False)
+    realised = _realised_corner("scope", "bw_hz", 32e9, extra, g, rising=False)
+    assert realised / 32e9 == pytest.approx(ZERO_PHASE_RATIO[(kind, order)], abs=0.005)
+    with pytest.raises(AssertionError):
+        test_a_filter_realises_the_corner_it_was_asked_for("scope", "bw_hz", 32e9, extra, 1.02)
+
+
+def test_the_analog_and_digital_band_limits_are_not_the_same_operator():
+    """The distinction is the whole point of the fix, so it is asserted rather than commented.
+    An ANALOG kind delays and is strictly causal; the DIGITAL selected-bandwidth filter that
+    sits after the converter is zero-phase, and asking it for a causal form raises instead of
+    quietly obliging."""
+    import wfmsynth.instrument as INST
+    g = _grid()
+    imp = np.zeros(g.n); imp[g.n // 2] = 1.0
+    for kind in INST.ANALOG_KINDS:
+        h = INST.scope_bandwidth(imp, g, 32e9, kind=kind)
+        pre = float(np.sum(h[:g.n // 2] ** 2) / np.sum(h ** 2))
+        assert pre < 1e-6, f"{kind}: {pre:.4f} of the impulse response is before t=0"
+    for kind in INST.DIGITAL_KINDS:
+        h = INST.scope_bandwidth(imp, g, 32e9, kind=kind)
+        pre = float(np.sum(h[:g.n // 2] ** 2) / np.sum(h ** 2))
+        # 0.375, not 0.5: the sinc's centre tap alone carries bw/nyquist = 1/4 of the energy,
+        # and it sits in the post-impulse half. (1 - 0.25)/2 = 0.375.
+        assert pre > 0.3, f"{kind} should be symmetric about t=0, pre {pre:.4f}"
+        with pytest.raises(ValueError):
+            INST.scope_bandwidth(imp, g, 32e9, kind=kind, causal=True)
+    with pytest.raises(ValueError):
+        INST.scope_bandwidth(imp, g, 32e9, kind="lowpass")

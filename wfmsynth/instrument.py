@@ -14,6 +14,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import signal as _sig
 
+from . import physics as _P
+
 
 def interleave_adc(x, m_cores=4, gain_mm=0.0, offset_mm=0.0, skew_mm=0.0,
                    rng=None, mismatch=None, offset_v=None):
@@ -52,25 +54,114 @@ def interleave_adc(x, m_cores=4, gain_mm=0.0, offset_mm=0.0, skew_mm=0.0,
     return y
 
 
-def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4):
+# ------------------------------------------------------------------ analog vs digital
+# THE DISTINCTION THIS MODULE NOW MAKES EXPLICIT, because getting it wrong halves every
+# stated bandwidth in the library. A band limit sits in one of two places in an instrument,
+# and the two are not the same operator:
+#
+#   ANALOG, BEFORE the converter -- the front end, the probe's own roll-off, an RC load. It is
+#   a physical network: causal, single-pass, and it DELAYS. Its response cannot be symmetric
+#   about t=0 because nothing in it knows the future.
+#
+#   DIGITAL, AFTER the converter -- the instrument's selected-bandwidth filter, which is a DSP
+#   stage operating on a stored record and can therefore look forwards. Zero phase is not a
+#   defect there, it is what the instrument does: MEASURED on three real exports from a
+#   high-bandwidth real-time sampling oscilloscope, the record's noise floor drops 38 dB across
+#   2 GHz at the corner, with no group delay to be found.
+#
+# Every analog kind here defaults to `causal=True` and every digital kind is zero-phase, and
+# asking for the wrong one raises rather than silently obliging.
+ANALOG_KINDS = ("bessel", "gaussian")
+DIGITAL_KINDS = ("brickwall",)
+
+
+def _gaussian_mag(n, wn):
+    """Gaussian |H| on the rfft grid of `n` samples, -3 dB EXACTLY at `wn` (of Nyquist).
+
+    ``exp(-0.5*(f/sigma)**2) = 1/sqrt(2)`` at ``f = sigma*sqrt(ln 2)``, so a Gaussian whose
+    -3 dB point is the requested corner has ``sigma = fc/sqrt(ln 2)`` -- i.e. the exponent is
+    ``-0.5*ln(2)*(f/fc)**2``. The legacy branch used ``sigma = fc``, which puts its own -3 dB
+    at ``0.8326*fc``: a 32 GHz request realised at 26.6 GHz before the double pass, 22.2 after.
+    """
+    f = np.fft.rfftfreq(n) / (wn / 2.0 + 1e-12)          # f in units of the requested corner
+    return np.exp(-0.5 * np.log(2.0) * f ** 2)
+
+
+def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4, causal=None):
     """A bandwidth limit. ``kind='bessel'`` (flat group delay) or ``'gaussian'`` model the
     ANALOG front end, which is band-limited by physics and rolls off gently. ``'brickwall'``
     models the instrument's DIGITAL selected-bandwidth filter, which sits after the converter
     and is not gentle at all: MEASURED on three real exports from a high-bandwidth real-time sampling oscilloscope,
     the record's noise
     floor drops **38 dB across 2 GHz** at the corner and is flat on both sides of it. Use the
-    analog kinds before the converter and ``'brickwall'`` after it."""
+    analog kinds before the converter and ``'brickwall'`` after it.
+
+    THE STATED CORNER IS NOW THE REALISED CORNER, WHICH IT WAS NOT
+    -------------------------------------------------------------
+    ``causal=True`` (the DEFAULT for every analog kind) applies the band limit ONCE, forwards.
+    ``causal=False`` is the legacy zero-phase form kept as an explicit opt-out, and it is wrong
+    in two independent ways at the same time -- both MEASURED, at ``bw_hz=32e9``,
+    ``kind='bessel'``, ``order=4``, ``grid.fs=256e9``:
+
+      * it ran the filter forwards AND backwards (`sosfiltfilt`), so the magnitude was the
+        design SQUARED: |H| = 0.7039 at 16 GHz and 0.1747 (-15.1 dB) at 32 GHz. A front end
+        asked for 32 GHz behaved like a **16.0 GHz** one.
+      * it designed the Bessel with scipy's default ``norm='phase'``, whose -3 dB point is at
+        0.68 of ``Wn`` even in a single pass -- 21.76 GHz for a 32 GHz request.
+
+    The causal path designs with ``norm='mag'``, which puts -3 dB exactly at ``bw_hz``
+    (measured 32.000 GHz, |H| = 0.7071), and runs one forward pass, so the stage also has the
+    group delay a physical front end has: **9.97 ps** at DC here, against the analog Bessel-4
+    closed form ``2.1139/(2*pi*32 GHz) = 10.51 ps`` (the 0.54 ps is the bilinear warp at
+    fc/Nyquist = 0.25) and against **+0.000 ps** for the zero-phase form.
+
+    The forward filter is initialised to STEADY STATE at ``x[0]`` (`sosfilt_zi`), not to zero:
+    with zero state the output starts at 0 whatever the signal is, planting a full-scale
+    settling transient at the head of every record. ONE CONSEQUENCE IS WORTH NAMING, because it
+    is measurable and it is not an improvement: fed a unit impulse at index 0, this stage is
+    primed to the DC steady state of that sample, so what comes out is the impulse response
+    PLUS a step-down settling, and `compose._lead_extent` -- which probes a chain's memory with
+    exactly that impulse -- therefore over-measures the front end's extent. MEASURED on the
+    shipped chain, the lead-in plan moves by at most one UI quantum (2048 samples of a 1 M
+    render) and in the conservative direction, so it is left as it is.
+
+    ``causal`` may not be set on a digital kind -- ``'brickwall'`` IS zero-phase, that is the
+    point of the distinction, and quietly accepting ``causal=True`` there would make the flag
+    a lie."""
     x = np.asarray(x, float)
+    if kind in DIGITAL_KINDS:
+        if causal:
+            raise ValueError(
+                f"kind={kind!r} is the instrument's DIGITAL selected-bandwidth filter, which "
+                f"sits AFTER the converter and is legitimately zero-phase; there is no causal "
+                f"form of it. causal= applies to the analog kinds {ANALOG_KINDS}.")
+    elif kind not in ANALOG_KINDS:
+        raise ValueError(f"unknown scope_bandwidth kind={kind!r}: expected one of "
+                         f"{ANALOG_KINDS + DIGITAL_KINDS}")
+    if causal is None:
+        causal = kind in ANALOG_KINDS
     wn = min(bw_hz / (grid.fs / 2.0), 0.99)
     if kind == "brickwall":
         X = np.fft.rfft(x)
         X[np.fft.rfftfreq(len(x)) > wn / 2.0] = 0.0   # rfftfreq's Nyquist is 0.5
         return np.fft.irfft(X, len(x))
     if kind == "gaussian":
-        f = np.fft.rfftfreq(len(x))
-        H = np.exp(-0.5 * (f / (wn / 2.0 + 1e-12)) ** 2)
-        return np.fft.irfft(np.fft.rfft(x) * H, len(x))
-    return _sig.sosfiltfilt(_sig.bessel(order, wn, output="sos"), x)
+        if not causal:
+            f = np.fft.rfftfreq(len(x))
+            H = np.exp(-0.5 * (f / (wn / 2.0 + 1e-12)) ** 2)
+            return np.fft.irfft(np.fft.rfft(x) * H, len(x))
+        # A magnitude-only response is zero-phase and therefore non-causal (symmetric
+        # pre-ringing). The MINIMUM-PHASE response with the same magnitude is the causal one
+        # with the least delay, and it is the same construction the causal channel uses
+        # (`physics._min_phase_H`), applied as a LINEAR convolution so the tail does not wrap.
+        return _P.apply_transfer(
+            x, lambda nfft: _P._min_phase_H(_gaussian_mag(nfft, wn), nfft)[:nfft // 2 + 1])
+    if not causal:
+        return _sig.sosfiltfilt(_sig.bessel(order, wn, output="sos"), x)
+    sos = _sig.bessel(order, wn, output="sos", norm="mag")   # -3 dB AT wn, not at 0.68*wn
+    zi = _sig.sosfilt_zi(sos) * x[0]
+    y, _ = _sig.sosfilt(sos, x, zi=zi)
+    return y
 
 
 def rc_pole_hz(r_ohm, c_f):
@@ -78,29 +169,35 @@ def rc_pole_hz(r_ohm, c_f):
     return 1.0 / (2.0 * np.pi * float(r_ohm) * float(c_f))
 
 
-def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0, causal=False):
+def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0, causal=True):
     """A passive probe's input capacitance LOADS the node it measures — an RC low-pass with a
     pole at ``1/(2*pi*R*C)`` that attenuates high frequency. Real probes perturb the DUT.
 
-    ``causal=True`` applies the single pole the closed form names, magnitude AND phase:
-    ``H(f) = 1/(1 + j*f/fc)``, so the loss is exactly ``10*log10(1 + (f/fc)**2)`` dB and the
-    group delay is the pole's, not zero.
+    ``causal=True`` (THE DEFAULT SINCE THE ZERO-PHASE FIX) applies the single pole the closed
+    form names, magnitude AND phase: ``H(f) = 1/(1 + j*f/fc)``, so the loss is exactly
+    ``10*log10(1 + (f/fc)**2)`` dB and the group delay is the pole's, not zero.
 
-    The ``causal=False`` default is kept bit-identical for existing callers and is NOT that
-    response: it routes through `scope_bandwidth`'s zero-phase Bessel, which runs the pole
-    forwards and backwards, so its magnitude is the closed form SQUARED — MEASURED, twice the
-    dB at every frequency (6.03 dB where the closed form says 3.01, 14.12 where it says 6.99)
-    — and its group delay is zero. Prefer ``causal=True``; it is what `probe` uses."""
+    ``causal=False`` IS THE OPT-OUT FOR THE OLD DEFAULT, and it is not this response: it routes
+    through the legacy zero-phase Bessel, which runs the pole forwards and backwards, so its
+    magnitude is the closed form SQUARED -- MEASURED, twice the dB at every frequency
+    (6.027 dB where the closed form says 3.014, 14.014 where it says 6.989) with -0.007 deg of
+    phase where an RC pole has -45. Pass it only to reproduce a record made before the fix.
+
+    A note on what this path does NOT fix: the pole is applied by dividing the record's rfft,
+    which is a CIRCULAR convolution, so the response to the record's tail lands on its head.
+    The pole's time constant is 22.5 ps at R=50, C=0.45 pF, so on any record long against that
+    the wrap is negligible -- but it is not zero, and making it linear would change the
+    arithmetic that the exact-closed-form gate checks. Logged in BACKLOG.md."""
     fc = rc_pole_hz(r_source, c_load_f)
     if not causal:
-        return scope_bandwidth(x, grid, fc, kind="bessel", order=1)
+        return scope_bandwidth(x, grid, fc, kind="bessel", order=1, causal=False)
     x = np.asarray(x, float)
     f = np.fft.rfftfreq(len(x), d=1.0 / grid.fs)
     return np.fft.irfft(np.fft.rfft(x) / (1.0 + 1j * (f / fc)), len(x))
 
 
 def probe(x, grid, c_load_f=0.5e-12, r_source=50.0, bw_hz=None, kind="bessel", order=4,
-          noise_rms=0.0, atten=1.0, rng=None):
+          noise_rms=0.0, atten=1.0, rng=None, causal=None):
     """The thing a measurement is made THROUGH. A chain that runs channel -> front end models
     an ideal tap, which does not exist: a probe is an instrument in its own right and
     contributes three separate mechanisms, all of them here.
@@ -109,7 +206,8 @@ def probe(x, grid, c_load_f=0.5e-12, r_source=50.0, bw_hz=None, kind="bessel", o
         ``1/(2*pi*R*C)``. This is the one that also perturbs the DUT, and it is applied as the
         exact causal single pole (`probe_loading(causal=True)`).
       * **bandwidth** — its own analog roll-off, independent of the loading pole and usually
-        well below the front end's. ``kind``/``order`` are `scope_bandwidth`'s.
+        well below the front end's. ``kind``/``order``/``causal`` are `scope_bandwidth`'s, so it
+        too is a single-pass causal analog stage realising the corner it is given.
       * **noise** — its own input-referred noise, ``noise_rms`` in the record's units, added
         at the probe tip (i.e. BEFORE the front end sees it, which is where a probe's noise
         actually enters).
@@ -124,7 +222,7 @@ def probe(x, grid, c_load_f=0.5e-12, r_source=50.0, bw_hz=None, kind="bessel", o
     if atten != 1.0:
         y = y * float(atten)
     if bw_hz is not None:
-        y = scope_bandwidth(y, grid, float(bw_hz), kind=kind, order=order)
+        y = scope_bandwidth(y, grid, float(bw_hz), kind=kind, order=order, causal=causal)
     if noise_rms:
         rng = rng or np.random.default_rng()
         y = y + rng.normal(0.0, float(noise_rms), len(y))

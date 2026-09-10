@@ -177,21 +177,36 @@ def test_group_delay_adds_through_the_composer_not_just_the_primitives():
     assert lag(two) == round(500e-12 * g.fs), f"two sections lagged {lag(two)} samples"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "KNOWN DEFECT, asserted as physics rather than pinned as behaviour: scope_bandwidth's "
-    "analog kinds use sosfiltfilt, which is ZERO-PHASE. A real analog front end is causal and "
-    "contributes group delay -- a causal bessel-4 at 40 GHz delays 12.8 ps and puts ~no energy "
-    "before t=0. Measured here: 0.00 ps of delay and 35% of the impulse response BEFORE the "
-    "impulse. Remove this marker when the front end becomes causal."))
-def test_the_analog_front_end_is_causal_and_contributes_group_delay():
+@pytest.mark.parametrize("kind,gd_ps", [("bessel", 7.776), ("gaussian", 3.881)])
+def test_the_analog_front_end_is_causal_and_contributes_group_delay(kind, gd_ps):
+    """WAS A STRICT XFAIL. The analog kinds ran `sosfiltfilt`, which is zero-phase, so the front
+    end delayed 0.00 ps and put 35 % (bessel) / 22 % (gaussian) of its impulse response BEFORE
+    the impulse. They are now single-pass causal: bessel by one forward `sosfilt`, gaussian by
+    the minimum-phase response of the same |H| applied as a linear convolution.
+
+    The delay is asserted against the CLOSED FORM, not against itself: an analog Bessel of
+    order 4 whose -3 dB point is at ``fc`` has group delay ``2.1139/(2*pi*fc)`` at DC, which is
+    8.411 ps at 40 GHz. Measured 7.776 ps -- 7.5 % low, and that is the bilinear warp at
+    fc/Nyquist = 0.3125, not a missing delay. The gaussian's 3.881 ps is the minimum-phase
+    delay of a Gaussian with the same corner, for which there is no closed form here, so it is
+    pinned rather than derived."""
     g = Grid(fs=256e9, n=1 << 14)
-    gd = _group_delay_s(lambda x: INST.scope_bandwidth(x, g, 40e9, kind="bessel"),
+    gd = _group_delay_s(lambda x: INST.scope_bandwidth(x, g, 40e9, kind=kind),
                         grid=g, band=(1e9, 10e9))
     imp = np.zeros(g.n); imp[g.n // 2] = 1.0
-    h = INST.scope_bandwidth(imp, g, 40e9, kind="bessel")
+    h = INST.scope_bandwidth(imp, g, 40e9, kind=kind)
     pre = float(np.sum(h[:g.n // 2] ** 2) / np.sum(h ** 2))
-    assert gd > 1e-12, f"analog front end group delay {gd*1e12:.4f} ps"
-    assert pre < 0.01, f"{pre:.3f} of the front end's impulse response is before t=0"
+    assert gd * 1e12 == pytest.approx(gd_ps, abs=0.02), f"group delay {gd*1e12:.4f} ps"
+    assert pre < 1e-6, f"{pre:.3f} of the front end's impulse response is before t=0"
+    if kind == "bessel":                      # against the analog prototype, not against itself
+        assert abs(gd - 2.1139 / (2 * np.pi * 40e9)) / (2.1139 / (2 * np.pi * 40e9)) < 0.10
+
+    # THE GATE OBSERVED FAILING: the opt-out still has neither property.
+    gd0 = _group_delay_s(lambda x: INST.scope_bandwidth(x, g, 40e9, kind=kind, causal=False),
+                         grid=g, band=(1e9, 10e9))
+    h0 = INST.scope_bandwidth(imp, g, 40e9, kind=kind, causal=False)
+    pre0 = float(np.sum(h0[:g.n // 2] ** 2) / np.sum(h0 ** 2))
+    assert abs(gd0) * 1e12 < 0.02 and pre0 > 0.2, f"{gd0*1e12:.4f} ps, pre {pre0:.3f}"
 
 
 # ======================================================== order sensitivity

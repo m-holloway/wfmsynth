@@ -213,7 +213,11 @@ def _op_de_emphasis(x, p, streams, grid, idx):
 
 
 def _op_scope(x, p, streams, grid, idx):
-    kw = {k: p[k] for k in ("kind", "order") if k in p}
+    # `causal` is forwarded, and it has to be: it is the opt-out for the pre-fix zero-phase
+    # front end, and an opt-out a recipe cannot carry is not an opt-out. It was omitted from
+    # this dict when the flag was added, and the symptom was that `scope(causal=False)`
+    # rendered the causal path and hashed identically to the default.
+    kw = {k: p[k] for k in ("kind", "order", "causal") if k in p}
     return INST.scope_bandwidth(x, grid, p["bw_hz"], **kw)
 
 
@@ -222,7 +226,7 @@ def _op_probe(x, p, streams, grid, idx):
                       r_source=p.get("r_source", 50.0), bw_hz=p.get("bw_hz"),
                       kind=p.get("kind", "bessel"), order=p.get("order", 4),
                       noise_rms=p.get("noise_rms", 0.0), atten=p.get("atten", 1.0),
-                      rng=streams.role(f"probe/{idx}"))
+                      causal=p.get("causal"), rng=streams.role(f"probe/{idx}"))
 
 
 def _op_store(x, p, streams, grid, idx, win=None):
@@ -860,7 +864,15 @@ class Signal:
         return self._add("de_emphasis", **params)
 
     def scope(self, **params):
-        """Scope acquisition bandwidth (band-limited front end). params: bw_hz, kind, order."""
+        """Scope acquisition bandwidth. params: bw_hz, kind, order, causal.
+
+        ``kind`` picks WHERE in the instrument the band limit sits, and the two places are not
+        the same operator: ``'bessel'``/``'gaussian'`` are the ANALOG front end, causal and
+        single-pass by default, realising the corner they are given and delaying by it;
+        ``'brickwall'`` is the DIGITAL selected-bandwidth filter AFTER the converter, which is
+        legitimately zero-phase. ``causal=False`` is the opt-out for the pre-fix zero-phase
+        analog path, which realised HALF the stated bandwidth -- see
+        `instrument.scope_bandwidth`."""
         return self._add("scope", **params)
 
     def input_bandwidth(self, **params):
@@ -939,7 +951,7 @@ class Signal:
         """The probe the measurement is made THROUGH — placed between the channel and the front
         end. Without it a chain models a perfect tap, which does not exist.
         params: c_load_f (input capacitance, F — an RC pole at 1/(2*pi*R*C) against r_source),
-        r_source (ohms), bw_hz + kind/order (the probe's OWN bandwidth), noise_rms (its own
+        r_source (ohms), bw_hz + kind/order/causal (the probe's OWN bandwidth), noise_rms (its own
         input-referred noise, added at the tip), atten (divider ratio as a gain, 0.1 = 10:1).
         Defaults are the bare loading pole: no bandwidth limit, no noise, no division."""
         return self._add("probe", **params)

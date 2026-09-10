@@ -1334,7 +1334,13 @@ def test_quantisation_and_enob_are_two_mechanisms():
       2. the converter's own lattice is ~10 LSB BELOW that noise, so it is dithered and
          contributes < 0.2 % of the power ENOB measures;
       3. rounding to a 2**ENOB lattice instead does not survive the DSP filter a real DSO
-         runs after its converter -- it reads ~2 bits better than the figure it was given.
+         runs after its converter -- it reads ~1 bit better than the figure it was given, at
+         EVERY tone, while the two-mechanism path lands within 0.05 bits at the same tones.
+
+    Property 3 used to be measured on ONE 2.0 GHz tone and demanded >1.5 bits. A coarse lattice
+    on a pure tone makes deterministic harmonics, so the reading depends on where the peaks fall
+    between codes: the same pre-fix path read +1.91 bits at 2.0 GHz and +0.68 at 3.0 GHz. The
+    1.5 threshold was riding one lucky tone. It is now the WORST of six tones.
     """
     import numpy as np, pytest
     from wfmsynth.grid import Grid
@@ -1363,8 +1369,24 @@ def test_quantisation_and_enob_are_two_mechanisms():
     assert 8.0 < sig_c / q10 < 12.0                       # the lattice is dithered away
     assert (q10 ** 2 / 12) / sig_c ** 2 < 0.002
 
-    legacy = INST.quantize_adc(INST.scope_bandwidth(sine, g, 110e9), enob=5.9, full_scale=A)
-    assert enob(INST.scope_bandwidth(legacy, g, 32e9, kind="brickwall")) - 5.9 > 1.5
+    TONES = (2.0e9, 2.1e9, 3.0e9, 5.0e9, 7.0e9, 11.0e9)
+
+    def tone(f_hz):
+        kk = int(round(f_hz * g.n / FSAMP))
+        return A * np.sin(2 * np.pi * kk * t / g.n)
+
+    over, honest = [], []
+    for f0 in TONES:
+        legacy = INST.quantize_adc(INST.scope_bandwidth(tone(f0), g, 110e9, kind="bessel"),
+                                   enob=5.9, full_scale=A)
+        over.append(enob(INST.scope_bandwidth(legacy, g, 32e9, kind="brickwall")) - 5.9)
+        y = INST.scope_bandwidth(tone(f0), g, 110e9, kind="bessel")
+        y = y + np.random.default_rng(11).normal(0.0, sig_c, g.n)
+        y, _ = INST.clip_adc(y, A)
+        y = INST.quantize_adc(y, bits=10, full_scale=A)
+        honest.append(enob(INST.scope_bandwidth(y, g, 32e9, kind="brickwall")) - 5.9)
+    assert min(over) > 0.6, over                # measured 0.77..1.05 across the six
+    assert max(abs(h) for h in honest) < 0.10, honest   # measured 0.022..0.046
 
     with pytest.raises(ValueError):                       # a depth that cannot reach the figure
         INST.converter_noise_rms(11.0, A, 110e9, FSAMP / 2, bits=10)

@@ -188,6 +188,68 @@ accepted (an integer is honoured as samples, rounded up to one UI). Whoever wire
 lead-in should pass `Signal(lead_in=True)` and read the resolved lengths back from `lead_plan()`
 rather than sharing a constant between the two.
 
+### #57 The zero-phase filters still left in the kernel, outside `instrument.py`
+
+**Status:** Open. Owner: whoever owns `physics.py`, `grammar.py`, `pam4.py`, `impairments.py`.
+
+`instrument.scope_bandwidth` and `instrument.probe_loading` are now single-pass causal by
+default, and the ANALOG/DIGITAL distinction is explicit (`instrument.ANALOG_KINDS` /
+`DIGITAL_KINDS`, and asking a digital kind for a causal form raises). The same `sosfiltfilt`
+pattern is still live in four files this change did not own. Each one below is MEASURED, and
+they are not all defects — the distinction is whether the stage claims a corner or a delay.
+
+**Defects: a stated corner that is not the realised corner.**
+
+- `physics.ac_couple` — a coupling capacitor is a physical single-pole high-pass, and this one
+  runs `butter(1, ..., 'high')` through `sosfiltfilt`. MEASURED on `fs=256e9`: asked 2 GHz →
+  realised 3.107 GHz; asked 5 GHz → 7.756 GHz; asked 200 MHz → 310.5 MHz. **1.5537x, 1.5512x,
+  1.5527x** — the constant `1/sqrt(sqrt(2)-1)` of a squared first-order response. A single
+  forward `sosfilt` of the same design realises 2.002 GHz for a 2 GHz request (1.0010x). It
+  also has no group delay, where a real coupling network's is not zero.
+  `tests/test_no_fabricated_data.py` holds `ac_couple` to 2x, so it passes at 1.55x; tightening
+  that row to 1.02 like the `scope` rows is the check that closes this.
+- `impairments.py:193` — a bandwidth-limiting impairment, `bessel(4, U(0.2, 0.45))` through
+  `sosfiltfilt`, so the realised corner is roughly half the drawn one and every
+  domain-randomised record is band-limited to a different number than the one recorded in its
+  provenance.
+
+**Also zero-phase, and it is edge shaping, which the library already calls a causality
+violation.** `physics._shape_edges` has a `causal=` flag and it still DEFAULTS to `False`;
+`grammar.py:35`, `grammar.py:119` and `pam4.py:62` reimplement the same zero-phase shaping with
+no flag at all. `compose.py`'s lead-in comment already records that this shaping "invents the
+samples past both ends".
+
+**Not defects, and worth saying so rather than converting them uniformly.** `physics.py:681`
+and `physics.py:904` smooth a random sequence into coloured phase noise, and `grammar.py:80`
+and `grammar.py:104` shape synthetic-family envelopes. None claims a corner, a delay or
+causality; zero-phase smoothing of a noise process is a legitimate choice, and a
+`grammar`/`validate` fixture is not an instrument stage. The three `sosfiltfilt` calls left in
+`validate.py` (lines 116, 129, 441) are source fixtures for that reason and are commented as
+such.
+
+**Done when:** `ac_couple` realises the corner it is given to 2 %, with the old response
+reachable and pinned; `impairments.py:193`'s drawn bandwidth is the realised one; the
+edge-shaping default is decided one way with a hash to show what moved; and each remaining
+`sosfiltfilt` carries a one-line note saying which of the two categories it is in.
+
+### #58 `probe_loading`'s exact pole is applied CIRCULARLY
+
+**Status:** Open. Owner: whoever owns `instrument.py` — deliberately not taken with the
+zero-phase fix, because it changes different arithmetic.
+
+`probe_loading(causal=True)` divides the record's `rfft` by `1 + j*f/fc`, which is a circular
+convolution: the pole's response to the record's tail lands on its head. It is exact in
+magnitude and phase (5.3e-15 dB, 7.1e-15 deg), which is why it was kept as-is — the
+closed-form gate in `validate.py` and `tests/test_acquisition_path.py` measures a whole-record
+tone, and a linear application would show edge effects there instead of the exactness. The
+pole's time constant is 22.5 ps at R=50, C=0.45 pF, so the wrap is small on any long record,
+but it is not zero and it is the same class of defect U-16 removed everywhere else. This is
+the same family as #54 (`brickwall` and the Gaussian mask, both still circular).
+
+**Done when:** the pole goes through `physics.apply_transfer`, the exactness gate is restated
+as a measurement on the record's interior, and the move is quantified in LSB of an 11-bit
+export both with and without a lead-in — the way #54 quantified its own.
+
 ### #27 Unify `Signal.digitize()` with `instrument.digitize()`
 
 **Status:** Open.
@@ -374,17 +436,14 @@ Left undone deliberately, because each needs a file outside that change's scope.
 
 ### `probe_loading`'s default is not the pole it documents
 
-`probe_loading(causal=False)` — still the default, still bit-identical — routes through
-`scope_bandwidth`'s zero-phase Bessel, which runs the single pole forwards and backwards. Its
-magnitude is therefore the closed form SQUARED: measured 6.027 dB at `fc` where
-`10*log10(1 + (f/fc)**2)` says 3.014, and 14.014 where the closed form says 6.989 — a ratio of
-1.9995 and 2.0050. Its group delay is zero, where an RC pole's is not. `causal=True` and the
-new `probe()` are the closed form to 5e-15 dB and 7e-15 degrees.
-
-**Done when:** the default is the pole, the change is stated as a versioned compatibility
-break, and `wfmsynth/validate.py:1124` — which asserts only that HF is attenuated *at all*, a
-check that passes on a response twice as steep as the physics — asserts the closed form
-instead.
+**Status:** DELIVERED by the zero-phase filter-family fix. `probe_loading` defaults to
+`causal=True`, which is the closed form `1/(1 + j*f/fc)` to 5.3e-15 dB and 7.1e-15 degrees over
+`f/fc = 0.25..4` (asserted in `validate.py`, not only in tests). The old behaviour is
+`causal=False` and is still exactly the closed form SQUARED — 1.9959..2.0169x its dB at every
+frequency, which is the gate observed failing. The two weak `validate.py` checks that this item
+named ("rolls off HF at all", "attenuates HF") are still there but are no longer the only ones:
+they are now followed by the realised -3 dB point, the 0.35/BW rise time, the group delay
+against the analog closed form, and the RC pole in magnitude AND phase.
 
 ### `wfmsynth/validate.py` has no entry for either mechanism
 

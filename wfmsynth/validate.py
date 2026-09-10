@@ -112,6 +112,11 @@ check("AC coupling preserves edge energy (HF kept)",
 
 print("== multi-reflection: PULSE echoes decay geometrically at multiples of 2*td ==")
 # a localized pulse so each reflection is a localized bump (not a staircase)
+# `sosfiltfilt` here is deliberate and stays: this is a SOURCE FIXTURE -- a smooth pulse / a
+# smooth square for the stage under test to act on -- not an instrument stage. It states no
+# corner and makes no causality claim, so zero phase costs nothing. The stages that DID claim
+# a corner (`instrument.scope_bandwidth`, `probe_loading`) are single-pass causal; BACKLOG #57
+# lists the remaining calls and which category each is in.
 pulse = np.zeros(N); pulse[N // 4:N // 4 + 30] = 1.0
 pulse = sp.sosfiltfilt(sp.bessel(4, 0.08, output="sos"), pulse)
 td = 0.12; gs, gl = 0.4, 0.5
@@ -126,6 +131,7 @@ check("echo decay ratio ~ (gs*gl) within 2x",
       f"measured={e2/(e1+1e-9):.3f} expected~{gs*gl:.3f}")
 
 print("== jitter: measured edge-time RMS tracks injected Rj (coherent shift) ==")
+# a source fixture, not an instrument stage -- see the note above and BACKLOG #57
 sqr = sp.sosfiltfilt(sp.bessel(4, 0.02, output="sos"), sp.square(2 * np.pi * 20 * T))
 def crossings(y):
     s = np.sign(y - y.mean())
@@ -438,6 +444,7 @@ check("channel loss in dB at a stated frequency is realized",
       abs(_realized_db - _loss_db) < 0.5,
       f"requested {_loss_db}dB@{_at_ghz}GHz -> realized {_realized_db:.2f}dB")
 # 3) jitter in SECONDS equals the equivalent sample-domain call (exact grid conversion)
+# a source fixture, not an instrument stage -- see BACKLOG #57
 _sq = sp.sosfiltfilt(sp.bessel(4, 0.02, output="sos"), sp.square(2 * np.pi * 20 * T))
 _a = P.inject_jitter(_sq, sigma_rj_s=3.0 * _g.dt, rng=np.random.default_rng(7), grid=_g)
 _b = P.inject_jitter(_sq, sigma_rj=3.0, rng=np.random.default_rng(7))
@@ -1139,8 +1146,98 @@ _hi = _f40 > 60e9
 _bw40 = _sbw(_x40, _g40, bw_hz=33e9)
 check("scope bandwidth rolls off high frequencies (band-limited acquisition)",
       np.sum(np.abs(np.fft.rfft(_bw40))[_hi]) < 0.5 * np.sum(np.abs(np.fft.rfft(_x40))[_hi]))
-check("probe capacitive loading is a low-pass (attenuates HF, loads the DUT)",
-      np.sum(np.abs(np.fft.rfft(_pl(_x40, _g40, c_load_f=1e-12)))[_hi]) < np.sum(np.abs(np.fft.rfft(_x40))[_hi]))
+
+# THE CHECK THAT REPLACED "ROLLS OFF HF AT ALL". That one passed on a response twice as steep as
+# the physics, and for months it did: the analog kinds ran their filter forwards AND backwards
+# (`sosfiltfilt`), which squares |H|, on top of designing the Bessel with scipy's default
+# `norm='phase'`, whose own -3 dB point is at 0.68 of Wn. A front end asked for 32 GHz realised
+# 15.90 GHz. Nothing in this file noticed, because nothing here asked WHERE the corner was.
+_gfe = Grid(fs=1024e9, n=1 << 16)
+
+
+def _realised_corner_hz(fn, fc_hz, rising=False):
+    """The -3 dB point of a stage, bisected on its OWN realised output."""
+    def gain(f_hz):
+        k = max(1, round(f_hz * _gfe.n / _gfe.fs))
+        t = np.sin(2 * np.pi * k * np.arange(_gfe.n) / _gfe.n)
+        y = np.asarray(fn(t), float)
+        return abs(np.fft.rfft(y[:_gfe.n])[k] / np.fft.rfft(t)[k])
+    lo, hi = fc_hz / 60.0, min(0.45 * _gfe.fs, fc_hz * 60.0)
+    for _ in range(36):
+        mid = np.sqrt(lo * hi)
+        if (gain(mid) < 0.70710678) == rising:
+            lo = mid
+        else:
+            hi = mid
+    return float(np.sqrt(lo * hi))
+
+
+_fe_ratio, _fe_ratio0 = [], []
+for _fb in (12e9, 20e9, 32e9, 40e9):
+    for _kind in ("bessel", "gaussian"):
+        _fe_ratio.append(_realised_corner_hz(
+            lambda x, b=_fb, k=_kind: _sbw(x, _gfe, b, kind=k), _fb) / _fb)
+        _fe_ratio0.append(_realised_corner_hz(
+            lambda x, b=_fb, k=_kind: _sbw(x, _gfe, b, kind=k, causal=False), _fb) / _fb)
+check("the analog front end realises the -3 dB point it was ASKED for (not half of it)",
+      max(abs(np.array(_fe_ratio) - 1.0)) < 0.01,
+      f"realised/requested {min(_fe_ratio):.4f}..{max(_fe_ratio):.4f} over 4 bandwidths x "
+      f"{{bessel, gaussian}}")
+check("  ... and the GATE OBSERVED FAILING: the zero-phase opt-out realises 0.43-0.83x of it",
+      max(_fe_ratio0) < 0.90,
+      f"realised/requested {min(_fe_ratio0):.4f}..{max(_fe_ratio0):.4f} -- a 32 GHz bessel-4 "
+      f"front end behaving like a {32.0 * _fe_ratio0[4]:.1f} GHz one")
+
+# The 10-90 % step rise of a gently-rolled-off low-pass is 0.35/BW. It is the spec sheet's own
+# arithmetic, it needs no reference waveform, and it is where the halving shows up as a number a
+# reader recognises.
+_step = np.concatenate([np.zeros(_gfe.n // 2), np.ones(_gfe.n - _gfe.n // 2)])
+
+
+def _rise_mid_ps(y):
+    y = (y - y[:1000].mean()) / (y[-1000:].mean() - y[:1000].mean())
+    _t = (np.arange(len(y)) - _gfe.n // 2) / _gfe.fs * 1e12
+    def cr(lv):
+        i = int(np.argmax(y > lv))
+        return float(np.interp(lv, [y[i - 1], y[i]], [_t[i - 1], _t[i]]))
+    return cr(0.9) - cr(0.1), cr(0.5)
+
+
+_r32, _m32 = _rise_mid_ps(_sbw(_step, _gfe, 32e9, kind="bessel", order=4))
+_r32o, _m32o = _rise_mid_ps(_sbw(_step, _gfe, 32e9, kind="bessel", order=4, causal=False))
+_gd_cf = 2.1139 / (2 * np.pi * 32e9) * 1e12                 # analog Bessel-4 group delay at DC
+check("a 32 GHz analog front end has the 0.35/BW rise time and the group delay of one",
+      abs(_r32 * 32e9 / 1e12 - 0.35) < 0.01 and 0.6 < _m32 / _gd_cf < 1.0,
+      f"rise {_r32:.2f} ps (rise*BW = {_r32 * 32e9 / 1e12:.4f}), 50 % at {_m32:+.2f} ps against "
+      f"the closed form's {_gd_cf:.2f} ps")
+check("  ... and the opt-out is 0.35/BW for HALF the bandwidth, with no delay at all",
+      abs(_r32o * 32e9 / 1e12 - 0.728) < 0.01 and abs(_m32o) < 1.0,
+      f"rise {_r32o:.2f} ps (rise*BW = {_r32o * 32e9 / 1e12:.4f}, i.e. 0.35/{32 / 2.08:.1f} GHz), "
+      f"50 % at {_m32o:+.2f} ps")
+
+# The probe's loading pole, in MAGNITUDE AND PHASE, against `1/(1 + j*f/fc)`. A zero-phase
+# filter can carry the right rolloff shape and still not be an RC pole, which is exactly what
+# the old default was.
+_gpr = Grid(fs=400e9, baud=25e9, n=1 << 15)
+from wfmsynth.instrument import rc_pole_hz as _rc_pole_hz
+_fc_pr = _rc_pole_hz(50.0, 0.5e-12)
+_pdb, _pph, _pdb0 = [], [], []
+for _mult in (0.25, 0.5, 1.0, 2.0, 4.0):
+    _kp = int(round(_fc_pr * _mult * _gpr.n / _gpr.fs)); _fp = _kp * _gpr.fs / _gpr.n
+    _tp = np.sin(2 * np.pi * _kp * np.arange(_gpr.n) / _gpr.n)
+    _Hp = np.fft.rfft(_pl(_tp, _gpr, c_load_f=0.5e-12))[_kp] / np.fft.rfft(_tp)[_kp]
+    _Hp0 = np.fft.rfft(_pl(_tp, _gpr, c_load_f=0.5e-12, causal=False))[_kp] / np.fft.rfft(_tp)[_kp]
+    _want_db = 10 * np.log10(1 + (_fp / _fc_pr) ** 2)
+    _pdb.append(abs(-20 * np.log10(abs(_Hp)) - _want_db))
+    _pph.append(abs(np.degrees(np.angle(_Hp)) + np.degrees(np.arctan(_fp / _fc_pr))))
+    _pdb0.append((-20 * np.log10(abs(_Hp0))) / _want_db)
+check("probe capacitive loading IS the RC pole 1/(1 + j*f/fc), magnitude AND phase",
+      max(_pdb) < 1e-9 and max(_pph) < 1e-9,
+      f"fc = {_fc_pr / 1e9:.4f} GHz; worst deviation {max(_pdb):.2e} dB and {max(_pph):.2e} deg "
+      f"over f/fc = 0.25..4")
+check("  ... and the GATE OBSERVED FAILING: the zero-phase opt-out is that closed form SQUARED",
+      1.99 < min(_pdb0) and max(_pdb0) < 2.02,
+      f"{min(_pdb0):.4f}..{max(_pdb0):.4f}x the closed form's dB at every frequency")
 _tb40 = _tbj(_x40, _g40, rms_ps=1.5, rng=np.random.default_rng(0))
 check("timebase jitter smears the eye horizontally (closes it)",
       _eh(_tb40, _g40) < _eh(_x40, _g40) - 0.02, f"eye {_eh(_x40,_g40):.3f} -> {_eh(_tb40,_g40):.3f}")
@@ -1605,14 +1702,36 @@ check("the converter's lattice is far BELOW the noise that sets its ENOB (so it 
 # THE REFUTATION. The legacy knob rounds to a 2**enob lattice. A real DSO filters AFTER its
 # converter, and that filter throws away most of a lattice's noise power -- so the ENOB-as-lattice
 # model does not even reproduce the number it was handed.
-_yl = INST.quantize_adc(INST.scope_bandwidth(_sine, _gE, 110e9, kind="bessel"), enob=5.9,
-                        full_scale=_A)
-_yl_f = INST.scope_bandwidth(_yl, _gE, 32e9, kind="brickwall")
+#
+# MEASURED AT SIX TONES, NOT ONE, AND THAT IS THE POINT. This check used to read one 2.0 GHz
+# tone and demand >1.5 bits of overshoot. A coarse lattice on a pure tone produces DETERMINISTIC
+# HARMONICS, not white error, so the reading depends on exactly where the tone's peaks land
+# between codes: on the pre-fix zero-phase front end the six tones below read
+# +1.91 / +1.05 / +0.68 / +1.08 / +0.76 / +0.81 bits. The 1.5 threshold was passing on the ONE
+# tone that happened to read 1.91 and would have failed on four of the other five. It is now the
+# WORST of the six, and the contrast that carries the argument is measured on the same tones:
+# the honest two-mechanism path (a 10-bit lattice plus `converter_noise_rms`) lands within
+# 0.046 bits of the published figure at every one of them, while the legacy lattice overshoots
+# by 0.77 to 1.05.
+_ENOB_TONES = (2.0e9, 2.1e9, 3.0e9, 5.0e9, 7.0e9, 11.0e9)
+
+
+def _legacy_lattice_overshoot(f_hz):
+    _k = int(round(f_hz * _NE / _FSAMP))
+    _s = _A * np.sin(2 * np.pi * _k * np.arange(_NE) / _NE)
+    _yl = INST.quantize_adc(INST.scope_bandwidth(_s, _gE, 110e9, kind="bessel"), enob=5.9,
+                            full_scale=_A)
+    return _enob_meas(INST.scope_bandwidth(_yl, _gE, 32e9, kind="brickwall")) - 5.9, _yl
+
+
+_over = np.array([_legacy_lattice_overshoot(_f)[0] for _f in _ENOB_TONES])
+_yl = _legacy_lattice_overshoot(2.0e9)[1]
 check("ENOB-as-a-lattice does NOT survive the DSP filter a real DSO has after its converter",
-      _enob_meas(_yl_f) - 5.9 > 1.5,
-      f"asked for 5.9, reads {_enob_meas(_yl_f):.2f} after the 32 GHz filter "
-      f"({_enob_meas(_yl):.2f} before it); its lattice is {2 * _A / 2 ** 5.9 * 1e6:.0f} uV against "
-      f"the converter's real {_q10 * 1e6:.0f} uV")
+      _over.min() > 0.6,
+      f"asked for 5.9, reads {_over.min() + 5.9:.2f}..{_over.max() + 5.9:.2f} after the 32 GHz "
+      f"filter at {len(_ENOB_TONES)} tones ({_enob_meas(_yl):.2f} before it at 2 GHz); its "
+      f"lattice is {2 * _A / 2 ** 5.9 * 1e6:.0f} uV against the converter's real "
+      f"{_q10 * 1e6:.0f} uV")
 try:
     INST.converter_noise_rms(11.0, _A, 110e9, _NYQ, bits=10)
     _guard = False

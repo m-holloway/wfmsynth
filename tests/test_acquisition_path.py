@@ -205,6 +205,55 @@ def test_rx_ffe_is_a_fixed_tap_misplacement_and_not_the_same_defect():
     assert np.mean(walk[-2000:]) - np.mean(walk[2000:4000]) > 100.0
 
 
+# ================================================= the analog front end, against 0.35/BW
+# A gently-rolled-off low-pass's 10-90 % step rise time is 0.35/BW. That relation is the
+# instrument spec sheet's own arithmetic, it needs no reference waveform, and it is the sharpest
+# statement of the defect this section was written for: a front end asked for 32 GHz had a
+# 22.75 ps rise, which is 0.73/BW -- exactly 0.35/BW for a 16 GHz front end.
+FE_GRID = Grid(fs=1024e9, n=1 << 16)
+FE_BW = [12e9, 20e9, 32e9, 40e9]
+
+
+def _step_rise_and_delay(y, grid):
+    """(10-90 % rise, 50 % crossing) in ps, relative to the step's own position."""
+    y = (y - y[:1000].mean()) / (y[-1000:].mean() - y[:1000].mean())
+    t = (np.arange(len(y)) - grid.n // 2) / grid.fs * 1e12
+    def cross(lv):
+        i = int(np.argmax(y > lv))
+        return float(np.interp(lv, [y[i - 1], y[i]], [t[i - 1], t[i]]))
+    return cross(0.9) - cross(0.1), cross(0.5)
+
+
+@pytest.mark.parametrize("bw", FE_BW)
+def test_the_analog_front_end_rise_time_is_the_0_35_over_bw_the_spec_sheet_means(bw):
+    """CONSTRUCTED ANSWER RECOVERED, and the gate observed failing in the same test.
+
+    MEASURED, `kind='bessel'`, `order=4`, fs = 1024 GSa/s:
+
+        BW      rise (causal)   rise*BW      rise (causal=False)   rise*BW
+        12 GHz   29.18 ps        0.3501       60.74 ps              0.7289
+        20 GHz   17.52 ps        0.3503       36.43 ps              0.7286
+        32 GHz   10.96 ps        0.3506       22.75 ps              0.7279
+        40 GHz    8.80 ps        0.3519       18.19 ps              0.7274
+
+    The opt-out's product is 0.73, i.e. 2.08x -- a front end behaving like one of HALF the
+    stated bandwidth, which is the whole defect in one number. The 50 % crossing moves with it:
+    -0.49 ps (no delay at all, and slightly NEGATIVE, which nothing physical does) to +9.81 ps
+    at 32 GHz, against the analog Bessel-4 closed-form group delay of 10.51 ps."""
+    step = np.concatenate([np.zeros(FE_GRID.n // 2), np.ones(FE_GRID.n - FE_GRID.n // 2)])
+    rise, mid = _step_rise_and_delay(
+        INST.scope_bandwidth(step, FE_GRID, bw, kind="bessel", order=4), FE_GRID)
+    assert rise * bw / 1e12 == pytest.approx(0.35, abs=0.01), f"{rise:.3f} ps at {bw/1e9:g} GHz"
+    assert 0.6 < mid / (2.1139 / (2 * np.pi * bw) * 1e12) < 1.0, f"50 % at {mid:.3f} ps"
+
+    # THE GATE OBSERVED FAILING: the pre-fix path is 0.35/BW for HALF the stated bandwidth.
+    rise0, mid0 = _step_rise_and_delay(
+        INST.scope_bandwidth(step, FE_GRID, bw, kind="bessel", order=4, causal=False), FE_GRID)
+    assert rise0 * bw / 1e12 == pytest.approx(0.728, abs=0.01), f"{rise0:.3f} ps"
+    assert rise0 / rise == pytest.approx(2.08, abs=0.05)
+    assert abs(mid0) < 1.0, f"the zero-phase form should not delay, got {mid0:.3f} ps"
+
+
 # ============================================================ U-01: the probe
 PROBE_RC = [(50.0, 0.5e-12), (50.0, 1.0e-12), (100.0, 0.25e-12), (25.0, 2.0e-12)]
 PROBE_GRID = Grid(fs=400e9, baud=25e9, n=1 << 15)
@@ -233,27 +282,30 @@ def test_the_probe_is_the_rc_pole_the_closed_form_names(r, c, mult):
 def test_the_closed_form_gate_rejects_the_wrong_pole():
     """The gate observed failing: the same assertion against a probe whose capacitance is twice
     what the closed form was written for is out by ~4 dB at fc, and against the zero-phase
-    `probe_loading` default -- which applies the pole twice -- by ~3 dB and 45 degrees."""
+    `causal=False` opt-out -- which applies the pole twice -- by ~3 dB and 45 degrees."""
     fc = 1.0 / (2 * np.pi * 50.0 * 0.5e-12)
     f, H = _transfer_at(lambda x: INST.probe(x, PROBE_GRID, c_load_f=1.0e-12), fc)
     assert abs(-20 * np.log10(abs(H)) - 10 * np.log10(1 + (f / fc) ** 2)) > 3.0
-    f, H = _transfer_at(lambda x: INST.probe_loading(x, PROBE_GRID, c_load_f=0.5e-12), fc)
+    f, H = _transfer_at(
+        lambda x: INST.probe_loading(x, PROBE_GRID, c_load_f=0.5e-12, causal=False), fc)
     assert abs(-20 * np.log10(abs(H)) - 10 * np.log10(1 + (f / fc) ** 2)) > 2.5
     assert abs(np.degrees(np.angle(H))) < 1.0                       # zero phase, not a pole
 
 
-def test_probe_loading_default_is_the_closed_form_squared():
-    """Naming the deviation rather than leaving it to be discovered: the shipped zero-phase
-    default runs the pole forwards and backwards, so its dB is twice the closed form's at every
-    frequency. Kept bit-identical; `causal=True` is the pole itself."""
+def test_probe_loading_defaults_to_the_pole_and_the_squared_form_is_now_opt_in():
+    """THE DEFAULT MOVED, so both sides are asserted here. The default (`causal=True`) is the
+    single pole itself, magnitude and phase, to 1e-9. The old default is reachable as
+    `causal=False` and is still exactly the closed form SQUARED -- 2.00x the dB at every
+    frequency -- which is why it stopped being the default."""
     fc = 1.0 / (2 * np.pi * 50.0 * 0.5e-12)
     for mult in (0.5, 1.0, 2.0):
         f, H = _transfer_at(lambda x: INST.probe_loading(x, PROBE_GRID, c_load_f=0.5e-12), fc * mult)
-        assert (-20 * np.log10(abs(H))) / (10 * np.log10(1 + (f / fc) ** 2)) == pytest.approx(2.0, abs=0.02)
+        assert -20 * np.log10(abs(H)) == pytest.approx(10 * np.log10(1 + (f / fc) ** 2), abs=1e-9)
+        assert np.degrees(np.angle(H)) == pytest.approx(-np.degrees(np.arctan(f / fc)), abs=1e-9)
     for mult in (0.5, 1.0, 2.0):
         f, H = _transfer_at(
-            lambda x: INST.probe_loading(x, PROBE_GRID, c_load_f=0.5e-12, causal=True), fc * mult)
-        assert -20 * np.log10(abs(H)) == pytest.approx(10 * np.log10(1 + (f / fc) ** 2), abs=1e-9)
+            lambda x: INST.probe_loading(x, PROBE_GRID, c_load_f=0.5e-12, causal=False), fc * mult)
+        assert (-20 * np.log10(abs(H))) / (10 * np.log10(1 + (f / fc) ** 2)) == pytest.approx(2.0, abs=0.02)
 
 
 def test_the_probe_op_reaches_the_probe_and_sits_before_the_instrument():

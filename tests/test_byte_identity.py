@@ -22,6 +22,17 @@ How far each moved, against the same record's peak-to-peak: 7.1 % for a causal a
 channel, 11.4 % zero-phase, 2.9 % for a cascade read at the driver plane and 29.3 % at the load,
 and it is the record's HEAD that moves -- see `tests/test_linear_convolution.py`, which pins the
 new path against `np.convolve` and against a two-tap echo whose closed form is written by hand.
+
+THE THIRD SUCH BREAK, and it moved exactly one entry: `gen4_recipe`, the only pinned record
+with an analog INSTRUMENT stage in it. `scope`'s analog kinds ran a Bessel forwards AND
+backwards (`sosfiltfilt`), which squared the magnitude and zeroed the group delay, so a front
+end asked for 32 GHz realised 16.0 GHz. It is now a single forward pass designed with
+`norm='mag'`, so the realised -3 dB point is the stated one (measured 32.00 GHz, |H| = 0.7071)
+and the stage delays (measured 10.00 ps at DC for bessel-4 at 32 GHz, against the analog closed
+form's 10.51 ps). MEASURED move on this record, whose front end is at 110 GHz on a 128 GHz
+Nyquist grid and therefore barely bites: 1.59 % of peak-to-peak at worst, 0.44 % rms.
+`gen4_zero_phase` pins the OLD hash through the `causal=False` opt-out, so the claim that the
+old behaviour is still exactly reachable is a hash, not a sentence.
 """
 import hashlib
 
@@ -43,9 +54,12 @@ G8 = Grid(fs=256e9, baud=16e9, n=8192)
 X = P.nrz(n_ui=256, n=8192, seed=3, tr_frac=0.15)
 
 
-def _gen4():
+def _gen4(**scope_kw):
     """The shipped Gen4-shaped recipe, in the op order that motivated the cascade work:
-    carrier -> ssc -> lossy -> reflect -> timing -> supply -> crosstalk -> scope -> digitize."""
+    carrier -> ssc -> lossy -> reflect -> timing -> supply -> crosstalk -> scope -> digitize.
+
+    `scope_kw` reaches the front end alone, which is how the zero-phase opt-out is pinned
+    against the hash this recipe had before the front end became causal."""
     return (Signal(seed=7, grid=G)
             .carrier("nrz", n_ui=16384, tr_frac=0.15, pattern="prbs13")
             .ssc(spread=0.0025, f_ssc=32e3)
@@ -54,7 +68,7 @@ def _gen4():
             .timing(rj_ps=0.4)
             .supply_coupling(f_ripple_hz=1e6, am_depth=0.01)
             .crosstalk(coupling=0.05, kind="fext")
-            .scope(bw_hz=110e9)
+            .scope(bw_hz=110e9, **scope_kw)
             .digitize(enob=11, snr_db=45)).waveform()
 
 
@@ -65,7 +79,12 @@ def _sparam():
 
 
 PINNED = {
-    "gen4_recipe":    (_gen4,                                                    "3447e5da7cc90b76bd22cbbad22983ec"),
+    "gen4_recipe":    (_gen4,                                                    "694f0a4f7a85f0df0e47045afe765837"),
+    # The pre-fix hash of the SAME recipe, reached by the documented opt-out. This is the
+    # entry that makes "the old behaviour is still available, exactly" checkable rather than
+    # asserted -- and it is what caught `_op_scope` dropping `causal` from the kwargs it
+    # forwarded, which had made `causal=False` render the causal path and hash identically.
+    "gen4_zero_phase": (lambda: _gen4(causal=False),                             "3447e5da7cc90b76bd22cbbad22983ec"),
     "nrz":            (lambda: X,                                                "3a16d7331a8403333831abc60b7af629"),
     "pam4":           (lambda: P.pam4(n_ui=256, n=8192, seed=5),                 "b349e50a01a83d549c61e1143692eea0"),
     "lossy_legacy":   (lambda: P.lossy_channel(X),                               "37ce9b15660008866402d55597b5aa25"),
