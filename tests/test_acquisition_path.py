@@ -106,11 +106,12 @@ def test_a_recovered_clock_recovers_every_constructed_symbol(spb_f, spread):
 
 @pytest.mark.parametrize("spb_f,spread", [(SPB_FRAC, 0.0), (SPB_FRAC, 0.005), (8.0, 0.005)])
 def test_the_fixed_stride_diverges_rather_than_degrades(spb_f, spread):
-    """The historical path on the same three records. A DFE feeds its own decisions back, so a
+    """The historical path -- now reached only by an explicit ``cdr=False`` -- on the same
+    three records. A DFE feeds its own decisions back, so a
     stride that walks off the symbol centres does not degrade gracefully -- it reaches the
     chance error rate of the constellation (0.75 for PAM4)."""
     x, d, _t, g = _constructed_record(20000, spb_f, spread=spread)
-    ser, _n = _ser(x, g, d)
+    ser, _n = _ser(x, g, d, cdr=False)          # `cdr=False` IS the historical path now
     assert ser > 0.7
 
 
@@ -119,9 +120,12 @@ def test_an_integer_stride_on_an_unmodulated_record_is_left_alone():
     number of samples per UI, a rate that does not move -- it still returns every symbol, and
     the recovered clock agrees with it symbol for symbol."""
     x, d, _t, g = _constructed_record(20000, 8.0, spread=0.0)
-    assert _ser(x, g, d)[0] == 0.0
-    inst = dfe_instants(x, dict(taps=[POST], levels=list(PAM4)), g)
+    assert _ser(x, g, d, cdr=False)[0] == 0.0
+    inst = dfe_instants(x, dict(taps=[POST], levels=list(PAM4), cdr=False), g)
     assert np.array_equal(inst, np.arange(inst[0], len(x), 8, dtype=float))
+    # and the DEFAULT -- a recovered clock -- returns every symbol on the same record, so
+    # making it the default costs nothing where the stride was already right
+    assert _ser(x, g, d)[0] == 0.0
 
 
 def test_the_recovered_instants_are_the_constructed_instants():
@@ -194,7 +198,7 @@ def test_rx_ffe_is_a_fixed_tap_misplacement_and_not_the_same_defect():
     first, last = [float(np.sqrt(np.mean(b ** 2))) for b in (diff[2000:4000], diff[-2000:])]
     assert 0.5 < last / first < 2.0                  # flat: does not accumulate
 
-    inst = dfe_instants(x, dict(taps=[POST], levels=list(PAM4)), g)
+    inst = dfe_instants(x, dict(taps=[POST], levels=list(PAM4), cdr=False), g)
     m = min(len(inst), len(t_cen))
     walk = np.abs(inst[:m] - t_cen[:m]) / SPB_FRAC
     # walks: hundreds of UI further off by the end of the record than at the start
@@ -309,7 +313,8 @@ def test_an_ssc_bearing_chain_through_a_dfe_is_readable_end_to_end():
     assert _e2e_ser(clean, tx, g, scale=1.0, cdr=dict(loop_bw_hz=10e6)) == 0.0
 
     ssc = _e2e(0.005, n_ui, g)
-    assert _e2e_ser(ssc, tx, g, scale=1.0) > 0.3                         # today: destroyed
+    assert _e2e_ser(ssc, tx, g, scale=1.0, cdr=False) > 0.3              # opt-out: destroyed
+    assert _e2e_ser(ssc, tx, g, scale=1.0) == 0.0                        # default: recovered
     assert _e2e_ser(ssc, tx, g, scale=1.0, cdr=dict(loop_bw_hz=10e6)) == 0.0
     # negative control: the equaliser is load-bearing, so zero above is not a free pass
     assert _e2e_ser(ssc, tx, g, taps=[0.0], scale=1.0, cdr=dict(loop_bw_hz=10e6)) > 0.3
