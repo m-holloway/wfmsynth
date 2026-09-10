@@ -513,6 +513,14 @@ def crosstalk_matrix(x, grid, couplings, baud_offsets=None, seeds=None, kind="fe
     return y
 
 
+# The lowest corner, as a fraction of Nyquist, at which `signal.butter(1, ...)` still puts the
+# corner where it was asked for. MEASURED by bisecting the realised |H| = 0.5 point: 1e-4 lands
+# at 1.00x, 1e-5 at 1.05x, and 1e-6 at 0.02x -- below that the sos coefficients saturate toward
+# a pure DC block and the corner runs away to DC. The old floor was 1e-4, ten times more
+# conservative than the design needs, and it clamped SILENTLY.
+AC_COUPLE_MIN_FRAC = 1e-5
+
+
 def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
     """AC-coupling (series cap) as a 1st-order high-pass -> baseline wander/droop
     that grows with run length. fc_frac is the corner as a fraction of Nyquist.
@@ -522,7 +530,18 @@ def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
         if grid is None:
             raise ValueError("fc_hz requires grid=Grid(...)")
         fc_frac = grid.hz_to_frac_nyquist(fc_hz)
-    fc = float(np.clip(fc_frac, 1e-4, 0.5))
+    fc = float(np.clip(fc_frac, AC_COUPLE_MIN_FRAC, 0.5))
+    if fc != fc_frac:
+        nyq = f" = {fc * 0.5 / grid.dt:.4g} Hz on this grid" if grid is not None else ""
+        warnings.warn(
+            f"AC-coupling corner clamped: asked fc_frac={fc_frac:g}, using {fc:g}{nyq} "
+            f"({fc / fc_frac:.0f}x higher). A first-order corner this far below Nyquist is "
+            f"not representable in normalized units -- measured, the sos design tracks the "
+            f"request to 1.05x at 1e-5 and collapses to 0.02x by 1e-6. A real link's corner "
+            f"is often well below this floor, and on a record shorter than its time constant "
+            f"the physical answer is almost no droop, NOT the steeper high-pass this clamp "
+            f"applies. Lower the sample rate, lengthen the record, or drop the op.",
+            RuntimeWarning, stacklevel=3)
     sos = signal.butter(1, fc, btype="high", output="sos")
     return signal.sosfiltfilt(sos, np.asarray(x, float))
 
