@@ -32,6 +32,8 @@ from dataclasses import asdict as _asdict, dataclass, field
 from typing import Optional
 import warnings
 
+import re
+
 import numpy as np
 from scipy.signal import resample_poly
 
@@ -59,7 +61,34 @@ def _carrier(p, streams, grid, idx):
         return P.pam4(pattern=p.get("pattern", "legacy"), **common)
     if p["kind"] == "nrz":
         return P.nrz(pattern=p.get("pattern", "legacy"), **common)
-    raise ValueError(f"unknown carrier kind {p['kind']!r} (use 'nrz' or 'pam4')")
+    # pam<N> for any other N. 'pam4' is matched above and keeps its own map, so no PAM4
+    # stream can reach the generic path.
+    m = re.fullmatch(r"pam(\d+)", str(p["kind"]))
+    if m:
+        return P.pam(int(m.group(1)), pattern=p.get("pattern", "uniform"), **common)
+    # analog and arbitrary carriers. These are not data, so the symbol-oriented arguments in
+    # `common` do not apply to them: they take a frequency and the grid.
+    if p["kind"] in P.ANALOG_KINDS or p["kind"] == "arbitrary":
+        kw = dict(n=_grid_n(grid, p), fs=getattr(grid, "fs", None))
+        for k in ("f_hz", "cycles", "amp", "offset", "phase_rad", "duty", "symmetry",
+                  "tr_frac", "level", "causal", "band_limit_tr"):
+            if k in p:
+                kw[k] = p[k]
+        if p["kind"] == "arbitrary":
+            fn = p.get("fn")
+            if not callable(fn):
+                raise ValueError("carrier kind 'arbitrary' needs a callable `fn(t)`; it is "
+                                 "not serialisable, so a recipe carrying it cannot be "
+                                 "replayed from JSON alone")
+            return P.arbitrary(fn, **{k: v for k, v in kw.items()
+                                      if k in ("n", "fs", "band_limit_tr", "causal")})
+        fn = {"sine": P.sine, "square": P.square, "triangle": P.triangle,
+              "sawtooth": P.sawtooth, "dc": P.dc}[p["kind"]]
+        import inspect
+        ok = set(inspect.signature(fn).parameters)
+        return fn(**{k: v for k, v in kw.items() if k in ok})
+    raise ValueError(f"unknown carrier kind {p['kind']!r} (use 'nrz', 'pam4', 'pam<N>', "
+                     f"one of {P.ANALOG_KINDS}, or 'arbitrary')")
 
 
 def _op_carrier(x, p, streams, grid, idx):
@@ -1439,7 +1468,7 @@ class Signal:
         knobs): eye height under both definitions, the realized sampling phase, and the
         realized integer-symbol alignment — reconstructing the transmitted stream from the
         recipe so per-symbol statistics compare the right pairs across a channel's group
-        delay. `levels` defaults from the carrier (2 for NRZ, 4 for PAM4)."""
+        delay. `levels` defaults from the carrier: 2 for NRZ, N for pam<N>."""
         from .measure import ground_truth as _gt
         car = next((o for o in self.ops if o["op"] == "carrier"), None)
         tx = None
@@ -1447,7 +1476,8 @@ class Signal:
             tx = P.carrier_symbols(car["kind"], car.get("n_ui", 32),
                                    car.get("seed", 1), car.get("pattern", "legacy"))
             if levels is None:
-                levels = 4 if car["kind"] == "pam4" else 2
+                mk = re.fullmatch(r"pam(\d+)", str(car["kind"]))
+                levels = int(mk.group(1)) if mk else 2
         return _gt(self.waveform(), self.grid, tx=tx, levels=levels or 4)
 
     def recipe(self):

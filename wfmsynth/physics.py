@@ -13,6 +13,8 @@ symbol/sample rate downstream. numpy/scipy only.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import re
+
 import numpy as np
 import warnings
 
@@ -717,10 +719,31 @@ PRBS_TAPS = {7: (7, 6), 9: (9, 5), 11: (11, 9), 13: (13, 12, 2, 1), 15: (15, 14)
 GRAY_PAM4 = {(0, 0): -1.0, (0, 1): -1.0 / 3.0, (1, 1): 1.0 / 3.0, (1, 0): 1.0}
 
 
-def prbs(order, length, seed=1):
-    """Fibonacci LFSR PRBS of the given order. See PRBS_TAPS for polynomials."""
+def prbs(order, length, seed=1, phase=0):
+    """Fibonacci LFSR PRBS of the given order. See PRBS_TAPS for polynomials.
+
+    `seed` IS THE PHASE. For a maximal-length LFSR the non-zero state space and the set of
+    starting positions are the same set, so a state drawn uniformly from 1..2**order-1 is a
+    starting position drawn uniformly from the sequence -- at no cost, which is what
+    `random_phase` returns. That matters for training data: every record starting at the same
+    place in the pattern lets a model learn the position rather than the signal, and a real
+    capture starts wherever the link happened to be.
+
+    `phase` advances the generator that many symbols further before the first output, for when
+    a specific offset is wanted rather than a random one. It costs one LFSR step per symbol,
+    so a large phase on a high-order PRBS is slow; prefer a random `seed` for randomness.
+
+    CAUTION: `seed=0` masks to state 0, which is the LFSR's dead state, so it falls back to 1
+    -- `seed=0` and `seed=1` produce the IDENTICAL sequence. Two records seeded 0 and 1 are
+    not two draws. This is kept because output seeded 0 is already pinned downstream.
+    """
     taps = PRBS_TAPS[order]
     st = seed & ((1 << order) - 1) or 1
+    for _ in range(int(phase)):                 # advance without emitting
+        b = 0
+        for t in taps:
+            b ^= (st >> (t - 1)) & 1
+        st = ((st << 1) | b) & ((1 << order) - 1)
     out = np.empty(length, np.int8)
     for i in range(length):
         b = 0
@@ -729,6 +752,20 @@ def prbs(order, length, seed=1):
         out[i] = st & 1
         st = ((st << 1) | b) & ((1 << order) - 1)
     return out
+
+
+def random_phase(order, rng=None):
+    """A starting position in a PRBS of this order, drawn uniformly, as a `seed`.
+
+    The LFSR's non-zero state space is its phase space, so this is an exact uniform draw over
+    all 2**order-1 starting positions and costs nothing. Pass the result as `seed`.
+
+        seeds = [P.random_phase(13, rng) for _ in range(n_records)]
+
+    State 0 is excluded because it is the dead state.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    return int(rng.integers(1, (1 << int(order)) - 1, endpoint=True))
 
 
 def prbs13q(n_symbols, seed=1):
@@ -794,7 +831,8 @@ def _pattern_error(pattern, kind, accepted, other_kind, other_accepted):
     carrier is a user error about how many levels the link has; silently coercing it
     would hide exactly the mistake worth catching. ``kind``/``other_kind`` are the
     carrier kind strings, so the message can be pasted straight back into the call."""
-    levels = {"nrz": "binary", "pam4": "quaternary"}
+    levels = {"nrz": "binary", "pam3": "ternary", "pam4": "quaternary",
+              "pam5": "quinary", "pam8": "octal"}
     accepted_list = ", ".join(repr(p) for p in accepted)
     if pattern in other_accepted:
         return ValueError(
@@ -925,7 +963,7 @@ def _place_symbols(levels_per_ui, n, spb, jitter=None, rng=None):
     return levels_per_ui[idx]
 
 
-def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
+def carrier_symbols(kind, n_ui, seed=1, pattern="legacy", phase=0):
     """The ideal transmitted symbol levels (one per UI) for a carrier — the reference
     stream for realized symbol alignment and any per-symbol ground-truth statistic.
     Deterministic given (kind, n_ui, seed, pattern); the single source of truth that
@@ -945,17 +983,18 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
     because this kernel is pinned by SHA and its output diffed sample-for-sample
     downstream; it is a compatibility default, not a recommendation."""
     n_ui = int(n_ui)
+    phase = int(phase)
     if kind == "nrz":
         if pattern in ("legacy", "prbs7"):
             # The historical NRZ stream, kept bit-for-bit: 'legacy' means PRBS7 here
             # and always will, because every NRZ waveform this kernel has ever
             # produced came out of this line.
-            return np.where(prbs(7, n_ui, seed) > 0, 1.0, -1.0)
+            return np.where(prbs(7, n_ui, seed, phase) > 0, 1.0, -1.0)
         if pattern == "clock":
             return clock_pattern(n_ui)
         order = NRZ_PRBS_PATTERNS.get(pattern)
         if order is not None:
-            return np.where(prbs(order, n_ui, seed) > 0, 1.0, -1.0)
+            return np.where(prbs(order, n_ui, seed, phase) > 0, 1.0, -1.0)
         raise _pattern_error(pattern, "nrz", NRZ_PATTERNS, "pam4", PAM4_PATTERNS)
     if kind == "pam4":
         levels = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
@@ -964,10 +1003,21 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy"):
         if pattern == "prbs31q":
             return prbs31q(n_ui, seed)
         if pattern == "legacy":
-            b0 = prbs(7, n_ui, seed); b1 = prbs(9, n_ui, seed + 3)
+            b0 = prbs(7, n_ui, seed, phase); b1 = prbs(9, n_ui, seed + 3, phase)
             return levels[np.clip(b0 * 2 + (b0 ^ b1), 0, 3)]
         raise _pattern_error(pattern, "pam4", PAM4_PATTERNS, "nrz", NRZ_PATTERNS)
-    raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz' or 'pam4'")
+    # pamN for any other N. 'pam4' is handled above and keeps its own map, so this branch
+    # can never change a PAM4 stream.
+    m = re.fullmatch(r"pam(\d+)", str(kind))
+    if m:
+        n_lv = int(m.group(1))
+        if pattern in ("legacy", "uniform"):
+            return pam_symbols(n_lv, n_ui, seed, phase=phase)
+        if pattern == "clock":
+            lv = pam_levels(n_lv)
+            return np.where(np.arange(n_ui) % 2 == 0, lv[-1], lv[0])
+        raise ValueError(f"unknown PAM{n_lv} pattern {pattern!r}; use 'uniform' or 'clock'")
+    raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz', 'pam4', or 'pam<N>'")
 
 
 def from_symbols(symbols, n=None, tr_frac=0.15, causal=False, jitter=None, rng=None,
@@ -984,7 +1034,7 @@ def from_symbols(symbols, n=None, tr_frac=0.15, causal=False, jitter=None, rng=N
 
 
 def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=None,
-        tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES, pattern="legacy"):
+        tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES, pattern="legacy", phase=0):
     """NRZ carrier.
 
     pattern="legacy"  PRBS7 -- the historical default, kept so existing output stays
@@ -1001,14 +1051,14 @@ def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=No
     """
     n = N if n is None else int(n)
     spb = n / n_ui
-    lv = carrier_symbols("nrz", n_ui, seed, pattern)
+    lv = carrier_symbols("nrz", n_ui, seed, pattern, phase)
     tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
     return _shape_edges(_place_symbols(lv, n, spb, jitter, rng), tr, causal)
 
 
 def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
          tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES,
-         jitter=None, rng=None):
+         jitter=None, rng=None, phase=0):
     """PAM4 carrier.
 
     pattern="legacy"  the original PRBS7/PRBS9 Gray-ish map. Not a standard
@@ -1020,10 +1070,210 @@ def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
     """
     n = N if n is None else int(n)
     spb = n / n_ui
-    syms = carrier_symbols("pam4", n_ui, seed, pattern)
+    syms = carrier_symbols("pam4", n_ui, seed, pattern, phase)
     tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
     return _shape_edges(_place_symbols(syms, n, spb, jitter, rng), tr, causal)
 
+
+
+# ---------------------------------------------------------------- PAM-N, any N
+#
+# Evenly spaced levels spanning [-1, +1]. PAM4's row is written out rather than computed
+# because `np.linspace(-1, 1, 4)` and `[-1, -1/3, 1/3, 1]` differ in the last bit -- 5.6e-17
+# -- and every PAM4 waveform this kernel has produced came from the explicit array.
+PAM_LEVELS = {
+    2: np.array([-1.0, 1.0]),
+    3: np.array([-1.0, 0.0, 1.0]),
+    4: np.array([-1.0, -1.0 / 3.0, 1.0 / 3.0, 1.0]),
+    5: np.array([-1.0, -0.5, 0.0, 0.5, 1.0]),
+    8: np.array([-1.0, -5.0 / 7.0, -3.0 / 7.0, -1.0 / 7.0,
+                 1.0 / 7.0, 3.0 / 7.0, 5.0 / 7.0, 1.0]),
+}
+
+
+def pam_levels(n_levels):
+    """The `n_levels` transmit levels, evenly spaced over [-1, +1].
+
+    An M-level signal has M-1 eyes, and the spacing here is UNIFORM -- which is the ideal
+    case. Real drivers compress the outer levels (RLM < 1); that is an impairment and lives
+    in `impairments`, not in the level definition.
+    """
+    n = int(n_levels)
+    if n < 2:
+        raise ValueError(f"n_levels must be at least 2, not {n}")
+    lv = PAM_LEVELS.get(n)
+    return lv.copy() if lv is not None else np.linspace(-1.0, 1.0, n)
+
+
+def pam_symbols(n_levels, n_symbols, seed=1, order=13, phase=0):
+    """Uniform PAM-N symbols from a PRBS, by rejection.
+
+    `ceil(log2(N))` bits are drawn per symbol and words landing outside `0..N-1` are
+    discarded, which keeps the symbol distribution uniform for an N that is not a power of
+    two. Deterministic given (n_levels, n_symbols, seed, order).
+
+    THIS IS NOT A STANDARD'S LINE CODE. 1000BASE-T's PAM5 is 4D-PAM5 with 8B1Q4 coding
+    across four pairs, and USB4 v2's PAM3 is 11 bits to 7 ternary symbols; both carry
+    spectral shaping and DC balance this does not. What this gives is the right NUMBER of
+    levels with the right spacing, uniformly exercised -- which is what an eye, a slicer and
+    a level-separation measurement need. A faithful line code is per-standard work; feed one
+    through `from_symbols` when it exists.
+    """
+    n_lv, n_out = int(n_levels), int(n_symbols)
+    levels = pam_levels(n_lv)
+    if n_lv == 1 << (n_lv.bit_length() - 1) and n_lv > 1:
+        bits_per = n_lv.bit_length() - 1          # exact power of two: no rejection needed
+    else:
+        bits_per = n_lv.bit_length()
+    span = 1 << bits_per
+    keep = np.empty(0, dtype=np.int64)
+    draw = max(int(n_out * span / max(n_lv, 1) * 1.4) + 64, 256)
+    while keep.size < n_out:
+        bits = (prbs(order, draw * bits_per, seed, phase) > 0).astype(np.int64)
+        words = bits[: (bits.size // bits_per) * bits_per].reshape(-1, bits_per)
+        idx = (words * (1 << np.arange(bits_per - 1, -1, -1))).sum(axis=1)
+        keep = idx[idx < n_lv]
+        if keep.size >= n_out:
+            break
+        draw *= 2                                  # the PRBS is periodic; ask for more of it
+        if draw > (n_out + 1) * span * 64:
+            raise RuntimeError(f"cannot draw {n_out} PAM{n_lv} symbols from a PRBS{order}")
+    return levels[keep[:n_out]]
+
+
+def pam(n_levels=4, n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False,
+        pattern="uniform", tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES,
+        jitter=None, rng=None, phase=0):
+    """PAM-N carrier for any N >= 2.
+
+    `pam(4, pattern='legacy')` is not the same stream as `pam4(pattern='legacy')` and does
+    not try to be: `pam4` keeps its own Gray map and its own PRBS pair because its output is
+    pinned. Use `pam4` for PAM4 and this for everything else.
+
+    pattern='uniform'  PRBS-driven, uniform over the N levels (see `pam_symbols`)
+    pattern='clock'    the two outer levels alternating: the ISI-free contrast case
+    """
+    n = N if n is None else int(n)
+    spb = n / int(n_ui)
+    if pattern == "clock":
+        lv = pam_levels(n_levels)
+        syms = np.where(np.arange(int(n_ui)) % 2 == 0, lv[-1], lv[0])
+    elif pattern == "uniform":
+        syms = pam_symbols(n_levels, n_ui, seed, phase=phase)
+    else:
+        raise ValueError(f"unknown PAM-N pattern {pattern!r}; use 'uniform' or 'clock'")
+    tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
+    return _shape_edges(_place_symbols(syms, n, spb, jitter, rng), tr, causal)
+
+
+
+# ---------------------------------------------------------------- analog and arbitrary
+#
+# Not every waveform is data. A corpus of high-speed serial links has no sine in it, and a
+# model trained only on eye diagrams has never seen a clock, a ramp, a supply rail or
+# whatever a user's own function produces. These carriers put those on the same grid, through
+# the same impairment and acquisition path, so a record of a sine is a record like any other.
+#
+# THE EDGES ARE BAND-LIMITED. An ideal square has infinite bandwidth and sampling one aliases
+# every harmonic above Nyquist back into the record as a spur that is not in the signal. The
+# non-sinusoidal shapes here are therefore shaped by the same `_shape_edges` the digital
+# carriers use, with `tr_frac` a fraction of the PERIOD.
+
+def timebase(n=None, fs=None, grid=None):
+    """Sample instants. SECONDS where a rate is known, else the legacy [0, 1) ramp.
+
+    `am`/`fm`/`chirp` predate absolute units and take a normalised ramp; anything given `fs`
+    or a `grid` gets real seconds, which is what a frequency in Hz needs to mean anything.
+    """
+    if grid is not None:
+        n = int(getattr(grid, "n", n) or N)
+        fs = float(getattr(grid, "fs", fs) or 0.0) or None
+    n = N if n is None else int(n)
+    if fs:
+        return np.arange(n, dtype=float) / float(fs)
+    return np.linspace(0.0, 1.0, n, endpoint=False)
+
+
+def _cycles_and_t(f_hz, cycles, n, fs, grid):
+    t = timebase(n, fs, grid)
+    if f_hz is not None:
+        span = t[-1] - t[0] + (t[1] - t[0] if t.size > 1 else 0.0)
+        return t, float(f_hz), span
+    c = 10.0 if cycles is None else float(cycles)
+    span = t[-1] - t[0] + (t[1] - t[0] if t.size > 1 else 0.0)
+    return t, c / span, span
+
+
+def sine(f_hz=None, cycles=None, amp=1.0, phase_rad=0.0, offset=0.0,
+         n=None, fs=None, grid=None):
+    """A sinusoid. Give `f_hz` with `fs`/`grid`, or `cycles` over the record."""
+    t, f, _ = _cycles_and_t(f_hz, cycles, n, fs, grid)
+    return offset + amp * np.sin(2 * np.pi * f * t + phase_rad)
+
+
+def square(f_hz=None, cycles=None, amp=1.0, duty=0.5, phase_rad=0.0, offset=0.0,
+           tr_frac=0.05, n=None, fs=None, grid=None, causal=False):
+    """A square/pulse train, band-limited. `duty` is the high fraction, `tr_frac` the
+    transition time as a fraction of the PERIOD."""
+    t, f, _ = _cycles_and_t(f_hz, cycles, n, fs, grid)
+    ph = (f * t + phase_rad / (2 * np.pi)) % 1.0
+    ideal = np.where(ph < float(duty), 1.0, -1.0)
+    spp = (1.0 / f) / (t[1] - t[0]) if t.size > 1 else 2.0     # samples per period
+    tr = max(float(tr_frac) * spp, 2.0)
+    return offset + amp * _shape_edges(ideal, tr, causal)
+
+
+def triangle(f_hz=None, cycles=None, amp=1.0, symmetry=0.5, phase_rad=0.0, offset=0.0,
+             n=None, fs=None, grid=None):
+    """A triangle. `symmetry` 0.5 is symmetric; 1.0 is a rising ramp, 0.0 a falling one."""
+    t, f, _ = _cycles_and_t(f_hz, cycles, n, fs, grid)
+    ph = (f * t + phase_rad / (2 * np.pi)) % 1.0
+    r = float(np.clip(symmetry, 1e-6, 1 - 1e-6))
+    up = ph / r
+    down = (1.0 - ph) / (1.0 - r)
+    return offset + amp * (2.0 * np.where(ph < r, up, down) - 1.0)
+
+
+def sawtooth(f_hz=None, cycles=None, amp=1.0, phase_rad=0.0, offset=0.0,
+             tr_frac=0.02, n=None, fs=None, grid=None, causal=False):
+    """A ramp with a band-limited flyback, so the retrace does not alias."""
+    t, f, _ = _cycles_and_t(f_hz, cycles, n, fs, grid)
+    ph = (f * t + phase_rad / (2 * np.pi)) % 1.0
+    ideal = 2.0 * ph - 1.0
+    spp = (1.0 / f) / (t[1] - t[0]) if t.size > 1 else 2.0
+    tr = max(float(tr_frac) * spp, 2.0)
+    return offset + amp * _shape_edges(ideal, tr, causal)
+
+
+def dc(level=0.0, n=None, fs=None, grid=None):
+    """A constant. Useful as a rail, and as the degenerate case a pipeline should survive."""
+    return np.full(timebase(n, fs, grid).size, float(level))
+
+
+def arbitrary(fn, n=None, fs=None, grid=None, band_limit_tr=None, causal=False):
+    """A carrier from a USER FUNCTION of time.
+
+    `fn(t)` takes the sample instants -- seconds where a rate is known -- and returns the
+    waveform. It is called once with the whole array, so it should be vectorised; a scalar
+    function works through `np.vectorize` at the usual cost.
+
+        sig = arbitrary(lambda t: np.sign(np.sin(2*np.pi*1e9*t)) * np.exp(-t/1e-6),
+                        grid=g, band_limit_tr=4)
+
+    NOTHING IS CHECKED about what comes back except its length. A function with content above
+    Nyquist will alias, and that is the caller's business -- pass `band_limit_tr` (a rise time
+    in SAMPLES) to shape it first if the function has steps in it.
+    """
+    t = timebase(n, fs, grid)
+    y = np.asarray(fn(t), dtype=float).ravel()
+    if y.size != t.size:
+        raise ValueError(f"fn returned {y.size} samples, expected {t.size}")
+    if band_limit_tr:
+        y = _shape_edges(y, float(band_limit_tr), causal)
+    return y
+
+
+ANALOG_KINDS = ("sine", "square", "triangle", "sawtooth", "dc")
 
 # ---------------------------------------------------------------- RF / analog
 def am(fc=40.0, fm=3.0, depth=0.6, n=None):
