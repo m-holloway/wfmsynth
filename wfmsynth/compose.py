@@ -34,6 +34,8 @@ import warnings
 
 import re
 
+import math
+
 import numpy as np
 from scipy.signal import resample_poly
 
@@ -154,6 +156,37 @@ def _op_resonant_reflect(x, p, streams, grid, idx):
 def _op_supply_coupling(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("f_ripple_hz", "am_depth", "psij_ps", "supply") if k in p}
     return P.supply_coupling(x, grid, **kw)
+
+
+def _op_open_drain(x, p, streams, grid, idx):
+    """Re-derive the line voltage of an open-drain bus from a two-level carrier.
+
+    The incoming carrier says WHEN a device is sinking; this says what the line then does. Low means
+    sinking, so the carrier is thresholded at the midpoint of its own excursion rather than at zero,
+    which keeps it correct for a carrier that has already been offset or scaled upstream.
+
+    **This op changes the level domain, deliberately.** An open-drain bus is single-ended between
+    ground and its supply, so the output is absolute volts in [V_OL, v_dd] -- unipolar, with a
+    settled low that is a resistive DIVIDER above ground, not zero. A centred +/-1 carrier is the
+    wrong shape for this bus and a model trained on one learns a driver that does not exist. Pass
+    ``center=True`` to re-centre and rescale to the incoming excursion where a downstream stage
+    genuinely needs that (it discards V_OL, which is the measurement that reveals a pull-up too
+    strong for the sink)."""
+    from .physics import open_drain_line
+    xa = np.asarray(x, float)
+    mid = 0.5 * (np.percentile(xa, 1) + np.percentile(xa, 99))
+    sink = xa < mid
+    v_dd = float(p.get("v_dd", 3.3))
+    y = open_drain_line(sink, grid.fs,
+                        r_pullup_ohm=float(p["r_pullup_ohm"]), c_bus_f=float(p["c_bus_f"]),
+                        v_dd=v_dd, r_sink_ohm=float(p.get("r_sink_ohm", 20.0)),
+                        v0=p.get("v0"))
+    if p.get("center"):
+        lo, hi = float(np.percentile(y, 1)), float(np.percentile(y, 99))
+        span = max(hi - lo, 1e-30)
+        keep = max(float(np.percentile(xa, 99)) - float(np.percentile(xa, 1)), 1e-30)
+        y = (y - 0.5 * (lo + hi)) * (keep / span)
+    return y
 
 
 def _op_intra_pair_skew(x, p, streams, grid, idx):
@@ -622,6 +655,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
          "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "rx_ffe": _op_rx_ffe, "dfe": _op_dfe,
          "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
+         "open_drain": _op_open_drain,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
          "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
          "photodetect": _op_photodetect, "tia": _op_tia,
@@ -646,7 +680,7 @@ OP_KIND = {
     "carrier": "source", "symbols": "source",
     "tx_ffe": "shape", "de_emphasis": "shape", "events": "shape", "nonlinearity": "shape",
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
-    "dcd": "shape",
+    "dcd": "shape", "open_drain": "shape",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
     "cascade": "channel",
@@ -753,6 +787,31 @@ _LEAD_SKIP = {"carrier", "symbols", "nonlinearity", "crosstalk", "crosstalk_matr
               "store", "timebase", "timing", "ssc", "supply_coupling", "dfe",
               "optical", "dispersion", "eo", "fiber", "optical_mpi", "edfa", "photodetect", "tia",
               "dcd", "rx_noise", "agc"}
+# Ops with REAL memory but no probeable impulse response, whose extent is known in closed form.
+#
+# This category exists because `open_drain` fits none of the other three and putting it in the wrong
+# one is a silent error in both directions. It is not LTI -- both the time constant and the target
+# switch with the sink state, so superposition fails and the extent probe cannot measure it. But it
+# has the LONGEST memory of any stage here: an RC charge through a pull-up is hundreds of
+# nanoseconds where every filter in `_LEAD_LTI` is tens of picoseconds. Filing it under `_LEAD_SKIP`
+# ("has none") would be exactly the default into the safe-looking pile that `_lead_check_ops` was
+# built to prevent, and every record would open on a turn-on transient nobody asked for.
+#
+# So: state the extent instead of probing for it. Each entry maps an op to a function of its own
+# params and the grid, returning the memory extent in SAMPLES. 5 tau is 99.3 % settled, which is the
+# same convergence the probe's 1e-5 relative threshold buys on an exponential.
+_LEAD_ANALYTIC = {
+    "open_drain": lambda o, grid: int(math.ceil(
+        5.0 * float(o["r_pullup_ohm"]) * float(o["c_bus_f"]) * float(grid.fs))),
+}
+
+
+def _lead_analytic_reach(ops, grid):
+    """The largest closed-form memory extent among the ops that have one, in samples."""
+    return max((_LEAD_ANALYTIC[o["op"]](o, grid) for o in ops if o["op"] in _LEAD_ANALYTIC),
+               default=0)
+
+
 # Ops a lead-in cannot host, each with the reason. Refusing is the honest answer: the alternative is
 # to silently move where these land, and a fault placed at sample 5000 of the record is not the same
 # fault at sample 5000 of the record-plus-guard.
@@ -823,10 +882,13 @@ def _lead_check_ops(ops):
     means). A new op therefore has to be reasoned about before it can be rendered with a lead-in,
     rather than defaulting into the safe-looking pile."""
     for o in ops:
-        if o["op"] not in _LEAD_LTI and o["op"] not in _LEAD_SKIP and o["op"] not in _LEAD_REJECT:
+        if (o["op"] not in _LEAD_LTI and o["op"] not in _LEAD_SKIP
+                and o["op"] not in _LEAD_REJECT and o["op"] not in _LEAD_ANALYTIC):
             raise ValueError(f"lead_in: the {o['op']!r} op has no lead-in classification -- add it "
-                             f"to _LEAD_LTI (it has an impulse response), _LEAD_SKIP (it has none) "
-                             f"or _LEAD_REJECT (a lead-in changes what it means) in compose.py")
+                             f"to _LEAD_LTI (it has an impulse response), _LEAD_SKIP (it has none), "
+                             f"_LEAD_ANALYTIC (it has memory but no probeable impulse response, so "
+                             f"state the extent) or _LEAD_REJECT (a lead-in changes what it means) "
+                             f"in compose.py")
         why = _LEAD_REJECT.get(o["op"])
         if why is not None:
             raise ValueError(f"lead_in: the {o['op']!r} op cannot be rendered with a lead-in "
@@ -1206,6 +1268,20 @@ class Signal:
         common-mode, use physics.differential_pair.)"""
         return self._add("intra_pair_skew", **params)
 
+    def open_drain(self, **params):
+        """The line voltage of an open-drain bus: a driven fall to a resistive divider, and an RC
+        rise through the pull-up. Place it directly after the carrier -- it is what the bus does to
+        the driver's intent, before anything else acts on the line.
+
+        params: r_pullup_ohm, c_bus_f (both required), v_dd, r_sink_ohm, v0, center.
+
+        The rise is the edge such a bus specifies, and it follows from R and C rather than from a
+        rise-time knob: tr(30-70 %) = 0.8473 * Rp * Cb. `physics.rc_tau_for_rise_time` inverts that
+        if you have the specified rise time and want the resistor. Raise Cb far enough and the line
+        stops reaching the input-high threshold inside a bit, which is how these buses actually
+        fail and which a symmetric slow-edge model cannot produce."""
+        return self._add("open_drain", **params)
+
     def lossy(self, **params):
         """Lossy channel. params: length_in, tand, causal, loss_db+loss_at_ghz (real units), or
         trend=(a,b,c) -- the whole fitted |S21| curve rather than one anchor point, which is what
@@ -1349,7 +1425,10 @@ class Signal:
             raise ValueError("lead_in: a segmented grid's anchors are resolved from the record's "
                              "start, which a lead-in moves; not supported")
         _lead_check_ops(self.ops)
-        floor = _lead_source_reach(self.ops[0], n, n_ui)
+        # The floor is what no probe can see: the source's own settling, and any op whose memory is
+        # known in closed form rather than measurable.
+        floor = max(_lead_source_reach(self.ops[0], n, n_ui),
+                    _lead_analytic_reach(self.ops, self.grid))
         L, kl, meas = _lead_size(self.lead_in, self.ops, self.grid, self.seed, n, quantum,
                                  floor=floor)
         spec_out = self.lead_in if self.lead_out is None else self.lead_out

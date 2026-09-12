@@ -401,6 +401,16 @@ KNOBS = [
     ("sample_clock", dict(ppm=100.0), "ppm", 300.0),
     ("sample_clock", dict(ppm=100.0), "phase0_s", 1.4e-12),
     ("sample_clock", dict(ppm=100.0), "drift_ppm_per_s", 5.0e7),
+    # open_drain on this shared 16 GBd grid needs R and C scaled to it: Rp*Cb = 200 ps is a few UI,
+    # so both edges are resolvable and visible. Those are not realistic values for a real
+    # open-drain bus -- realism is the subject of tests/test_open_drain_line.py, which builds the R
+    # and C from the rise time such a bus specifies. Here the only question is whether each knob
+    # reaches the samples.
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "r_pullup_ohm", 400.0),
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "c_bus_f", 2e-12),
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "v_dd", 5.0),
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "r_sink_ohm", 60.0),
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12, center=False), "center", True),
 ]
 
 

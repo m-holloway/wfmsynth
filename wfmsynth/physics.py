@@ -13,6 +13,7 @@ symbol/sample rate downstream. numpy/scipy only.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import math
 import re
 
 import numpy as np
@@ -1271,6 +1272,109 @@ def arbitrary(fn, n=None, fs=None, grid=None, band_limit_tr=None, causal=False):
     if band_limit_tr:
         y = _shape_edges(y, float(band_limit_tr), causal)
     return y
+
+
+# ---------------------------------------------------------------- the open-drain line
+# `bus.open_drain` combines drivers at LOGIC level -- a wired-AND over ones and zeros. That is the
+# protocol. This is the waveform, and on an open-drain bus the two edges are produced by different
+# mechanisms and are not each other's mirror:
+#
+#     fall    a sink pulls the line down through its on-resistance, in parallel with the pull-up.
+#             Fast, and its floor is a DIVIDER between the two resistances, not ground.
+#     rise    nothing drives it. The pull-up charges the bus capacitance. RC, and slow.
+#
+# Shaping that as a symmetric slow edge deletes the asymmetry, which is the most characteristic
+# thing about the class, and it also deletes the bus's real failure mode: raise the capacitance far
+# enough and the line never reaches the input-high threshold inside a bit. A symmetric edge always
+# arrives, just later; an RC charge that runs out of time does not arrive at all.
+#
+# The rise time an open-drain bus specification quotes is measured between 30 % and 70 % of the
+# supply, NOT the 10-90 % that driven logic uses. On an exponential charge those are 0.3567 tau and
+# 1.2040 tau, so tr(30-70) = ln(0.7/0.3) tau = 0.8473 tau, against 2.1972 tau for 10-90 %. Reading
+# one convention's number as the other's is worth a factor of 2.59.
+def rc_tau_for_rise_time(tr_s, lo_frac=0.3, hi_frac=0.7):
+    """The RC time constant whose exponential charge has a `lo_frac`-to-`hi_frac` rise of `tr_s`.
+
+    Defaults are the 30 %/70 % convention open-drain bus specifications use. Inverting:
+
+        v(t)/V = 1 - exp(-t/tau)   =>   t(f) = -tau ln(1 - f)
+        tr     = tau * ln((1 - lo) / (1 - hi))
+    """
+    lo, hi = float(lo_frac), float(hi_frac)
+    if not 0.0 <= lo < hi < 1.0:
+        raise ValueError(f"need 0 <= lo_frac < hi_frac < 1, got {lo_frac}, {hi_frac}")
+    return float(tr_s) / math.log((1.0 - lo) / (1.0 - hi))
+
+
+def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.0, v0=None):
+    """Line voltage on an open-drain bus, integrated as a first-order RC.
+
+      `sink_on`        boolean per sample: is ANY device pulling the line down. Several devices on
+                       one line is the OR of their sinks -- that is the wired-AND, at this level.
+      `r_pullup_ohm`   the pull-up to `v_dd`
+      `c_bus_f`        total bus capacitance (wiring + every device's input)
+      `r_sink_ohm`     the sink's on-resistance while it is pulling down
+      `v0`             initial line voltage; default is the settled value for the first sample, so
+                       a record does not open with an edge nobody asked for
+
+    Two resistances, so two time constants and two targets:
+
+        released   target v_dd,                          tau = Rp * Cb
+        sinking    target v_dd * Rs/(Rp+Rs)  (a divider), tau = (Rp||Rs) * Cb
+
+    Integrated by exponential stepping, v <- target + (v - target) exp(-dt/tau), which is EXACT for
+    a piecewise-constant target rather than an Euler approximation of it -- so the rise time the
+    waveform shows is the rise time the arithmetic asked for, at any oversampling ratio above the
+    resolvability check below.
+    """
+    sink = np.asarray(sink_on)
+    if sink.dtype != bool:
+        sink = sink.astype(bool)
+    if sink.ndim != 1:
+        raise ValueError(f"sink_on must be 1-D, got shape {sink.shape}")
+    rp, rs, cb = float(r_pullup_ohm), float(r_sink_ohm), float(c_bus_f)
+    if rp <= 0 or rs <= 0 or cb <= 0:
+        raise ValueError("r_pullup_ohm, r_sink_ohm and c_bus_f must all be positive")
+    fs = float(fs)
+    tau_hi = rp * cb                                     # released: the slow one
+    tau_lo = (rp * rs / (rp + rs)) * cb                  # sinking
+    v_low = float(v_dd) * rs / (rp + rs)
+    dt = 1.0 / fs
+    # Which edge must the grid resolve? Exponential stepping is EXACT for a piecewise-constant
+    # target at any dt, so at dt >> tau the line settling inside one sample is the correct answer
+    # for that grid rather than an artefact of the integration. What is not acceptable is a grid
+    # that cannot show the RISE: that is the edge an open-drain bus specification constrains, it is
+    # the parameter this model exists to represent, and a record whose specified edge is invisible
+    # does not represent the thing it claims to. So the rise is an error and the fall is a warning.
+    #
+    # On this bus that ordering is also the permissive one: a pull-up is hundreds of ohms to
+    # kilohms and a sink is tens, so tau_hi is always the larger by one to two orders of magnitude,
+    # and a grid that resolves the rise is the only requirement in practice. Real captures of this
+    # bus routinely under-resolve the fall, and refusing them would be refusing reality.
+    if dt > 0.5 * tau_hi:
+        raise ValueError(
+            f"sample rate {fs:.4g} Sa/s cannot resolve the rise: dt = {dt:.4g} s against "
+            f"tau = {tau_hi:.4g} s (Rp * Cb). The rise is the edge this bus specifies, so a grid "
+            f"that cannot show it makes the record meaningless. Raise fs above "
+            f"{2.0 / tau_hi:.4g} Sa/s, or lower r_pullup_ohm / c_bus_f.")
+    if dt > 0.5 * tau_lo:
+        warnings.warn(
+            f"sample rate {fs:.4g} Sa/s does not resolve the fall: dt = {dt:.4g} s against "
+            f"tau = {tau_lo:.4g} s ((Rp||Rs) * Cb). The level is correct and the rise is "
+            f"resolved; the falling edge completes inside one sample, as it would on a real "
+            f"capture at this rate.", RuntimeWarning, stacklevel=2)
+    k_hi = math.exp(-dt / tau_hi)
+    k_lo = math.exp(-dt / tau_lo)
+    n = sink.size
+    v = np.empty(n, dtype=float)
+    cur = (v_low if (n and sink[0]) else float(v_dd)) if v0 is None else float(v0)
+    for i in range(n):
+        if sink[i]:
+            cur = v_low + (cur - v_low) * k_lo
+        else:
+            cur = v_dd + (cur - v_dd) * k_hi
+        v[i] = cur
+    return v
 
 
 ANALOG_KINDS = ("sine", "square", "triangle", "sawtooth", "dc")

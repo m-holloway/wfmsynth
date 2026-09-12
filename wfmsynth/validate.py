@@ -1969,12 +1969,41 @@ for _lname, _lmk in (("reflect(td_frac=)", lambda: _lsrc(_LN, _LSYM, lead_in=Tru
 check("a lead-in REFUSES every op whose meaning it would change (5 of 5 observed refusing)",
       not _lref, "; ".join(_lref) or "reflect(td_frac), ac_couple(fc_frac), digitize(n_out), "
                                      "acquire, events")
-from wfmsynth.compose import _LEAD_LTI, _LEAD_SKIP, _LEAD_REJECT, _EXEC as _LEXEC
-_lunc = sorted(set(_LEXEC) - (_LEAD_LTI | _LEAD_SKIP | set(_LEAD_REJECT)))
+from wfmsynth.compose import (_LEAD_LTI, _LEAD_SKIP, _LEAD_REJECT, _LEAD_ANALYTIC,
+                              _EXEC as _LEXEC)
+_lunc = sorted(set(_LEXEC) - (_LEAD_LTI | _LEAD_SKIP | set(_LEAD_REJECT) | set(_LEAD_ANALYTIC)))
 check("every composable op is CLASSIFIED for the lead-in (has an impulse response / has none / "
-      "cannot be guarded), so a new op cannot default into the safe-looking pile",
+      "has one that is known in closed form / cannot be guarded), so a new op cannot default into "
+      "the safe-looking pile",
       not _lunc, f"{len(_LEXEC)} ops: {len(_LEAD_LTI)} sized, {len(_LEAD_SKIP)} skipped, "
-                 f"{len(_LEAD_REJECT)} refused" + (f"; UNCLASSIFIED {_lunc}" if _lunc else ""))
+                 f"{len(_LEAD_ANALYTIC)} stated, {len(_LEAD_REJECT)} refused"
+                 + (f"; UNCLASSIFIED {_lunc}" if _lunc else ""))
+# A STATED extent has to be a real quantity, not a placeholder. Two things make it one: it scales
+# with the physics it came from, and at the capacitance where such a bus FAILS it exceeds a symbol --
+# which is the same statement as the failure, so the lead-in and the failure mode agree.
+#
+# Note what this check does NOT claim. At the specified limit (885 ohm, 400 pF) 5 tau is 0.7 UI at
+# 400 kbit/s -- SHORTER than one symbol, and that is the compliant condition, not a shortfall: the
+# specification caps the rise at 300 ns inside a 2.5 us bit precisely so the edge finishes well
+# within the bit. An earlier version of this check asserted 5 tau > 1 UI and failed here; the check
+# was wrong, not the extent.
+from wfmsynth import Grid as _LGrid
+_lg = _LGrid(fs=100e6, baud=400e3, n=1 << 14, v_full=3.3)
+def _lstated(r, c):
+    return _LEAD_ANALYTIC["open_drain"]({"r_pullup_ohm": r, "c_bus_f": c}, _lg)
+_l1 = _lstated(885.0, 400e-12)
+check("a lead-in extent STATED in closed form scales with the physics it came from (open_drain: "
+      "5 tau is proportional to Rp and to Cb)",
+      _l1 > 0 and abs(_lstated(1770.0, 400e-12) / _l1 - 2.0) < 0.02
+      and abs(_lstated(885.0, 800e-12) / _l1 - 2.0) < 0.02,
+      f"5 tau = {_l1} samples at 885 ohm / 400 pF; {_lstated(1770.0, 400e-12)} at 2x Rp; "
+      f"{_lstated(885.0, 800e-12)} at 2x Cb")
+_lbad = _lstated(885.0, 4700e-12)
+check("and it exceeds one symbol exactly where such a bus fails (11x over the 400 pF limit, the "
+      "line no longer reaches the input-high threshold inside a bit)",
+      _lbad > int(_lg.samples_per_ui),
+      f"5 tau = {_lbad} samples = {_lbad / _lg.samples_per_ui:.1f} UI at 400 kbit/s, against "
+      f"{_l1 / _lg.samples_per_ui:.1f} UI at the compliant limit")
 
 
 # THE TERMINAL STORE'S FLOOR. Three real exports land on their own lattice's q^2/12/(fs/2) --
