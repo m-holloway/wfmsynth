@@ -13,16 +13,23 @@ Modules / public API:
   events        place_events / apply_events — localized needles + per-window labels
   eye           eye_density() — a record folded on the clock a CDR recovers from it
   grammar       carrier(), envelope(), sample(), generate() — compositional signals
+  quinary       4D-PAM5 / 8B1Q4 — the four-pair quinary line code, its non-uniform symbol
+                statistics, the transmit partial-response filter and the standard's
+                transmitter test patterns
   pam4          deep_capture() — realistic segmented PAM4 scope captures with defects
+  patterns      a NAME -> symbol-generator registry: register/resolve/describe/replay, a
+                general arbitrary-polynomial LFSR and a block-repeat generator. Mechanisms live
+                here; WHICH pattern a standard names is the caller's to register.
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 """
 __version__ = "0.39.1"
 
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
-               acquire)
+               acquire, patterns, quinary)
 from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
-                      nominal_nonlinearity, crosstalk_matrix, differential_pair,
+                      nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
+                      single_pair_observation, db_to_coupling, differential_pair,
                       differential_mode, common_mode, supply_coupling)
 from .grid import Grid
 from .streams import Streams
@@ -54,16 +61,47 @@ from .rx import ctle, dfe, ffe
 from .scene import Scene
 from .optical import (to_optical, rin_noise, shot_noise, chromatic_dispersion, mpi, laser_chirp,
                       modulate_field, fiber, field_mpi, edfa, photodetect, tia)
-from .coding import dc_balanced, scramble_64b66b, running_disparity, max_run
+from .coding import (dc_balanced, scramble_64b66b, running_disparity, max_run,
+                     line_code, line_decode, coded_symbols, SCHEMES,
+                     lfsr_keystream, scramble_additive, scramble_self_sync,
+                     descramble_self_sync, scramble_64b66b_framed, descramble_64b66b,
+                     scramble_128b130b, descramble_128b130b,
+                     scramble_128b132b, descramble_128b132b,
+                     encode_8b10b_words, decode_8b10b, code_8b10b,
+                     pam4_gray_encode, pam4_gray_decode, pam4_gray_levels,
+                     precode, precode_inverse, pam3_encode, pam3_decode,
+                     GRAY_PAM4_BITS, PAM4_LEVELS_MV, PAM4_OUTER_MV,
+                     PAM3_BLOCK_BITS, PAM3_BLOCK_SYMBOLS, PAM3_BITS_PER_SYMBOL)
+from .patterns import (register_pattern, resolve_pattern, describe_pattern, replay_pattern,
+                       PATTERNS)
+from .quinary import (encode_8b1q4, quartet_subsets, quartet_constellation, quinary_volts,
+                      partial_response, pam5_symbols, side_stream_bits, subset_indices,
+                      test_mode_symbols, QUINARY_SYMBOLS, PARTIAL_RESPONSE_TAPS,
+                      CLAUSE_40_BUDGET, SYMBOL_RATE_BD)
 from .bus import open_drain, combine_drivers, uart_frame, uart_decode
 from .acquire import AcquisitionProfile, acquire_record, record_decimation
 
 __all__ = [
     "physics", "impairments", "events", "grammar", "pam4", "grid", "instrument", "streams", "compose",
+    "patterns", "register_pattern", "resolve_pattern", "describe_pattern", "replay_pattern",
+    "PATTERNS",
     "measure", "sweep", "cdr", "eye", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "bus", "acquire", "ctle", "dfe", "ffe", "Scene",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "combine_drivers", "uart_frame", "uart_decode",
     "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",
+    "quinary", "encode_8b1q4", "quartet_subsets", "quartet_constellation", "quinary_volts",
+    "partial_response", "pam5_symbols", "side_stream_bits", "subset_indices",
+    "test_mode_symbols", "QUINARY_SYMBOLS", "PARTIAL_RESPONSE_TAPS", "CLAUSE_40_BUDGET",
+    "SYMBOL_RATE_BD",
+    "line_code", "line_decode", "coded_symbols", "SCHEMES",
+    "lfsr_keystream", "scramble_additive", "scramble_self_sync", "descramble_self_sync",
+    "scramble_64b66b_framed", "descramble_64b66b",
+    "scramble_128b130b", "descramble_128b130b", "scramble_128b132b", "descramble_128b132b",
+    "encode_8b10b_words", "decode_8b10b", "code_8b10b",
+    "pam4_gray_encode", "pam4_gray_decode", "pam4_gray_levels",
+    "precode", "precode_inverse", "pam3_encode", "pam3_decode",
+    "GRAY_PAM4_BITS", "PAM4_LEVELS_MV", "PAM4_OUTER_MV",
+    "PAM3_BLOCK_BITS", "PAM3_BLOCK_SYMBOLS", "PAM3_BITS_PER_SYMBOL",
     "to_optical", "rin_noise", "shot_noise", "chromatic_dispersion", "mpi", "laser_chirp",
     "modulate_field", "fiber", "field_mpi", "edfa", "photodetect", "tia",
     "stream_convolve", "stream_blocks", "channel_fir", "separability", "feature_vector",
@@ -72,7 +110,8 @@ __all__ = [
     "timing_source", "apply_phase", "phase_noise", "recover_and_fold",
     "read_touchstone", "write_touchstone", "sparam_channel", "touchstone_channel",
     "N", "T", "Grid", "Jitter", "Streams", "tx_ffe", "carrier_symbols", "from_symbols", "resonant_reflection", "de_emphasis_taps",
-    "nominal_nonlinearity", "crosstalk_matrix",
+    "nominal_nonlinearity", "crosstalk_matrix", "crosstalk_sum", "hybrid_echo",
+    "single_pair_observation", "db_to_coupling",
     "differential_pair", "differential_mode", "common_mode", "supply_coupling",
     "IMPAIRMENTS", "apply_impairment", "domain_randomize",
     "mix_at_constant_power", "burst_gate", "apply_gated", "realistic_noise", "drift", "electrical_idle",

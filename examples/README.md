@@ -72,7 +72,26 @@ The distinction that matters:
 Use this pattern when training data should resemble what a scope or digitizer stores rather
 than an ideal simulated node.
 
-### 5. Specialist topics
+### 5. Hand a dataset over, and let the receiver rebuild it
+
+[`replay.py`](replay.py) is the one example that is also a TOOL. It reads a recipe document (a
+mapping of record id to `{"ops": [...], "grid": {...}}`), rebuilds every record by executing
+those ops on the declared grid, and checks each one against the digest the document carries:
+
+```bash
+python examples/replay.py RECIPE.json OUT_DIR        # render + verify
+python examples/replay.py RECIPE.json --dry-run      # verify only, write nothing
+python examples/replay.py RECIPE.json OUT_DIR --only link/tp2/r0001
+```
+
+It imports this library and the standard library and nothing else, which is what makes a
+handed-over archive self-sufficient: the recipient needs the document, this file, and this
+library at the commit the document pins — no build script, no authoring layer. It exits
+non-zero on any mismatch **and on having verified nothing**, so a document that carries no
+digests cannot pass by accident. Its docstring is also the shortest tour of the chain
+(bits → coding → symbols → levels → waveform → instrument) and of which op sits where.
+
+### 6. Specialist topics
 
 | Example | Use it when |
 |---|---|
@@ -80,6 +99,7 @@ than an ideal simulated node.
 | [`clock_recovery.py`](clock_recovery.py) | The receiver or scope CDR changes which jitter remains visible |
 | [`touchstone_channel.py`](touchstone_channel.py) | You have measured `.sNp` channel data or need resonances absent from an analytic model |
 | [`events.py`](events.py) | Rare localized defects (runt, glitch, ring, droop) in a long record, labelled per UI window |
+| [`replay.py`](replay.py) | Rebuilding and verifying a set of records from recipes alone, as a consumer of a handed-over archive |
 
 ## Choosing a dataset generator
 

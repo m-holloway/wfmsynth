@@ -558,9 +558,10 @@ C_IN_PER_NS = 11.8028                    # speed of light in vacuum, inches per 
 def ps_per_inch(eps_r=4.0):
     """One-way propagation delay [ps/inch] in a dielectric of effective permittivity `eps_r`.
 
-    eps_r=4.0 gives 169.45 ps/inch. `wfmplan.fold.PS_PER_INCH_ONE_WAY` is 169.5, from the
-    same arithmetic with c rounded to 11.8 in/ns — 0.03 % apart, which is 0.5 mil on a 1.66-inch
-    echo. Pass `ps_per_inch=` explicitly to any section that must pin a downstream convention."""
+    eps_r=4.0 gives 169.45 ps/inch. A caller that rounds c to 11.8 in/ns gets 169.5 from the same
+    arithmetic — 0.03 % apart, which is 0.5 mil on a 1.66-inch echo, so the two conventions are
+    interchangeable for a lag-to-distance estimate and NOT for a length pinned to a mil. Pass
+    `ps_per_inch=` explicitly to any section that must pin a downstream convention."""
     return 1000.0 / C_IN_PER_NS * np.sqrt(float(eps_r))
 
 

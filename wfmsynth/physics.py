@@ -21,6 +21,8 @@ import warnings
 
 from scipy import signal
 
+from . import quinary as Q
+
 N = 4096                       # default working grid
 T = np.linspace(0.0, 1.0, N, endpoint=False)
 
@@ -382,6 +384,33 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
     return apply_transfer(x, make_H, linear=linear, guard=guard)
 
 
+def _coupled_kernel(aggressor, kind, d_samples, n):
+    """The peak-normalized coupling kernel one aggressor contributes, for `kind` in
+    {'fext', 'next'} on an `n`-sample record. The ONE place the shape of a crosstalk coupling
+    is decided; `crosstalk` and `crosstalk_sum` are both callers, so a four-pair sum and a
+    single aggressor cannot drift apart.
+
+    WHY FEXT IS A DERIVATIVE AND NEXT IS NOT, given both couple through the same mutual L/C.
+    Both are integrals of the aggressor's d/dt over the coupled length. FEXT's contributions all
+    arrive together, so the integral collapses to Td·d/dt and its transfer function rises at
+    20 dB/decade right across the band. NEXT's arrive spread over the round trip, so its
+    transfer function rises at 20 dB/decade only below about 1/(4·Td) and is FLAT above it --
+    and on a link long enough that 1/(4·Td) sits below the signal band, in-band NEXT is a
+    filtered copy of the aggressor's LEVEL, not of its derivative. A 100 m twisted-pair channel
+    puts that corner near 500 kHz against a 62.5 MHz Nyquist, which is why the near-end branch
+    here is a delayed level copy.
+
+    WHAT WOULD FALSIFY IT: a short coupled section -- centimetres of package or connector rather
+    than metres of cable -- puts 1/(4·Td) ABOVE the band and NEXT becomes derivative-coupled too.
+    This kernel does not model that case; use kind='fext' with the near-end delay for it."""
+    a = np.asarray(aggressor, float)
+    if kind == "fext":
+        k = np.gradient(a)
+    else:                                                 # next: delayed coupling
+        d = int(d_samples); k = np.zeros(n); k[d:] = a[:n - d]
+    return k / (np.abs(k).max() + 1e-9)
+
+
 def crosstalk(x, aggressor, coupling=0.12, kind="fext", td_frac=0.05):
     """Add coupled noise from a neighboring (aggressor) line. FEXT couples through
     the mutual C/L as the DERIVATIVE of the aggressor (∝ d/dt); NEXT is a delayed,
@@ -389,13 +418,176 @@ def crosstalk(x, aggressor, coupling=0.12, kind="fext", td_frac=0.05):
     high-speed links are frequently crosstalk-limited — a major missing effect."""
     x = np.asarray(x, float)
     n = len(x)
-    a = np.asarray(aggressor, float)
-    if kind == "fext":
-        k = np.gradient(a)
-    else:                                                 # next: delayed coupling
-        d = int(td_frac * n); k = np.zeros(n); k[d:] = a[:n - d]
-    k = k / (np.abs(k).max() + 1e-9)
+    k = _coupled_kernel(aggressor, kind, int(td_frac * n), n)
     return x + coupling * (np.ptp(x) + 1e-9) * k
+
+
+def db_to_coupling(loss_db):
+    """A coupling/isolation/return loss in dB -> the linear `coupling` these primitives take.
+
+    AMPLITUDE convention: 10**(-dB/20), and the primitives scale the coupled term's PEAK by it
+    relative to the victim's peak-to-peak. A NEXT loss, FEXT loss or return loss read out of a
+    cabling or PHY document is an amplitude (|S| ratio) figure, so it converts directly. An
+    rms-referred or power-summed figure would land a few dB away, and this is the pessimistic
+    reading of the two. A non-finite dB value (the mechanism switched off) is exactly 0.0, so the
+    degenerate case is an exact zero rather than an underflow."""
+    d = float(loss_db)
+    return 0.0 if not np.isfinite(d) else 10.0 ** (-d / 20.0)
+
+
+def crosstalk_sum(x, aggressors, couplings, kinds="fext", td_samples=0, grid=None, td_ps=None):
+    """Sum the coupling from EXPLICIT aggressor streams into one victim.
+
+    `crosstalk_matrix` MANUFACTURES its aggressors (one `nrz` per coupling, at a seed and a baud
+    offset) and has no parameter that takes a waveform. That is right when the neighbours are
+    unknown traffic, and wrong when they are known: on a four-pair link the three near-end
+    aggressors are the OTHER THREE LANES OF THE SAME TRANSMITTER, carrying the same line code and
+    correlated with the victim's own transmit by construction. This op takes those streams.
+
+    `aggressors` is a sequence of arrays as long as `x`; `couplings` one linear coupling each
+    (see `db_to_coupling`); `kinds` one kind each, or one kind for all. The near-end delay is
+    absolute — `td_samples`, or `td_ps` with a `grid` — NOT a fraction of the record, so a
+    lead-in or a longer capture does not move it.
+
+    Each aggressor's contribution is computed against the ORIGINAL `x`, so the terms superpose
+    exactly and the order of the aggressors does not matter — which is what makes a coupling
+    budget auditable term by term."""
+    x = np.asarray(x, float)
+    n = len(x)
+    m = len(couplings)
+    if len(aggressors) != m:
+        raise ValueError(f"{len(aggressors)} aggressor streams for {m} couplings")
+    if td_ps is not None:
+        if grid is None:
+            raise ValueError("td_ps requires grid=Grid(...)")
+        td_samples = td_ps * 1e-12 * grid.fs
+    kinds = list(kinds) if isinstance(kinds, (list, tuple)) else [kinds] * m
+    span = np.ptp(x) + 1e-9
+    d = None
+    for a, c, kd in zip(aggressors, couplings, kinds):
+        if c == 0.0:
+            continue          # an absent mechanism adds nothing, so the reduction is exact
+        t = c * span * _coupled_kernel(a, kd, td_samples, n)
+        d = t if d is None else d + t
+    # the couplings are accumulated and added ONCE, so the total does not depend on the order the
+    # aggressors were listed in, and an all-zero coupling vector returns the victim untouched
+    return x.copy() if d is None else x + d
+
+
+# The default corner of the echo's high-pass shaping, as a fraction of Nyquist. WHY THERE IS A
+# HIGH-PASS AT ALL: the echo is own transmit reflected off the near-end impedance discontinuity,
+# and a return-loss limit is a LOW-frequency-good specification -- 15 dB or better at the bottom
+# of the band, degrading upward -- so the reflection coefficient GROWS with frequency. A flat
+# echo would put low-frequency energy in the residual that the real hybrid cancels well. The
+# fraction is a judgement (a real corner is a property of the connector and the cable, not of the
+# standard); what would falsify it is a measured return-loss curve, which belongs in `sparam`.
+ECHO_HP_FRAC_NYQUIST = 0.02
+
+
+def hybrid_echo(x, own_tx, isolation_db=20.0, grid=None, td_ps=None, td_samples=None,
+                f_hp_hz=None, f_hp_frac=ECHO_HP_FRAC_NYQUIST, linear=True, guard=None):
+    """The transceiver's OWN TRANSMIT leaking into its own receive: a scaled, delayed, filtered
+    copy of a DIFFERENT stream, added to `x`.
+
+    THIS IS NOT A REFLECTION OF THE RECEIVED SIGNAL, and that is why `reflect` cannot express it.
+    `multi_reflection` is a functional of its input alone: hand it silence and it returns
+    silence. On a bidirectional pair the hybrid subtracts own transmit from the line and what
+    survives — the hybrid's finite balance plus own transmit reflected off the near-end
+    mismatch — is present whether or not anything is being received. Feed this op a zero `x` and
+    the output is not zero.
+
+      isolation_db  how far down the echo sits, amplitude convention (`db_to_coupling`). This is
+                    the hybrid's balance and the channel's return loss taken together, because a
+                    probe cannot separate them. ``inf`` switches the mechanism off and returns
+                    `x` bit-for-bit.
+      td_ps/        the round trip to the reflecting discontinuity. Absolute, not a fraction of
+      td_samples    the record.
+      f_hp_hz/      the corner of the return-loss shaping (see `ECHO_HP_FRAC_NYQUIST`).
+      f_hp_frac
+
+    Applied as a LINEAR convolution on `own_tx` (`apply_transfer`), so the echo of the transmit
+    record's tail does not wrap onto its head.
+    """
+    x = np.asarray(x, float)
+    g = db_to_coupling(isolation_db)
+    if g == 0.0:
+        return x            # not a shortcut: zero coupling IS no mechanism, and must be exact
+    own = np.asarray(own_tx, float)
+    if len(own) != len(x):
+        raise ValueError(f"own_tx is {len(own)} samples, x is {len(x)}")
+    if grid is not None and f_hp_hz is not None:
+        f_hp_frac = grid.hz_to_frac_nyquist(f_hp_hz)
+    elif f_hp_hz is not None:
+        raise ValueError("f_hp_hz requires grid=Grid(...)")
+    if td_samples is None:
+        if not td_ps:                       # None or exactly zero: no delay, no grid needed
+            td_samples = 0.0
+        elif grid is None:
+            raise ValueError("a nonzero td_ps requires grid=Grid(...)")
+        else:
+            td_samples = td_ps * 1e-12 * grid.fs
+
+    def make_H(nfft):
+        # normalized frequency: cycles per sample, so the delay is in samples and the corner is
+        # a fraction of Nyquist -- the same convention the rest of this module's fraction paths use
+        f = np.fft.rfftfreq(nfft, d=1.0)
+        s = 1j * (f / (0.5 * f_hp_frac + 1e-18))
+        return (s / (1.0 + s)) * np.exp(-1j * 2 * np.pi * f * td_samples)
+
+    echo = apply_transfer(own, make_H, linear=linear, guard=guard)
+    # normalized to the ECHO's own peak so `isolation_db` means what it says about the term that
+    # is added, rather than about the transmit amplitude before an unknown filter gain
+    echo = echo / (np.abs(echo).max() + 1e-12)
+    return x + g * (np.ptp(x) + 1e-9) * echo
+
+
+def single_pair_observation(wanted, own_tx, near, far, grid=None,
+                            echo_db=None, echo_td_ps=0.0, echo_f_hp_hz=None,
+                            next_db=None, next_td_ps=0.0, fext_db=None):
+    """What a probe on ONE pair of a live four-pair link actually sees, as ONE channel.
+
+    wanted + echo + NEXT + FEXT:
+
+      wanted   the FAR-END transmitter of this pair, through the channel — the only term a
+               naive single-pair model has.
+      echo     `own_tx`, the NEAR-END transmitter of this same pair, leaking back through the
+               hybrid's finite isolation (`hybrid_echo`).
+      NEXT     the three other NEAR-END transmitters (`near`). They have traversed no cable, so
+               this is normally the largest crosstalk term.
+      FEXT     the three other FAR-END transmitters (`far`), which have.
+
+    Emulating this into one stored channel is not a convenience: it is what the measurement IS.
+    A differential probe on one pair sums these four whether or not the dataset admits it. What
+    a single stored channel LOSES is the ability to correlate an aggressor with the victim — and
+    a model trained on a single-pair capture is in the probe's position anyway.
+
+    Each `*_db` is a LOSS in dB (amplitude convention, `db_to_coupling`); ``None`` or ``inf``
+    switches that mechanism off, and with all three off the return value is `wanted` ITSELF.
+    `wfmsynth.quinary.CLAUSE_40_BUDGET` carries a worked set of values and says what they rest on.
+
+    EVERY TERM IS REFERENCED TO THE WANTED SIGNAL'S SPAN, not to the running sum, and the terms
+    are accumulated before being added once. Both matter: referencing to the running sum would
+    make the second mechanism's realized coupling depend on the first one's setting, and adding
+    them one at a time would leave the total dependent on the order. As written, a budget can be
+    attributed term by term and a sweep of one term leaves the others where they were.
+    """
+    w = np.asarray(wanted, float)
+    d = None
+
+    def add(term):
+        return term - w if d is None else d + (term - w)
+
+    if echo_db is not None:
+        d = add(hybrid_echo(w, own_tx, isolation_db=echo_db, grid=grid, td_ps=echo_td_ps,
+                            **({"f_hp_hz": echo_f_hp_hz} if echo_f_hp_hz is not None else {})))
+    if next_db is not None and len(near):
+        c = db_to_coupling(next_db)
+        d = add(crosstalk_sum(w, list(near), [c] * len(near), kinds="next",
+                              grid=grid, td_ps=next_td_ps))
+    if fext_db is not None and len(far):
+        c = db_to_coupling(fext_db)
+        d = add(crosstalk_sum(w, list(far), [c] * len(far), kinds="fext"))
+    return w if d is None else w + d
 
 
 def de_emphasis_taps(db):
@@ -720,6 +912,43 @@ PRBS_TAPS = {7: (7, 6), 9: (9, 5), 11: (11, 9), 13: (13, 12, 2, 1), 15: (15, 14)
 GRAY_PAM4 = {(0, 0): -1.0, (0, 1): -1.0 / 3.0, (1, 1): 1.0 / 3.0, (1, 0): 1.0}
 
 
+def lfsr(taps, length, seed=1, phase=0):
+    """Fibonacci LFSR bits for an ARBITRARY polynomial -- the one bit engine in this module.
+
+    `taps` are the exponents of the feedback polynomial, x^a + x^b + ... + 1, as 1-based tap
+    positions; the register width is `max(taps)`. `(7, 6)` is x^7 + x^6 + 1. `prbs` is this
+    function with `taps` looked up by order, so a polynomial the table does not carry runs
+    through exactly the same arithmetic as one it does -- which is the only way an
+    arbitrary-polynomial claim is worth anything.
+
+    A polynomial that is not PRIMITIVE still runs: it produces a shorter cycle, or several
+    disjoint cycles, rather than a maximal-length sequence. Nothing here checks primitivity
+    (there is no cheap test), so a caller who wants the 2**order-1 period must either take the
+    polynomial from a document or measure the period of what comes back.
+
+    `seed` is the initial state and therefore the PHASE; state 0 is the dead state and falls
+    back to 1. See `prbs` for what that means for a record's starting position.
+    """
+    taps = tuple(int(t) for t in taps)
+    if not taps or min(taps) < 1:
+        raise ValueError(f"taps must be 1-based exponents of the feedback polynomial, not {taps!r}")
+    mask = (1 << max(taps)) - 1
+    st = int(seed) & mask or 1
+    for _ in range(int(phase)):                 # advance without emitting
+        b = 0
+        for t in taps:
+            b ^= (st >> (t - 1)) & 1
+        st = ((st << 1) | b) & mask
+    out = np.empty(int(length), np.int8)
+    for i in range(int(length)):
+        b = 0
+        for t in taps:
+            b ^= (st >> (t - 1)) & 1
+        out[i] = st & 1
+        st = ((st << 1) | b) & mask
+    return out
+
+
 def prbs(order, length, seed=1, phase=0):
     """Fibonacci LFSR PRBS of the given order. See PRBS_TAPS for polynomials.
 
@@ -738,21 +967,10 @@ def prbs(order, length, seed=1, phase=0):
     -- `seed=0` and `seed=1` produce the IDENTICAL sequence. Two records seeded 0 and 1 are
     not two draws. This is kept because output seeded 0 is already pinned downstream.
     """
-    taps = PRBS_TAPS[order]
-    st = seed & ((1 << order) - 1) or 1
-    for _ in range(int(phase)):                 # advance without emitting
-        b = 0
-        for t in taps:
-            b ^= (st >> (t - 1)) & 1
-        st = ((st << 1) | b) & ((1 << order) - 1)
-    out = np.empty(length, np.int8)
-    for i in range(length):
-        b = 0
-        for t in taps:
-            b ^= (st >> (t - 1)) & 1
-        out[i] = st & 1
-        st = ((st << 1) | b) & ((1 << order) - 1)
-    return out
+    # One engine: `lfsr` is this loop with the polynomial passed in rather than looked up, and
+    # `max(PRBS_TAPS[order]) == order` for every row, so the register width and every masked
+    # shift are identical to what this function did before it delegated. Bit-for-bit, asserted.
+    return lfsr(PRBS_TAPS[order], length, seed, phase)
 
 
 def random_phase(order, rng=None):
@@ -824,6 +1042,11 @@ def clock_pattern(n_symbols):
 NRZ_PRBS_PATTERNS = {f"prbs{order}": order for order in sorted(PRBS_TAPS)}
 NRZ_PATTERNS = ("legacy", *NRZ_PRBS_PATTERNS, "clock")
 PAM4_PATTERNS = ("legacy", "prbs13q", "prbs31q")
+# PAM5's real line codes, from `wfmsynth.quinary`. They are patterns of `pam5` rather than a
+# carrier kind of their own because they ARE five-level PAM -- what makes them different from
+# `pam(5, pattern='uniform')` is the bit-to-level mapping and its statistics, which is exactly
+# what a pattern selects everywhere else in this module.
+PAM5_PATTERNS = Q.PATTERNS
 
 
 def _pattern_error(pattern, kind, accepted, other_kind, other_accepted):
@@ -964,7 +1187,8 @@ def _place_symbols(levels_per_ui, n, spb, jitter=None, rng=None):
     return levels_per_ui[idx]
 
 
-def carrier_symbols(kind, n_ui, seed=1, pattern="legacy", phase=0):
+def carrier_symbols(kind, n_ui, seed=1, pattern="legacy", phase=0, pair=0,
+                    partial_response=True, role="master"):
     """The ideal transmitted symbol levels (one per UI) for a carrier — the reference
     stream for realized symbol alignment and any per-symbol ground-truth statistic.
     Deterministic given (kind, n_ui, seed, pattern); the single source of truth that
@@ -1012,12 +1236,18 @@ def carrier_symbols(kind, n_ui, seed=1, pattern="legacy", phase=0):
     m = re.fullmatch(r"pam(\d+)", str(kind))
     if m:
         n_lv = int(m.group(1))
+        if n_lv == 5 and pattern in PAM5_PATTERNS:
+            # the four-pair quinary line code, not a uniform PAM5 draw. `pair` picks which of
+            # the four coordinates of the same octet stream this lane is.
+            return Q.pam5_symbols(pair=pair, n_ui=n_ui, seed=seed, pattern=pattern,
+                                  partial_response=partial_response, role=role)
         if pattern in ("legacy", "uniform"):
             return pam_symbols(n_lv, n_ui, seed, phase=phase)
         if pattern == "clock":
             lv = pam_levels(n_lv)
             return np.where(np.arange(n_ui) % 2 == 0, lv[-1], lv[0])
-        raise ValueError(f"unknown PAM{n_lv} pattern {pattern!r}; use 'uniform' or 'clock'")
+        extra = f", or one of {PAM5_PATTERNS}" if n_lv == 5 else ""
+        raise ValueError(f"unknown PAM{n_lv} pattern {pattern!r}; use 'uniform' or 'clock'{extra}")
     raise ValueError(f"unknown carrier kind {kind!r}; use 'nrz', 'pam4', or 'pam<N>'")
 
 
@@ -1144,7 +1374,7 @@ def pam_symbols(n_levels, n_symbols, seed=1, order=13, phase=0):
 
 def pam(n_levels=4, n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False,
         pattern="uniform", tr_floor_samples=TR_DEFAULT_FLOOR_SAMPLES,
-        jitter=None, rng=None, phase=0):
+        jitter=None, rng=None, phase=0, pair=0, partial_response=True, role="master"):
     """PAM-N carrier for any N >= 2.
 
     `pam(4, pattern='legacy')` is not the same stream as `pam4(pattern='legacy')` and does
@@ -1153,6 +1383,19 @@ def pam(n_levels=4, n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False,
 
     pattern='uniform'  PRBS-driven, uniform over the N levels (see `pam_symbols`)
     pattern='clock'    the two outer levels alternating: the ISI-free contrast case
+
+    For N = 5 only, the real line code and the standard's transmitter test patterns:
+    pattern='8b1q4'    4D-PAM5 / 8B1Q4 -- one pair of the four-pair gigabit link, with the
+                       non-uniform symbol statistics the code actually has. `pair` selects
+                       which of the four lanes of the same octet stream this is,
+                       `role` ('master'|'slave') picks which END of the link this is -- the two
+                       ends run DIFFERENT scrambler polynomials, so that and not a second seed
+                       is how to get an independent stream -- and `partial_response` applies the
+                       transmit shaping (default on, so the levels are the 17 at the MDI rather
+                       than the 5 the coder emitted).
+    pattern='test_mode_1'..'test_mode_4'
+                       the transmitter test-mode symbol sequences of Clause 40.6.1.1.2.
+    See `wfmsynth.quinary` for what in those is cited and what is PRELIMINARY.
     """
     n = N if n is None else int(n)
     spb = n / int(n_ui)
@@ -1161,8 +1404,12 @@ def pam(n_levels=4, n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False,
         syms = np.where(np.arange(int(n_ui)) % 2 == 0, lv[-1], lv[0])
     elif pattern == "uniform":
         syms = pam_symbols(n_levels, n_ui, seed, phase=phase)
+    elif int(n_levels) == 5 and pattern in PAM5_PATTERNS:
+        syms = Q.pam5_symbols(pair=pair, n_ui=int(n_ui), seed=seed, pattern=pattern,
+                              partial_response=partial_response, role=role)
     else:
-        raise ValueError(f"unknown PAM-N pattern {pattern!r}; use 'uniform' or 'clock'")
+        extra = f", or one of {PAM5_PATTERNS}" if int(n_levels) == 5 else ""
+        raise ValueError(f"unknown PAM-N pattern {pattern!r}; use 'uniform' or 'clock'{extra}")
     tr, _ = resolve_rise_time(tr_frac, spb, floor_samples=tr_floor_samples)
     return _shape_edges(_place_symbols(syms, n, spb, jitter, rng), tr, causal)
 
@@ -1264,6 +1511,18 @@ def arbitrary(fn, n=None, fs=None, grid=None, band_limit_tr=None, causal=False):
     NOTHING IS CHECKED about what comes back except its length. A function with content above
     Nyquist will alias, and that is the caller's business -- pass `band_limit_tr` (a rise time
     in SAMPLES) to shape it first if the function has steps in it.
+
+    IT CANNOT ROUND-TRIP THROUGH A STORED RECIPE, and that is a wart, not a design. `fn` is a
+    CALLABLE: it cannot be serialised to JSON, content-addressed, or replayed by anyone who has
+    the recipe and not the caller's code, so a record built on this carrier is not reproducible
+    from its own provenance -- which every other carrier here is. `compose` refuses the op rather
+    than storing something unreplayable, so the failure is loud, but the limitation is real.
+
+    The reproducible route is `wfmsynth.patterns`: register a NAMED generator (the recipe then
+    carries the name, its resolved parameters and a hash of the generator's source, so a consumer
+    is told what it needs instead of getting different samples), or embed the resolved samples as
+    data. Use this function for exploration and for one-off analysis, not for anything that has to
+    be rebuilt later from what was stored.
     """
     t = timebase(n, fs, grid)
     y = np.asarray(fn(t), dtype=float).ravel()

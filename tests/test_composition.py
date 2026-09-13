@@ -411,6 +411,24 @@ KNOBS = [
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "v_dd", 5.0),
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "r_sink_ohm", 60.0),
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12, center=False), "center", True),
+    # The hybrid echo and the summed four-pair observation. The echo's own transmit defaults to
+    # the same carrier spec shape `crosstalk`'s aggressor uses, so only the echo's own knobs move
+    # here; `multipair`'s three budgets are dB of LOSS, so a SMALLER number is MORE aggression.
+    ("hybrid_echo", dict(isolation_db=20.0, td_ps=100.0), "isolation_db", 14.0),
+    ("hybrid_echo", dict(isolation_db=20.0, td_ps=100.0), "td_ps", 300.0),
+    ("hybrid_echo", dict(isolation_db=20.0, td_ps=100.0, f_hp_frac=0.02), "f_hp_frac", 0.2),
+    ("hybrid_echo", dict(isolation_db=20.0, own=dict(n_ui=32, seed=7)), "own",
+     dict(n_ui=32, seed=9)),
+    ("multipair", dict(echo_db=16.0, next_db=30.0, fext_db=21.0), "echo_db", 10.0),
+    ("multipair", dict(echo_db=16.0, next_db=30.0, fext_db=21.0), "next_db", 24.0),
+    ("multipair", dict(echo_db=16.0, next_db=30.0, fext_db=21.0), "fext_db", 15.0),
+    ("multipair", dict(echo_db=16.0, next_db=30.0, fext_db=21.0, echo_td_ps=0.0),
+     "echo_td_ps", 200.0),
+    ("multipair", dict(echo_db=16.0, next_db=30.0, fext_db=21.0, next_td_ps=0.0),
+     "next_td_ps", 200.0),
+    ("multipair", dict(next_db=30.0, fext_db=21.0), "remote_seed", 11),
+    ("multipair", dict(next_db=30.0, fext_db=21.0), "local_seed", 11),
+    ("multipair", dict(next_db=30.0, fext_db=21.0, pattern="8b1q4"), "pattern", "test_mode_4"),
 ]
 
 
@@ -436,8 +454,12 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
     from wfmsynth.compose import _EXEC
     covered = {op for op, _, _, _ in KNOBS} | {op for op, _ in EXACT_BYPASS} \
         | {op for op, _ in TRANSFORM_BYPASS}
-    # ops with no scalar knob of their own, or exercised by their own dedicated suites
-    excused = {"carrier", "symbols", "events", "store", "acquire", "cascade", "sparam",
+    # ops with no scalar knob of their own, or exercised by their own dedicated suites.
+    # The SOURCE ops are excused here for the same reason: this sweep inserts an op into a chain
+    # that already has a carrier, which is not where a source lives. `coded` -- whose knobs are a
+    # line code's scheme, polynomial and seed -- is swept in tests/test_line_coding.py, where each
+    # of those is asserted to move both the samples and the recipe's content address.
+    excused = {"carrier", "symbols", "coded", "events", "store", "acquire", "cascade", "sparam",
                "crosstalk_matrix", "dfe", "optical", "dispersion", "eo", "fiber",
                "optical_mpi", "edfa", "photodetect", "tia"}
     missing = set(_EXEC) - covered - excused

@@ -97,10 +97,89 @@ def _op_carrier(x, p, streams, grid, idx):
     return _carrier(p, streams, grid, idx)
 
 
+# The `symbols` op carries its symbols one of two ways, and the pair IS the reproducibility
+# contract (see wfmsynth.patterns): a literal list -- data, replayable with no code at all -- or a
+# `pattern` BLOCK naming a registered generator and recording its resolved parameters, which is
+# readable and diffable against the document the sequence came from. When both are present the
+# literal list is authoritative and the block is provenance, so a recipe can be self-describing AND
+# need nothing installed. Order matters here: preferring the block would make an embedded recipe
+# fail on the consumer who has no registry entry, which is the whole case embedding exists for.
+def _source_symbols(p):
+    if p.get("symbols") is not None:
+        return np.asarray(p["symbols"], float)
+    if p["op"] == "coded":
+        # DERIVED, not stored: the coded symbols are a function of the recorded bit source and the
+        # recorded code, so the recipe carries the code rather than its 10-bits-per-byte output.
+        # (A literal list still wins above -- that is how the lead-in's cyclic extension is handed
+        # back through this same door.)
+        return _coded_symbols(p)
+    block = p.get("pattern")
+    if block is None:
+        raise ValueError("a 'symbols' op needs either symbols=[...] or a pattern block "
+                         "(Signal.pattern(name, length=...))")
+    from . import patterns as PAT
+    return np.asarray(PAT.replay(block), float)
+
+
+def _source_n_ui(p):
+    """The symbol count of a source op, WITHOUT rendering it -- the lead-in sizer needs the
+    record's samples-per-UI before anything is generated. A pattern block always records `length`
+    because every registered generator takes it, so the count is readable from the JSON."""
+    if p["op"] == "carrier":
+        return int(p.get("n_ui", 32))
+    if p.get("symbols") is not None:
+        return len(p["symbols"])
+    if p["op"] == "coded":
+        # The only source whose symbol count is NOT readable from the JSON: the code's framing
+        # overhead and its truncation to whole blocks decide it (64 payload bits become 66), so the
+        # count comes from coding it. Cheap -- bits, not samples -- and exact, which the arithmetic
+        # would not be for a payload that is not a whole number of blocks.
+        return len(_coded_symbols(p))
+    return int((p.get("pattern") or {}).get("params", {})["length"])
+
+
+# --------------------------------------------------------------- the coded source
+# `bits -> [code] -> symbols`, recorded as ONE op. A line code transforms BITS and every other op
+# in the chain transforms SAMPLES, so there is no mid-chain stage that could express one; folding
+# the code into the source is what puts the scheme, the polynomial and the seed into the recipe,
+# and therefore into the content digest, instead of leaving them in the caller's scratch code.
+def _coded_bits(p):
+    """The PAYLOAD bits, from a literal list or from a PRBS order + length. A literal list is data
+    (replayable with nothing installed); `prbs=` is the compact route for the long payloads a
+    scrambler is normally measured on, and both are fully recorded."""
+    if p.get("bits") is not None:
+        return np.asarray(p["bits"]).astype(int)
+    if p.get("prbs") is None:
+        raise ValueError("a 'coded' op needs the payload bits: bits=[...] or prbs=<order> with "
+                         "n_bits=<count>")
+    # `prbs_seed` / `prbs_phase`, not `seed` / `phase`: on this op `seed` is the SCRAMBLER's seed,
+    # and the two are different knobs with the same word for a name.
+    kw = {k[5:]: p[k] for k in ("prbs_seed", "prbs_phase") if k in p}
+    return P.prbs(int(p["prbs"]), int(p["n_bits"]), **kw).astype(int)
+
+
+def _coded_symbols(p):
+    from . import coding as CODING
+    kw = {k: p[k] for k in ("poly", "seed", "sync", "header", "rd", "lsb_first", "block")
+          if k in p}
+    if "poly" in kw:
+        kw["poly"] = tuple(int(t) for t in kw["poly"])       # JSON round-trips a tuple as a list
+    return CODING.coded_symbols(p["scheme"], _coded_bits(p),
+                                **({"levels": tuple(p["levels"])} if "levels" in p else {}), **kw)
+
+
+def _op_coded(x, p, streams, grid, idx):
+    j = p.get("jitter")
+    jitter = P.Jitter(**j) if j else None
+    return P.from_symbols(_source_symbols(p), n=_grid_n(grid, p),
+                          tr_frac=p.get("tr_frac", 0.15), causal=p.get("causal", False),
+                          jitter=jitter, rng=streams.role(f"jitter/{idx}"))
+
+
 def _op_symbols(x, p, streams, grid, idx):
     j = p.get("jitter")
     jitter = P.Jitter(**j) if j else None
-    return P.from_symbols(np.asarray(p["symbols"], float), n=_grid_n(grid, p),
+    return P.from_symbols(_source_symbols(p), n=_grid_n(grid, p),
                           tr_frac=p.get("tr_frac", 0.15), causal=p.get("causal", False),
                           jitter=jitter, rng=streams.role(f"jitter/{idx}"))
 
@@ -141,6 +220,55 @@ def _op_tx_ffe(x, p, streams, grid, idx):
 def _op_crosstalk_matrix(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("baud_offsets", "seeds", "kind", "synchronous") if k in p}
     return P.crosstalk_matrix(x, grid, p["couplings"], **kw)
+
+
+_MULTIPAIR_KEYS = ("echo_db", "echo_td_ps", "echo_f_hp_hz", "next_db", "next_td_ps", "fext_db")
+
+
+def _multipair_lanes(p, grid, n, which, seed, role):
+    """The three aggressor lanes (`which`) plus lane 0 of one transmitter, on this grid.
+
+    All four come from the SAME octet stream at the same seed, because on a real four-pair PHY
+    they do: the near-end aggressors are the other three coordinates of the victim's own
+    transmitter's code word, and the far-end ones are the other three coordinates of the remote
+    transmitter's. Generating them as independent random streams would throw away the one
+    structural fact a four-pair link has.
+
+    `role` is which END this transmitter is. The two ends of a real link run DIFFERENT scrambler
+    polynomials, so master-vs-slave -- not a second seed -- is what makes the far-end lanes
+    independent of the near-end ones: seeds of one 33-bit LFSR are PHASES of one sequence, and
+    two lanes a few steps apart correlate at 0.58."""
+    n_ui = int(p.get("n_ui") or round(n / grid.samples_per_ui))
+    pat = p.get("pattern", "8b1q4")
+    kw = dict(n=n, tr_frac=p.get("tr_frac", 0.15), causal=True)
+    return [P.from_symbols(P.carrier_symbols(f"pam{p.get('levels', 5)}", n_ui, seed=seed,
+                                             pattern=pat, pair=k, role=role), **kw)
+            for k in which]
+
+
+def _op_hybrid_echo(x, p, streams, grid, idx):
+    """Own transmit leaking into own receive. The `own` spec is a carrier spec, same shape as
+    `crosstalk`'s `aggressor`, because the echo's source is a stream the recipe has to name."""
+    own = _carrier({"kind": "nrz", **p.get("own", {"n_ui": 32, "seed": 7})},
+                   streams, grid, f"echo{idx}")
+    kw = {k: p[k] for k in ("isolation_db", "td_ps", "td_samples", "f_hp_hz", "f_hp_frac")
+          if k in p}
+    return P.hybrid_echo(x, own, grid=grid, **kw)
+
+
+def _op_multipair(x, p, streams, grid, idx):
+    """The single-channel observation of a four-pair link: the chain so far is the WANTED signal
+    (the far-end transmitter of this pair through the channel) and this op sums in the other seven
+    streams a probe on that pair also sees."""
+    if grid is None or grid.baud is None:
+        raise ValueError("multipair needs grid=Grid(fs, baud, ...) -- the aggressor lanes are "
+                         "generated at the link's own symbol rate, not at a fraction of the record")
+    n = len(x)
+    other = (1, 2, 3)
+    local = _multipair_lanes(p, grid, n, (0,) + other, p.get("local_seed", 1), "master")
+    remote = _multipair_lanes(p, grid, n, other, p.get("remote_seed", 1), "slave")
+    kw = {k: p[k] for k in _MULTIPAIR_KEYS if k in p}
+    return P.single_pair_observation(x, local[0], local[1:], remote, grid=grid, **kw)
 
 
 def _op_nonlinearity(x, p, streams, grid, idx):
@@ -648,11 +776,12 @@ def _op_digitize(x, p, streams, grid, idx, win=None):
     return x
 
 
-_EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "reflect": _op_reflect,
+_EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam, "cascade": _op_cascade,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
-         "crosstalk_matrix": _op_crosstalk_matrix, "ctle": _op_ctle, "rx_ffe": _op_rx_ffe, "dfe": _op_dfe,
+         "crosstalk_matrix": _op_crosstalk_matrix,
+         "hybrid_echo": _op_hybrid_echo, "multipair": _op_multipair, "ctle": _op_ctle, "rx_ffe": _op_rx_ffe, "dfe": _op_dfe,
          "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
          "open_drain": _op_open_drain,
@@ -677,14 +806,15 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "lossy": _op_lossy, "re
 # through -- so it gets its own rank rather than sharing the instrument's.
 KIND_RANK = {"source": 0, "shape": 1, "supply": 2, "channel": 3, "probe": 4, "instrument": 5}
 OP_KIND = {
-    "carrier": "source", "symbols": "source",
+    "carrier": "source", "symbols": "source", "coded": "source",
     "tx_ffe": "shape", "de_emphasis": "shape", "events": "shape", "nonlinearity": "shape",
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
     "dcd": "shape", "open_drain": "shape",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
     "cascade": "channel",
-    "crosstalk_matrix": "channel", "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
+    "crosstalk_matrix": "channel", "hybrid_echo": "channel", "multipair": "channel",
+    "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
     "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
     "probe": "probe",
     "rx_noise": "instrument", "agc": "instrument",
@@ -783,7 +913,7 @@ _LEAD_LTI = {"lossy", "reflect", "resonant_reflect", "ac_couple", "sparam", "cas
 # no impulse response to probe and it does not lengthen the chain's memory. `rx_noise` is
 # stochastic. `agc` is nonlinear and its block gain is a functional of the samples it sees, which
 # is why it is also in `_LEAD_WINDOW_RANGED` below.
-_LEAD_SKIP = {"carrier", "symbols", "nonlinearity", "crosstalk", "crosstalk_matrix", "digitize",
+_LEAD_SKIP = {"carrier", "symbols", "coded", "nonlinearity", "crosstalk", "crosstalk_matrix", "digitize",
               "store", "timebase", "timing", "ssc", "supply_coupling", "dfe",
               "optical", "dispersion", "eo", "fiber", "optical_mpi", "edfa", "photodetect", "tia",
               "dcd", "rx_noise", "agc"}
@@ -800,9 +930,44 @@ _LEAD_SKIP = {"carrier", "symbols", "nonlinearity", "crosstalk", "crosstalk_matr
 # So: state the extent instead of probing for it. Each entry maps an op to a function of its own
 # params and the grid, returning the memory extent in SAMPLES. 5 tau is 99.3 % settled, which is the
 # same convergence the probe's 1e-5 relative threshold buys on an exponential.
+def _echo_reach(td_ps, f_hp_hz, f_hp_frac, grid):
+    """The memory of a hybrid echo, in samples: the round trip to the reflecting discontinuity,
+    plus the settling of the return-loss high-pass that shapes it.
+
+    5 tau is 99.3 % settled -- the same convergence the LTI probe's 1e-5 threshold buys on a
+    first-order response. A first-order high-pass whose corner is `f` of Nyquist has a time
+    constant of 1/(pi*f) samples, so the default 0.02 costs ~80 samples and a corner stated in Hz
+    costs whatever it costs."""
+    f = float(f_hp_frac)
+    if f_hp_hz is not None:
+        if grid is None:
+            raise ValueError("hybrid_echo: f_hp_hz needs a grid")
+        f = grid.hz_to_frac_nyquist(float(f_hp_hz))
+    td = float(td_ps or 0.0) * 1e-12 * float(grid.fs) if grid is not None else 0.0
+    return int(math.ceil(td + 5.0 / (math.pi * max(f, 1e-9))))
+
+
+# Ops with REAL memory and no probeable impulse response OF THEIR OWN INPUT, whose extent is
+# known in closed form.
+#
+# `hybrid_echo` and `multipair` are here for a reason the LTI probe cannot see: their memory is a
+# response to a DIFFERENT stream. Drive the chain with an impulse and the echo term does not
+# respond to it at all -- it is a fixed additive function of the op's own transmit -- so
+# `response_extent` measures zero and would size the guard to nothing while the echo's delay and
+# its return-loss filter tail are both real and both inside the record. `_LEAD_SKIP` ("has no
+# memory") would be the same silent error in the same direction. So: state the extent.
 _LEAD_ANALYTIC = {
     "open_drain": lambda o, grid: int(math.ceil(
         5.0 * float(o["r_pullup_ohm"]) * float(o["c_bus_f"]) * float(grid.fs))),
+    "hybrid_echo": lambda o, grid: _echo_reach(
+        o.get("td_ps"), o.get("f_hp_hz"), o.get("f_hp_frac", P.ECHO_HP_FRAC_NYQUIST), grid),
+    # the summed observation carries an echo AND a near-end crosstalk delay; the guard has to
+    # cover whichever reaches further back
+    "multipair": lambda o, grid: max(
+        _echo_reach(o.get("echo_td_ps"), o.get("echo_f_hp_hz"),
+                    P.ECHO_HP_FRAC_NYQUIST, grid) if o.get("echo_db") is not None else 0,
+        int(math.ceil(float(o.get("next_td_ps") or 0.0) * 1e-12 * float(grid.fs)))
+        if grid is not None else 0),
 }
 
 
@@ -860,14 +1025,14 @@ def _lead_source_geometry(ops, grid):
     if not ops:
         raise ValueError("a lead-in needs a source op (add a carrier first)")
     src = ops[0]
-    if src["op"] not in ("carrier", "symbols"):
+    if src["op"] not in ("carrier", "symbols", "coded"):
         raise ValueError(f"a lead-in needs the first op to be the source; ops[0] is "
                          f"{src['op']!r}. The lead-in is rendered BY the source.")
     n = _grid_n(grid, src)
     if n is None:
         raise ValueError("a lead-in needs the record length: pass grid=Grid(n=...) or n= on the "
                          "source op")
-    n_ui = (int(src.get("n_ui", 32)) if src["op"] == "carrier" else len(src["symbols"]))
+    n_ui = _source_n_ui(src)
     if n_ui < 1:
         raise ValueError("a lead-in needs at least one symbol in the source")
     fr = Fraction(int(n), int(n_ui))
@@ -1044,8 +1209,75 @@ class Signal:
 
     def symbols(self, symbols, **params):
         """First op: a carrier built from an ARBITRARY per-UI symbol sequence (e.g. a coded /
-        scrambled stream from wfmsynth.coding). params: n, tr_frac, causal, jitter."""
+        scrambled stream from wfmsynth.coding). params: n, tr_frac, causal, jitter.
+
+        SYMBOLS-AS-DATA: the sequence is embedded in the recipe, so the record is reproducible
+        with no generator code at all. That is the fallback that always works, and the cost is one
+        number per symbol in the JSON. `pattern()` is the same op with a NAME attached."""
+        # `list(...)` and not a float cast: every recipe this op has ever produced recorded the
+        # caller's own numbers, and coercing them would move the content address of all of them.
         return self._add("symbols", symbols=list(symbols), **params)
+
+    def pattern(self, name, length, tr_frac=None, causal=None, jitter=None, n=None,
+                embed=False, **pattern_kw):
+        """First op: a carrier built from a NAMED pattern out of the registry
+        (`wfmsynth.patterns`) -- the reproducible route for a standard test sequence.
+
+            Signal(...).pattern("prbs13", length=8191, seed=9)
+            Signal(...).pattern("lfsr", length=1023, taps=[10, 7])      # any polynomial
+
+        The recipe records the NAME **and** the RESOLVED PARAMETERS (the polynomial, the block, the
+        seed, the length), so the JSON is readable by a person and replayable by a consumer who has
+        this library but not the registry entry. `embed=True` additionally writes the resolved
+        symbols into the recipe, which makes it replayable with no generator code at all -- use it
+        when handing a record to someone who will never have the entry.
+
+        `length` is the symbol count. `tr_frac`/`causal`/`jitter`/`n` are the carrier's, and every
+        other keyword goes to the PATTERN's generator (`seed=`, `taps=`, `phase=`, ...). The split
+        is by name and it is deliberate: the two sets end up in different places in the JSON, one
+        describing the sequence and one describing the waveform built from it.
+
+        This is the `symbols` op, not a new one -- which is why it is already a `source` for
+        stage-kind homing and already classified for the lead-in. A named pattern and a literal
+        symbol list are the same physics (`physics.from_symbols`); they differ only in how the
+        recipe says where the symbols came from.
+        """
+        from . import patterns as PAT
+        block = PAT.describe(name, length=length, **pattern_kw)
+        params = {}
+        if embed:
+            params["symbols"] = [float(v) for v in PAT.replay(block)]
+        # Only what the caller passed: a restated default would move this recipe's content address
+        # the day that default changed.
+        for key, val in (("tr_frac", tr_frac), ("causal", causal), ("jitter", jitter), ("n", n)):
+            if val is not None:
+                params[key] = val
+        return self._add("symbols", pattern=block, **params)
+
+    def coded(self, scheme, **params):
+        """First op: a carrier built from a LINE-CODED / SCRAMBLED bit stream
+        (`wfmsynth.coding`) — the composable form of `bits -> [code] -> symbols`.
+
+            Signal(...).coded("64b66b", prbs=13, n_bits=1 << 15)      # IEEE 802.3 Clause 49
+            Signal(...).coded("128b130b", prbs=31, n_bits=1 << 15)    # PCI Express Rev 4.0
+            Signal(...).coded("8b10b", bits=[...])
+
+        `scheme` is a key of `coding.SCHEMES`. The payload is `bits=[...]` (a literal list, so the
+        record replays with nothing installed) or `prbs=<order>` with `n_bits=<count>` (the compact
+        route for the long payloads a scrambler is measured on, with `prbs_seed=` / `prbs_phase=`
+        for the starting position). The code's own knobs go straight through: a scrambler's
+        `poly=`/`seed=`, 128b/130b's `sync=`, 128b/132b's `header=`, 8b/10b's `rd=`/`lsb_first=`,
+        `dc_balanced`'s `block=`, plus `levels=(lo, hi)` for the symbol mapping.
+        `tr_frac`/`causal`/`jitter`/`n` are the carrier's, as on `symbols`.
+
+        WHY A SOURCE AND NOT A STAGE: every other op transforms samples and a line code transforms
+        bits, so nothing mid-chain can express one. Recording it here is what makes the scheme, the
+        polynomial and the seed part of the recipe — and therefore part of the content digest, so
+        two records scrambled from different seeds no longer share an address.
+
+        The standard's defaults live in `wfmsynth.coding`, never here: only what the caller passed
+        is recorded, so the day a default is corrected every record moves with it."""
+        return self._add("coded", scheme=scheme, **params)
 
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
@@ -1321,8 +1553,33 @@ class Signal:
 
     def crosstalk_matrix(self, **params):
         """Multiple aggressors from a coupling vector, ASYNCHRONOUS by default. params:
-        couplings=[...], kind, baud_offsets, seeds, synchronous."""
+        couplings=[...], kind, baud_offsets, seeds, synchronous.
+
+        It MANUFACTURES its aggressors -- one `nrz` per coupling, at a seed and a baud offset --
+        and has NO parameter that takes a waveform. Right when the neighbours are unknown
+        traffic; wrong when they are the other lanes of a known link, which is what `multipair`
+        is for."""
         return self._add("crosstalk_matrix", **params)
+
+    def hybrid_echo(self, **params):
+        """Own transmit leaking into own receive on a bidirectional pair: a scaled, delayed,
+        filtered copy of a DIFFERENT stream. NOT a reflection of the received signal, which is
+        why `reflect` cannot express it -- `reflect` of silence is silence.
+        params: isolation_db, td_ps, f_hp_hz | f_hp_frac, own=dict(carrier spec)."""
+        return self._add("hybrid_echo", **params)
+
+    def multipair(self, **params):
+        """ONE observed channel of a four-pair link: the chain so far is the wanted signal and
+        this sums in the seven other streams a probe on that pair also sees -- own transmit
+        through the hybrid, near-end crosstalk from the three local lanes, far-end crosstalk
+        from the three remote ones. That is not an approximation of the measurement; it is what
+        a differential probe on one pair of a live link measures.
+
+        params: echo_db, echo_td_ps, echo_f_hp_hz, next_db, next_td_ps, fext_db (each a LOSS in
+        dB, amplitude convention; omitted or inf switches that mechanism off and the op is then
+        the identity), plus pattern/levels/n_ui/tr_frac/local_seed/remote_seed for the aggressor
+        lanes. `wfmsynth.quinary.CLAUSE_40_BUDGET` is a worked budget with its provenance."""
+        return self._add("multipair", **params)
 
     def ac_couple(self, **params):
         """AC-coupling. params: fc_frac | fc_hz."""
@@ -1369,12 +1626,11 @@ class Signal:
         and contrast-re-rollable. Realized times come from ``realize()`` /
         ``event_list()``, not from this spec."""
         if "n_ui" not in params:
-            car = next((o for o in self.ops if o["op"] in ("carrier", "symbols")), None)
+            car = next((o for o in self.ops if o["op"] in ("carrier", "symbols", "coded")), None)
             if car is not None:
-                if car.get("n_ui") is not None:
-                    params = dict(params, n_ui=int(car["n_ui"]))
-                elif car["op"] == "symbols" and car.get("symbols") is not None:
-                    params = dict(params, n_ui=len(car["symbols"]))
+                # the source's symbol count, whether it is a carrier's `n_ui`, a literal symbol
+                # list, or a named pattern's recorded `length`
+                params = dict(params, n_ui=_source_n_ui(car))
         return self._add("events", kind=kind, on=on, **params)
 
     def with_lead_in(self, lead_in=True, lead_out=None):
@@ -1444,8 +1700,14 @@ class Signal:
             # forward extension: the same PRBS, `lead_ui` symbols earlier in the record
             src["n_ui"] = n_ui + lead_ui + tail_ui
         else:
-            # an explicit stream repeats, so its own tail is its history: a cyclic prefix/suffix
-            sym = np.asarray(src["symbols"], float)
+            # an explicit stream repeats, so its own tail is its history: a cyclic prefix/suffix.
+            # A NAMED PATTERN is resolved to its symbols first and then gets exactly this
+            # treatment -- the pattern route inherits the assumption rather than inventing a
+            # second one. The assumption is that the sequence repeats inside the record; when it
+            # does not (a record shorter than the period), the cyclic prefix is not the true
+            # history. For a shift-register pattern the true history is available instead: pass
+            # `phase=` to start the generator earlier.
+            sym = _source_symbols(src)
             j = np.arange(-lead_ui, n_ui + tail_ui)
             src["symbols"] = list(sym[j % n_ui])
         ops = [src] + [dict(o) for o in self.ops[1:]]

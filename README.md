@@ -220,6 +220,49 @@ eye **~40 % more open** than PRBS31's on the same link. Pick `prbs31` for anythi
 to resemble compliance or SI work; a dataset built on PRBS7 teaches an impairment
 signature that does not occur on a real link.
 
+## The pattern registry — mechanisms here, standards knowledge in the caller
+
+`wfmsynth.patterns` maps a **name** to a symbol generator. The mechanisms ship: a general
+LFSR for an arbitrary feedback polynomial (the one `physics.prbs` itself runs on, so a
+polynomial nobody tabulated goes through the same arithmetic as one that is), and a
+block-repeat generator for a sequence a document prints rather than specifies. *Which*
+pattern a given standard names is **not** here — that changes with the revision of a
+document, so the caller registers it with a `source=` citation.
+
+```python
+import wfmsynth.patterns as PAT
+
+PAT.resolve("prbs13", length=8191, seed=9)          # a shipped polynomial
+PAT.resolve("lfsr", length=1023, taps=[10, 7])      # any polynomial, nothing to register
+
+@PAT.pattern("my_link_test", levels=2, period=2048, source="<designation, clause, table>")
+def _my_link_test(length, seed=1):                   # named, so a recipe can carry it
+    return PAT.block_repeat(WORD, length=length)
+
+sig = ws.Signal(seed=1, grid=g).pattern("prbs13", length=g.n // 8, seed=9).lossy(length_in=8.0)
+```
+
+**The recipe records the name *and* the resolved parameters.** Name alone cannot be replayed
+by anyone without the registry entry; a bare polynomial cannot be read or diffed against the
+document it came from. Both makes the JSON self-describing *and* replayable:
+
+```json
+{"op": "symbols",
+ "pattern": {"name": "prbs13", "generator": "lfsr", "levels": 2, "period": 8191,
+             "params": {"taps": [13, 12, 2, 1], "seed": 9, "length": 4096}}}
+```
+
+A consumer missing the `prbs13` entry still renders that record, from the `lfsr` mechanism the
+block names. For caller-owned generators the block also carries a hash of the generator's
+source, so a consumer with a *different* version under the same name is told
+`needs pattern 'x' @ <hash>` instead of quietly getting other samples. And
+`pattern(..., embed=True)` writes the resolved symbols into the recipe — **symbols as data**,
+reproducible with no generator code at all, which is the route that always works.
+
+There are therefore no lambdas in a recipe. `physics.arbitrary(fn=...)` is the exception that
+proves it: a callable cannot be serialised, hashed or replayed, `compose` refuses to store one,
+and its docstring points here.
+
 ## Absolute units (real ps / Hz / dB / V)
 Bind the abstract grid to real units with `Grid`, then specify parameters the way an
 engineer would — delays in ps, jitter in seconds, corner/periodic-jitter frequencies in
@@ -499,6 +542,36 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=T
   .crosstalk_matrix(couplings=[0.12, 0.08, 0.05])   # async by default; synchronous=True to lock
 ```
 
+`crosstalk_matrix` **manufactures** its aggressors — one `nrz` per coupling, at a seed and a
+baud offset — and has no parameter that takes a waveform. That is right when the neighbours are
+unknown traffic. When they are the other lanes of a *known* link, pass the streams:
+`physics.crosstalk_sum(victim, aggressors, couplings, kinds=...)`.
+
+## One observed channel of a four-pair link (4D-PAM5 / 8B1Q4)
+A probe on one pair of a live four-pair link does not see the wanted signal. It sees the **sum**:
+the far-end transmitter of its own pair, its own transmitter leaking back through the hybrid's
+finite isolation, near-end crosstalk from the three local lanes and far-end crosstalk from the
+three remote ones. Storing that as one channel is not an approximation of the measurement — it is
+what the measurement is. What a single stored channel loses is the ability to *correlate* an
+aggressor with the victim, and a model trained on a single-pair capture is in the probe's
+position anyway.
+
+```python
+g = ws.Grid(fs=2e9, baud=125e6, n=1 << 16)            # IEEE 802.3 Clause 40: 125 MBd per pair
+ws.Signal(seed=1, grid=g).carrier("pam5", n_ui=4096, pattern="8b1q4", causal=True) \
+  .multipair(**ws.CLAUSE_40_BUDGET, echo_td_ps=200.0)  # echo + NEXT + FEXT, one channel
+```
+
+The carrier is the real line code, not a uniform PAM5 draw: 8 bits become one **quartet** of
+quinary symbols (one per pair), the level marginal is `{21, 28, 30, 28, 21}/128` rather than 1/5
+each, and the transmit partial-response filter `3/4 + 1/4 z⁻¹` turns five transmit levels into the
+seventeen a probe at the MDI sees. `pattern="test_mode_1"` … `"test_mode_4"` are the transmitter
+test-mode symbol sequences of Clause 40.6.1.1.2. `wfmsynth.quinary`'s module docstring states
+exactly which of that is cited and which is PRELIMINARY.
+
+Omit or `inf` any of the three budgets and that mechanism is gone — with all three off the op
+returns the wanted samples bit-for-bit, so an ablation over the budget has a real zero.
+
 ## Noise beyond white Gaussian
 Heavy tails and 1/f structure — real noise is not one flat Gaussian:
 
@@ -611,6 +684,39 @@ Embedded-bus signaling (open-drain wired-AND, UART framing):
 bus = ws.open_drain([driver_a, driver_b])     # low if any driver pulls; else pull-up high
 wave = ws.uart_frame([0x55, 0xA3], samples_per_bit=16)   # idle-high start/stop framing
 ```
+
+## Level coding (PAM4 Gray + precoding, PAM3)
+The bit-to-level layer, between a bit stream and a PAM carrier. It changes **symbol and error
+statistics, not the eye** — which is exactly why it is easy to leave out and hard to notice
+missing.
+
+```python
+bits = ws.dc_balanced(P.prbs(13, 1 << 14, seed=3))       # or any bit source
+
+sym  = ws.pam4_gray_levels(ws.precode(bits))             # PAM4: precode, then Gray-map
+tern = ws.pam3_encode(bits[: 11 * (len(bits) // 11)])    # PAM3: 11 bits -> 7 ternary symbols
+
+wave = ws.Signal(seed=1, grid=g).symbols(symbols=sym.tolist(), causal=True).waveform()
+```
+
+- **Gray coding** (IEEE 802.3 Clause 120.5.11.2.1: `00b`, `01b`, `11b`, `10b` from the bottom
+  level up) makes adjacent levels differ in one bit, so a PAM4 slicer's dominant error — one
+  level — costs exactly one bit. Natural binary costs 4/3 of that for the identical waveform.
+- **Precoding** (`precode` / `precode_inverse`, the GF(2) `1/(1+D)` recursion that PCI Express
+  Base Specification Rev 6.0 makes mandatory at 64 GT/s) leaves the level histogram and the
+  0.75 transition density untouched and changes ~75% of the symbols. What it buys is the error
+  structure: the receiver's inverse is feedforward, so one received-symbol error decodes to
+  **exactly 2** bit errors instead of a burst that runs to the end of the record. A record
+  generated without it has a plausible eye and the wrong error statistics.
+- **PAM3** (`pam3_encode` / `pam3_decode`) is the 11-bit-to-7-ternary-symbol block code behind
+  1.57 bits/symbol — 7 is the shortest ternary block that holds 11 bits, and 11/7 reaches
+  99.15% of the `log2(3)` ceiling. The block size and rate are established; the codeword
+  **table** is the canonical base-3 mapping and is marked PRELIMINARY in the source, with the
+  measured consequence (a skewed leading symbol, 139 spare codewords) stated there.
+
+Levels come from `physics.pam_levels()` and are never restated: the four PAM4 levels are
+equally spaced to one ulp of 2/3, and `PAM4_LEVELS_MV` is that same map at a nominal 800 mV
+pk-pk swing (-400 / -133.33 / +133.33 / +400 mV, 800/3 = 266.67 mV apart).
 
 ## Two-rate acquisition (simulation grid -> acquisition -> stored record)
 Simulate physics on a fine grid, then model the acquisition system (front end + digitizer +

@@ -908,6 +908,73 @@ check("more aggressors -> more crosstalk power",
       np.std(P.crosstalk_matrix(_x16, _g16, [0.1, 0.1, 0.1]) - _x16)
       > np.std(P.crosstalk_matrix(_x16, _g16, [0.1]) - _x16))
 
+print("== 4D-PAM5 / 8B1Q4: the symbol statistics are the CODE\'s, not a uniform PAM5 draw ==")
+from wfmsynth import quinary as _Q
+_con = _Q.quartet_constellation()
+_cnt = {_s: int((_con == _s).sum()) for _s in _Q.QUINARY_SYMBOLS}
+check("the 512-point constellation partitions into 8 subsets of 64, over 625 quartets",
+      _con.shape == (8, 64, 4) and sum(len(_x) for _x in _Q.quartet_subsets()) == 625)
+check("the marginal level distribution is {21,28,30,28,21}/128, NOT 1/5 each",
+      _cnt == {-2: 336, -1: 448, 0: 480, 1: 448, 2: 336},
+      f"counts {_cnt} of {_con.size}; uniform would be {_con.size // 5} each")
+check("it is balanced (no DC of its own) and costs 0.58 dB less power than uniform PAM5",
+      sum(_s * _cnt[_s] for _s in _cnt) == 0
+      and abs(sum(_s * _s * _cnt[_s] for _s in _cnt) / _con.size - 1.75) < 1e-12)
+_alpha = _Q.quinary_volts(np.array(_Q.QUINARY_SYMBOLS))
+_lv = lambda _t: len({round(_t[0] * _a + _t[1] * _b, 12) for _a in _alpha for _b in _alpha})
+check("partial response 3/4 + 1/4 z^-1 gives 17 observed levels; (1+D)/2 would give 9",
+      _lv(_Q.PARTIAL_RESPONSE_TAPS) == 17 and _lv((0.5, 0.5)) == 9,
+      f"{_lv(_Q.PARTIAL_RESPONSE_TAPS)} vs {_lv((0.5, 0.5))} levels")
+check("test mode 1 is the clause's own 2048 symbols: four isolated pulses, then 1024 zeros",
+      len(_Q.test_mode_symbols(1)) == 2048
+      and [_Q.test_mode_symbols(1)[_i] for _i in (0, 128, 256, 384)] == [2, -2, 1, -1]
+      and (_Q.test_mode_symbols(1)[1024:] == 0).all())
+
+print("== the hybrid echo is a copy of a DIFFERENT stream, which `reflect` cannot be ==")
+_gq = Grid(fs=125e6 * 16, baud=125e6, n=1 << 13)
+_lane = lambda _k, _ro: P.from_symbols(_Q.pam5_symbols(pair=_k, n_ui=_gq.n // 16, role=_ro),
+                                       n=_gq.n, tr_frac=0.15, causal=True)
+_want, _own = _lane(0, "slave"), _lane(0, "master")
+check("the two ENDS of the link are independent: they run different scrambler polynomials",
+      abs(float(np.corrcoef(_want, _own)[0, 1])) < 0.06,
+      f"master vs slave corr={float(np.corrcoef(_want, _own)[0, 1]):+.4f} against the "
+      f"1/sqrt(512)={512 ** -0.5:.3f} of two independent streams; two SEEDS of one 33-bit LFSR "
+      f"would be phases of ONE sequence and correlate at 0.58")
+check("a reflection of silence is silence; an echo of own transmit is not",
+      np.abs(P.multi_reflection(np.zeros(_gq.n), grid=_gq, td_ps=200.0)).max() == 0.0
+      and np.std(P.hybrid_echo(np.zeros(_gq.n), _own, grid=_gq, isolation_db=20.0)) > 0.0)
+_term = P.hybrid_echo(_want, _own, grid=_gq, isolation_db=14.0, f_hp_frac=1e-4) - _want
+_cr = lambda _a, _b: float(np.corrcoef(_a, _b)[0, 1])
+check("the echo tracks own transmit, not the wanted signal",
+      abs(_cr(_term, _own)) > 0.9 and abs(_cr(_term, _want)) < 0.06,
+      f"own={_cr(_term, _own):.3f} wanted={_cr(_term, _want):.3f}")
+check("infinite isolation returns the wanted samples BIT-FOR-BIT",
+      np.array_equal(P.hybrid_echo(_want, _own, grid=_gq, isolation_db=np.inf, td_ps=200.0), _want))
+check("6 dB more isolation halves the echo amplitude (the dB convention is delivered)",
+      abs(20 * np.log10(np.std(P.hybrid_echo(_want, _own, grid=_gq, isolation_db=14.0) - _want)
+                        / np.std(P.hybrid_echo(_want, _own, grid=_gq, isolation_db=20.0) - _want))
+          - 6.0) < 0.05)
+
+print("== one observed channel: wanted + echo + NEXT + FEXT, and it couples the DERIVATIVE ==")
+_near = [_lane(_k, "master") for _k in (1, 2, 3)]
+_far = [_lane(_k, "slave") for _k in (1, 2, 3)]
+_obs = lambda **_kw: P.single_pair_observation(_want, _own, _near, _far, grid=_gq, **_kw)
+check("every coupling off -> the wanted signal, bit for bit", np.array_equal(_obs(), _want))
+check("... and an explicitly infinite budget is the same exact zero",
+      np.array_equal(_obs(echo_db=np.inf, next_db=np.inf, fext_db=np.inf), _want))
+_full = _obs(**_Q.CLAUSE_40_BUDGET) - _want
+_parts = sum(_obs(**{_k: _v}) - _want for _k, _v in _Q.CLAUSE_40_BUDGET.items())
+check("the four mechanisms superpose, so a budget is auditable term by term",
+      np.abs(_full - _parts).max() < 1e-12 * np.abs(_full).max())
+check("Clause 40's budget puts the aggression well below the wanted signal but far above noise",
+      0.02 < np.std(_full) / np.std(_want) < 0.5,
+      f"aggression {np.std(_full) / np.std(_want):.4f} of the wanted signal")
+_fx = P.crosstalk_sum(_want, _far, [0.1] * 3, kinds="fext") - _want
+_dd = sum(np.gradient(_a) for _a in _far)
+check("FEXT couples the aggressors' DERIVATIVE, not their level",
+      abs(_cr(_fx, _dd)) > 0.99 and abs(_cr(_fx, sum(_far))) < 0.15,
+      f"d/dt={_cr(_fx, _dd):.4f} level={_cr(_fx, sum(_far)):.4f}")
+
 print("== noise realism beyond white Gaussian: heavy tails + 1/f structure ==")
 from wfmsynth.impairments import realistic_noise as _rn
 def _exk(a):
@@ -1135,6 +1202,61 @@ check("the coded stream is balanced (mean ~0.5) with a bounded run length",
 _scr39 = _scr(_raw39)
 check("64b/66b scrambler whitens to a ~balanced stream at 66/64 the length",
       abs(_scr39.mean() - 0.5) < 0.03 and len(_scr39) == (len(_raw39) // 64) * 66)
+
+print("== level coding: the level map is exact, Gray costs one bit, precoding bounds the burst ==")
+from wfmsynth import coding as _CD
+_ulp = float(np.spacing(2.0 / 3.0))
+_lv4 = P.pam_levels(4)
+check("the four PAM4 levels are equally spaced to 1 ulp (not linspace, which is 5.6e-17 off)",
+      np.ptp(np.diff(_lv4)) <= _ulp and float(np.max(np.abs(np.linspace(-1, 1, 4) - _lv4))) > 5e-17,
+      f"spacing spread {np.ptp(np.diff(_lv4)):.2e} <= 1 ulp {_ulp:.2e}; "
+      f"linspace differs by {float(np.max(np.abs(np.linspace(-1, 1, 4) - _lv4))):.2e}")
+check("the millivolt map is the same map scaled: 266.67 mV between adjacent levels",
+      np.array_equal(_CD.PAM4_LEVELS_MV, _CD.PAM4_OUTER_MV * _lv4)
+      and abs(float(np.diff(_CD.PAM4_LEVELS_MV)[0]) - 800.0 / 3.0) <= np.spacing(800.0 / 3.0),
+      f"{np.round(_CD.PAM4_LEVELS_MV, 2).tolist()} mV")
+_gb = _CD.GRAY_PAM4_BITS
+check("Gray coding: every ADJACENT level pair differs in exactly one bit, skip-one pairs in two",
+      [int(np.sum(_gb[i] != _gb[i + 1])) for i in range(3)] == [1, 1, 1]
+      and int(np.sum(_gb[0] != _gb[2])) == 2 and int(np.sum(_gb[1] != _gb[3])) == 2,
+      f"map {[tuple(int(v) for v in r) for r in _gb]}")
+# TWO full PRBS13 periods: 8191 symbols, i.e. the whole PRBS13Q period, whose level and
+# transition statistics are exact by construction rather than sampled. At 2048 symbols the
+# 1/sqrt(n) spread is 0.02 and a 1e-3 claim about the histogram is not measurable.
+_bits41 = P.prbs(13, 2 * 8191, seed=5).astype(int)
+_y41 = _CD.precode(_bits41)
+check("precoding is exactly invertible (GF(2), no tolerance)",
+      np.array_equal(_CD.precode_inverse(_y41), _bits41))
+_s41 = _CD.pam4_gray_encode(_y41)
+_r41 = _CD.pam4_gray_encode(_bits41)
+_p41 = np.bincount(_s41, minlength=4) / _s41.size
+check("precoding leaves the eye alone: same level histogram and transition density, "
+      "different sequence",
+      float(np.max(np.abs(_p41 - 0.25))) < 1e-3
+      and abs(float(np.mean(np.diff(_s41) != 0)) - float(np.mean(np.diff(_r41) != 0))) < 1e-3
+      and float(np.mean(_s41 != _r41)) > 0.5,
+      f"levels {np.round(_p41, 4).tolist()}, transitions {np.mean(np.diff(_s41) != 0):.4f} vs "
+      f"{np.mean(np.diff(_r41) != 0):.4f}, symbols differing {np.mean(_s41 != _r41):.3f}")
+_bad41 = _s41.copy(); _k41 = 512
+_bad41[_k41] = _s41[_k41] + (1 if _s41[_k41] < 3 else -1)
+_burst41 = int(np.sum(_CD.precode_inverse(_CD.pam4_gray_decode(_bad41)) != _bits41))
+_rec41 = _CD.precode(_CD.precode_inverse(_bits41) ^ np.eye(1, len(_bits41), _k41, dtype=int)[0])
+check("one adjacent-level error decodes to a BOUNDED 2-bit burst; the recursive receiver's "
+      "is unbounded",
+      _burst41 == 2 and int(np.sum(_rec41 != _bits41)) == len(_bits41) - _k41,
+      f"precoded {_burst41} bits, recursive {int(np.sum(_rec41 != _bits41))} bits "
+      f"(to the end of a {len(_bits41)}-bit record)")
+_w42 = np.arange(1 << _CD.PAM3_BLOCK_BITS)
+_b42 = ((_w42[:, None] >> np.arange(_CD.PAM3_BLOCK_BITS - 1, -1, -1)) & 1).ravel()
+_s42 = _CD.pam3_encode(_b42)
+check("PAM3 11b/7t round-trips over all 2048 codewords onto exactly three levels",
+      np.array_equal(_CD.pam3_decode(_s42), _b42)
+      and np.array_equal(np.unique(_s42), P.pam_levels(3)),
+      f"{_CD.PAM3_BLOCK_BITS}b/{_CD.PAM3_BLOCK_SYMBOLS}t = "
+      f"{_CD.PAM3_BITS_PER_SYMBOL:.4f} bits/symbol (log2 3 = {np.log2(3):.4f})")
+check("7 is the shortest ternary block that carries 11 bits (3^6 < 2^11 <= 3^7)",
+      3 ** _CD.PAM3_BLOCK_SYMBOLS >= 2 ** _CD.PAM3_BLOCK_BITS > 3 ** (_CD.PAM3_BLOCK_SYMBOLS - 1),
+      f"729 < 2048 <= 2187, 139 spare codewords")
 
 print("== acquisition chain: scope bandwidth rolls off HF; timebase jitter smears the eye ==")
 from wfmsynth.instrument import (scope_bandwidth as _sbw, timebase_jitter as _tbj,
@@ -1532,7 +1654,7 @@ _ratios = [_il_db(4.0, loss_db=d, loss_at_ghz=8.0) / _il_db(8.0, loss_db=d, loss
 check("anchored loss_db has ONE hard-wired L(4)/L(8) for every channel it can make",
       max(_ratios) - min(_ratios) < 1e-6 and abs(_ratios[0] - 0.617) < 0.005,
       f"ratio {_ratios[0]:.4f} across 7.2-34.1 dB, spread {max(_ratios) - min(_ratios):.2e}")
-# Real measured backplanes (wfmplan spike `real_channel`, from the 802.3ap/Molex/TE files) run
+# Real measured backplanes (from measured IEEE 802.3ap backplane-channel S-parameter files) run
 # 0.468-0.678. `trend` reaches that range; the anchored model cannot leave 0.617.
 _r_lo = _il_db(4.0, trend=(0.0, -2.0, 0.0)) / _il_db(8.0, trend=(0.0, -2.0, 0.0))     # pure dielectric
 _r_hi = _il_db(4.0, trend=(-4.0, 0.0, 0.0)) / _il_db(8.0, trend=(-4.0, 0.0, 0.0))     # pure skin

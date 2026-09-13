@@ -231,6 +231,13 @@ def _variants(key):
                             dict(coupling=0.2, kind="next", td_frac=0.05)]),
         "crosstalk_matrix": ("e", [dict(couplings=[0.05, 0.03]),
                                    dict(couplings=[0.1], kind="next", synchronous=True)]),
+        # the echo and the four-pair sum: both add a function of a DIFFERENT stream, so the
+        # questions this file asks (does the op read a fraction of its input, does it leak a
+        # global, does it pass a role stream) are the ones worth asking of them
+        "hybrid_echo": ("e", [dict(isolation_db=18.0, td_ps=40.0),
+                              dict(isolation_db=24.0, own=dict(n_ui=32, seed=9))]),
+        "multipair": ("e", [dict(echo_db=16.0, next_db=30.0, fext_db=21.0),
+                            dict(next_db=24.0, fext_db=18.0, pattern="test_mode_4")]),
         "digitize": ("e", [dict(noise_rms=0.005), dict(snr_db=30.0), dict(enob=6.5),
                            dict(bits=8, full_scale=1.0),
                            dict(interleave=dict(m_cores=4, offset_mm=0.01, gain_mm=0.01)),
