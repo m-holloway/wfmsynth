@@ -69,7 +69,7 @@ the path can be part measured.
 
 ## The measured arm
 
-`wfmplan/spikes/real_channel/cascade_vs_lumped.py`, against IEEE 802.3ap's B12 ATCA backplane
+A separate measured-channel study, against IEEE 802.3ap's B12 ATCA backplane
 (hash-verified from the manifest; **no measured file is committed to this repository**). On that
 board the lumped topology over-charges a 0.20-inch discontinuity by **21.4 dB** and under-charges
 a 17.4-inch one by **10.4 dB** — a **39×** spread in the Γ you would infer, from the topology
@@ -80,7 +80,7 @@ alone.
 Because a lumped echo is a delayed copy of a signal that has *already* taken all its loss, the
 echo and the main cursor carry the same dispersion and it cancels out of the lag. A cascaded echo
 traverses 2·d of dispersive line the cursor never sees, so it arrives late. Measured end to end
-through `wfmplan.fold` (`wfmplan/tests/test_cascade_path.py`): a **true 1.66 inch** reads back as
+through a lag-to-distance estimator: a **true 1.66 inch** reads back as
 **1.66 inch exactly** with zero-phase loss, and as **1.7345 inch (+4.5 %)** at 3.46 dB of segment
 loss and **1.7933 inch** at 6.00 dB with causal loss. The shipped 1.66-inch result is exact for
 the article it was measured on; what had never been tested is a physically cascaded echo.

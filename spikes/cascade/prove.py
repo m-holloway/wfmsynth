@@ -11,7 +11,7 @@ WHAT IT ESTABLISHES
      the shipped lumped topology (one lossy, then one reflect) cannot do
   D  both discontinuities in one path, each echo attenuated by its own segment
 
-The measured-backplane arm is `wfmplan/spikes/real_channel/cascade_vs_lumped.py`: no third
+The measured-backplane arm is a separate study outside this repository: no third
 party's measurement is committed to this repository.
 """
 import numpy as np
@@ -42,7 +42,7 @@ def peak_ps(sig, skip=0):
 
 
 def xcorr_lag_ps(sig, template, skip=0):
-    """Matched-filter lag -- the estimator `wfmplan.fold` uses to turn a lag into a distance."""
+    """Matched-filter lag -- the estimator a caller uses to turn a lag into a distance."""
     c = np.abs(np.correlate(sig, template, mode="full")[len(template) - 1:])
     c[:skip] = 0.0
     k = int(np.argmax(c)); a, b, d = c[k - 1], c[k], c[k + 1]
@@ -80,7 +80,8 @@ for nm, tp in (("1 disc", tp1), ("2 disc", tp2)):
 
 # ---------------------------------------------------------------------------- B
 hdr("B. A DISCONTINUITY AT A KNOWN DISTANCE -> THE ARITHMETIC'S LAG")
-print(f"   {PPI:.4f} ps/inch one way at eps_r=4.0 (wfmplan.fold uses 169.5 -- 0.03 % apart)\n")
+print(f"   {PPI:.4f} ps/inch one way at eps_r=4.0 (a caller rounding c to 11.8 in/ns gets "
+          f"169.5 -- 0.03 % apart)\n")
 print(f"   {'d[in]':>6} {'arith[ps]':>10} {'zero-phase':>11} {'err':>8} {'causal':>10} "
       f"{'excess':>9} {'segIL@8G':>9}")
 for LEN in (1.0, 1.66, 4.0, 10.0):

@@ -18,7 +18,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-DEMO = Path(os.environ.get("WFMSYNTH_DEMO", str(Path.home() / "dev" / "wfmsynth_demo")))
+# REQUIRED, with no default. This points at a separate consuming checkout, and there is no path this
+# script could guess that would be right on more than one machine -- a guessed default works where it
+# was written and silently resolves to nothing everywhere else.
+_CONSUMER = os.environ.get("WFMSYNTH_CONSUMER")
+if not _CONSUMER:
+    raise SystemExit(
+        "set WFMSYNTH_CONSUMER to the checkout this spike reads from.\n"
+        "  It has no default: any path guessed here would be one machine's layout.")
+DEMO = Path(_CONSUMER)
 BASELINE_REV = os.environ.get("WFMSYNTH_EYE_BASELINE", "b37483b")
 SCRATCH = Path(os.environ.get("WFMSYNTH_SCRATCH", "/tmp"))
 
