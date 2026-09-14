@@ -199,3 +199,35 @@ def test_a_displacement_applied_and_removed_comes_back():
     lin_there = np.interp(idx - 0.37, idx, x, left=x[0], right=x[-1])
     lin_back = np.interp(idx + 0.37, idx, lin_there, left=lin_there[0], right=lin_there[-1])
     assert np.max(np.abs(lin_back[k] - x[k])) > 1e-4
+
+
+# ------------------------------------------------------------------ the fast paths
+def test_the_constant_shift_fast_path_agrees_with_the_general_one():
+    """A single delay wants the same kernel for every output sample, so the weights are computed
+    once and applied as a fixed-tap filter. That is 58x faster than building an (n x 64) matrix of
+    kernel values, and it has to be the same answer."""
+    x = _bandlimited(n=1 << 14, sps=10, seed=8)
+    idx = np.arange(x.size, dtype=float)
+    k = slice(RS.HALF_WIDTH * 2, -RS.HALF_WIDTH * 2)
+    for d in (0.37, 1.5, 12.25, -0.8):
+        fast = RS.shift(x, d)
+        general = RS.resample_at(x, idx - d)
+        assert np.max(np.abs(fast[k] - general[k])) < 1e-9, f"d={d}"
+
+
+def test_the_kernel_table_is_far_below_the_kernels_own_floor():
+    """The kernel is read off a dense table rather than evaluated per output sample. The table's
+    interpolation error has to be negligible against the -130 dB the kernel itself is good to."""
+    taps = np.arange(-RS.HALF_WIDTH + 1, RS.HALF_WIDTH + 1).astype(float)
+    worst = 0.0
+    for frac in np.linspace(0.0, 1.0, 21):
+        dt = (frac - taps)[None, :]
+        exact = np.sinc(2.0 * RS.CUTOFF * dt) * RS._kaiser(dt, RS.HALF_WIDTH, RS.BETA)
+        table = RS._weights(dt, RS.HALF_WIDTH, RS.CUTOFF, RS.BETA)
+        worst = max(worst, float(np.max(np.abs(exact - table))))
+    assert worst < 1e-6, f"table error {worst:.2e}"
+
+
+def test_the_fast_path_keeps_a_whole_sample_delay_exact():
+    x = _bandlimited(n=1 << 12, seed=9)
+    assert np.array_equal(RS.shift(x, 3)[3:], x[:-3])
