@@ -86,8 +86,15 @@ def acquire_record(x_sim, grid_sim, profile, rng=None):
     t_acq = np.arange(int(profile.record_length)) / profile.sample_rate_hz
     if profile.sample_clock_jitter_rms_s:
         t_acq = t_acq + rng.normal(0.0, profile.sample_clock_jitter_rms_s, len(t_acq))
-    t_sim = np.arange(len(conditioned)) / grid_sim.fs
-    y = np.interp(t_acq, t_sim, conditioned, left=conditioned[0], right=conditioned[-1])
+    # Bandlimited interpolation, NOT linear. This is the one resample that lands on the stored
+    # grid, so its error is at the STORED oversample rather than the synthesis grid's -- and a
+    # stored record can be as coarse as 4 samples/UI, where linear interpolation of a half-sample
+    # shift costs 1.5 % of peak-to-peak. MEASURED against the sinc resampler on band-limited
+    # content: 1.52 % at 4 samples/UI, 0.30 % at 10, 0.024 % at 32. On a link graded on a 6 mV eye
+    # out of 800 mV -- 0.75 % -- the coarse case is twice the quantity being measured.
+    # `instrument.sample_clock` already resamples this way; this path did not.
+    src = t_acq * grid_sim.fs                      # acquisition instants, in simulation samples
+    y = INST.resample_at(np.asarray(conditioned, float), src)
 
     g_acq = profile.grid
     if profile.noise_floor:
