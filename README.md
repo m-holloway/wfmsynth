@@ -19,14 +19,18 @@ checks the behavior it claims to model.
 
 ## Working with an agent
 
-`skills/wfmsynth/SKILL.md` is an installable skill for Claude Code and other agent CLIs. It covers
-the op chain and its ordering rules, sizing a record from its edge and its pattern period, the
-instrument model, recipes and content digests, the pattern registry, writing records out, and the
-traps that cost time.
+`.claude/skills/wfmsynth/SKILL.md` is an installable skill for Claude Code and other agent CLIs.
+It carries the op chain and its ordering rules, the two numbers that decide whether a record means
+anything, and the list of things that fail silently; `REFERENCE.md` beside it holds the worked
+examples for sizing, the instrument, recipes and digests, the pattern registry, and export to HDF5
+or Zarr.
+
+The skill lives at `.claude/skills/wfmsynth/`, so an agent working inside a clone of this
+repository finds it with nothing to install. To use it from your own project, where wfmsynth is a
+dependency rather than the working directory:
 
 ```bash
-git clone https://github.com/m-holloway/wfmsynth.git
-cd wfmsynth && ./skills/install.sh
+./skills/install.sh
 ```
 
 Or without a clone:
@@ -36,7 +40,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/m-holloway/wfmsynth/main/ski
 ```
 
 `./skills/install.sh --check` compares what is installed against what is published and changes
-nothing. `--local` installs into one project's `.claude/skills` instead. Each skill carries a
+nothing. `--local` installs into one project's `.claude/skills` instead. `SKILL.md` carries a
 version in its frontmatter, so an agent can tell you when an installed copy has fallen behind.
 
 Then ask for the work in your own words.

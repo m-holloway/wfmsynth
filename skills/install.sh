@@ -11,9 +11,9 @@
 set -euo pipefail
 
 SKILL_NAME="wfmsynth"
-RAW_BASE="https://raw.githubusercontent.com/m-holloway/wfmsynth/main/skills"
+RAW_BASE="https://raw.githubusercontent.com/m-holloway/wfmsynth/main/.claude/skills"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
-SRC="${HERE:+$HERE/$SKILL_NAME/SKILL.md}"
+SRC="${HERE:+$HERE/../.claude/skills/$SKILL_NAME/SKILL.md}"
 
 MODE="install"; SCOPE="user"; FORCE_ALL=0
 for a in "$@"; do
@@ -39,6 +39,7 @@ if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
   command -v curl >/dev/null || { echo "no local skill file and no curl to fetch one" >&2; exit 1; }
   TMP="$(mktemp -d)"
   curl -fsSL "$RAW_BASE/$SKILL_NAME/SKILL.md" -o "$TMP/SKILL.md"
+  curl -fsSL "$RAW_BASE/$SKILL_NAME/REFERENCE.md" -o "$TMP/REFERENCE.md"
   SRC="$TMP/SKILL.md"
   echo "source: published copy (no local clone found)"
 else
@@ -86,13 +87,17 @@ fi
 for t in "${TARGETS[@]}"; do
   dest="$t/$SKILL_NAME"
   mkdir -p "$dest"
-  if [ -f "$dest/SKILL.md" ] && cmp -s "$SRC" "$dest/SKILL.md"; then
-    echo "unchanged  $dest/SKILL.md (version ${SRC_V:-unknown})"
+  # SKILL.md is what the agent loads; REFERENCE.md is what it reads on demand, so both travel.
+  ref="$(dirname "$SRC")/REFERENCE.md"
+  if [ -f "$dest/SKILL.md" ] && cmp -s "$SRC" "$dest/SKILL.md" \
+     && { [ ! -f "$ref" ] || cmp -s "$ref" "$dest/REFERENCE.md"; }; then
+    echo "unchanged  $dest (version ${SRC_V:-unknown})"
   else
     prev="$(version_of "$dest/SKILL.md")"
     cp "$SRC" "$dest/SKILL.md"
-    if [ -n "$prev" ]; then echo "updated    $dest/SKILL.md ($prev -> ${SRC_V:-unknown})"
-    else echo "installed  $dest/SKILL.md (version ${SRC_V:-unknown})"; fi
+    [ -f "$ref" ] && cp "$ref" "$dest/REFERENCE.md"
+    if [ -n "$prev" ]; then echo "updated    $dest ($prev -> ${SRC_V:-unknown})"
+    else echo "installed  $dest (version ${SRC_V:-unknown})"; fi
   fi
 done
 
