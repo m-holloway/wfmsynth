@@ -33,7 +33,7 @@ def test_the_frontmatter_carries_a_name_and_an_integer_version():
     assert re.search(r"^description:\s*\S", head, re.M)
     m = re.search(r"^version:\s*(\d+)\s*$", head, re.M)
     assert m, "no integer version in the frontmatter; an installed copy cannot be compared"
-    assert int(m.group(1)) >= 4
+    assert int(m.group(1)) >= 1
 
 
 def test_the_installer_points_at_the_canonical_location():

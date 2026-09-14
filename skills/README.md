@@ -74,5 +74,6 @@ of a chain, the two numbers that decide whether a record means anything, and the
 that go wrong silently. `REFERENCE.md` holds the worked examples and is read when needed.
 
 Every code block in both files is executed against the library with warnings as errors before
-either is published. Several of the entries in the "what people get wrong" list are there because
-a snippet in an earlier version of this skill was wrong in exactly that way.
+either is published. That is not ceremony: most of the entries in the "what people get wrong" list
+are things that produce a plausible wrong answer rather than an error, so running the examples is
+the only way to know they are right.

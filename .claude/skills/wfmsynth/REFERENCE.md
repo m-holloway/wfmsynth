@@ -55,7 +55,7 @@ an otherwise identical clean record:
 The +4 is the 33 GHz front end's group delay, not an error in the rule.
 
 **The raw op, if you need it.** `sample_clock`'s `ppm` is a rate scaling relative to the synthesis
-grid, not a small offset, and `n_out` is a length. To store at `fs_store` off a grid at `fs_synth`
+grid rather than a small offset, and `n_out` is a record length. To store at `fs_store` off a grid at `fs_synth`
 with a genuine `ppm_real` of timebase offset:
 
 ```python
@@ -70,9 +70,12 @@ raw = (ws.Signal(seed=7, grid=grid)          # a chain that has NOT been through
 ```
 
 For the numbers above that is −487,972 ppm. `span="strict"` raises rather than holding the last
-sample when the clock would need data past the end of the render. Passing a real `ppm` of 55 with
-an `n_out` computed from the rate ratio does **not** resample: it truncates the record to that many
-samples at the grid rate, and 49 % of it disappears with no warning.
+sample when the clock would need data past the end of the render.
+
+Passing a genuine `ppm` of 55 together with an `n_out` computed from the rate ratio does **not**
+resample. It truncates the record to that many samples at the grid's own rate: 65,536 samples
+spanning 131 ns of a 256 ns render, 49 % of it gone and nothing said. A defect in the discarded
+half then has a label with no signal behind it.
 
 `drift_ppm_per_s` walks the clock; `phase0_s` sets where it starts. Resampling is asynchronous, so
 samples-per-symbol need not be a whole number and should not be forced to one.

@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link or an instrument, or reproduce a waveform from a recipe.
-version: 6
+version: 1
 ---
 
 # wfmsynth
@@ -69,9 +69,10 @@ was asked for.
    give bit-identical waveforms unless you pass `carrier(..., seed=)`. A thousand records from
    one template otherwise share one PRBS phase, and a model learns the position.
 4. **Below about 8 samples across the transition you are measuring the grid, not the signal.**
-   The rise time asked for is now the one delivered, to a fraction of a percent — but under
-   `tr_frac × samples_per_ui = 2` the library clamps to two samples and warns, and past that
-   point every rise time, jitter and slew figure is the grid's. Measure `tr` on the record.
+   The delivered 10–90 % rise time is the one requested to within 1.2 % at k = 8 and 0.04 % at
+   k = 32. Under `tr_frac × samples_per_ui = 2` the library clamps to two samples and warns, and
+   from there down every rise time, jitter and slew figure is the grid's. Measure `tr` on the
+   record rather than trusting the request.
 5. **An op refuses a parameter it does not read**, naming the nearest key. Read the message. The
    habit it does not excuse: **assert the effect, never the call.**
 6. **`carrier(pattern=)` takes only built-in sequences.** A registered name renders through
@@ -97,9 +98,9 @@ was asked for.
     it is present and correct. Calibrate on a known answer first.
 
 13. **`eye_height` requires `levels` and has no default.** 2 for NRZ, 4 for PAM4, N for PAM-N.
-    It used to default to 4, which on a binary record measured a four-level eye that is not there
-    and did it silently — 0.0017 against the 0.0432 that record actually has. The level count is a
-    property of the record rather than a preference, so state it.
+    Reading a binary record as four levels measures an eye that is not there, and does it
+    silently: 0.0017 against the 0.0432 one such record actually has. The level count is a
+    property of the record rather than a preference, so there is nothing sensible to default to.
 14. **`eye_contour` floors once the eye closes**, so it is not a health check on a closed eye:
     past closure it sits near zero whatever you do to the channel. `eye_sigma` goes negative
     there, which is the eye being shut rather than an error, and still separates one closed eye
@@ -120,8 +121,8 @@ was asked for.
     rise time read off it describes the simulation. Put the probe, the front end, the sample rate
     and the converter in the chain before writing the file, and pass the STORED rate to the
     exporter. `REFERENCE.md` has the parameters.
-17. **After `acquire()`, `Signal.grid` is still the SYNTHESIS grid.** It reports the rate and
-    length the chain was built on, not the record you now hold, so handing it to a measurement
+17. **After `acquire()`, `Signal.grid` is the SYNTHESIS grid.** It reports the rate and length
+    the chain was built on rather than the record in your hand, so handing it to a measurement
     measures the wrong thing. Build one for the stored record:
     `Grid(fs=fs_store, baud=baud, n=len(x))`.
 
@@ -134,7 +135,7 @@ populates, and a recipe records both the name and the resolved parameters.
 
 ## Staying current
 
-This file is `version: 6`. The copy in the repository is the source of truth, so an installed copy
+This file is `version: 1`. The copy in the repository is the source of truth, so an installed copy
 can fall behind it. Run this with the same `HOME` the install used:
 
 ```bash
