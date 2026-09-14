@@ -35,6 +35,29 @@ Cursor), carrying both files. `--local` installs into `./.claude/skills` for one
 `--all` installs for every supported target whether or not it is detected. Re-running is safe: an
 unchanged pair is left alone and the script says so.
 
+## Windows
+
+`install.sh` needs bash, so it runs under Git Bash or WSL but not in a plain Windows shell. The
+skill is two files in a directory, so fetching them directly is equivalent. In PowerShell:
+
+```powershell
+$dir = "$HOME\.claude\skills\wfmsynth"
+$src = "https://raw.githubusercontent.com/m-holloway/wfmsynth/main/.claude/skills/wfmsynth"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+curl.exe -fsSL "$src/SKILL.md"     -o "$dir\SKILL.md"
+curl.exe -fsSL "$src/REFERENCE.md" -o "$dir\REFERENCE.md"
+```
+
+`curl.exe` ships with Windows 10 and later. `Invoke-WebRequest -Uri "$src/SKILL.md" -OutFile
+"$dir\SKILL.md"` does the same if you would rather not shell out.
+
+Both files have to land, not just `SKILL.md`: the skill points at `REFERENCE.md` for every worked
+example, and the link dangles without it. To check what you have:
+
+```powershell
+Select-String -Path "$dir\SKILL.md" -Pattern '^version:' | Select-Object -First 1
+```
+
 ## Versions
 
 `SKILL.md` carries `version:` in its frontmatter, and the copy in this repository is the source of

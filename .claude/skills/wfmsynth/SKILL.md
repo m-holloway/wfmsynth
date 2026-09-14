@@ -114,8 +114,14 @@ curl -fsSL https://raw.githubusercontent.com/m-holloway/wfmsynth/main/.claude/sk
   | sed -n 's/^version: *//p' | head -1
 ```
 
+On Windows, where there is no `sed`:
+
+```powershell
+Select-String -Path "$HOME\.claude\skills\wfmsynth\SKILL.md" -Pattern '^version:' | Select-Object -First 1
+```
+
 `skills/install.sh --check` in a clone prints both and changes nothing; `skills/install.sh`
-updates in place. Report a difference plainly and offer to update; do not update without asking.
+updates in place, and `skills/README.md` has the PowerShell equivalent. Report a difference plainly and offer to update; do not update without asking.
 Raise `version` whenever this file changes, or an installed copy is undetectably stale.
 
 ## Read next

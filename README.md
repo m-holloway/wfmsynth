@@ -43,6 +43,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/m-holloway/wfmsynth/main/ski
 nothing. `--local` installs into one project's `.claude/skills` instead. `SKILL.md` carries a
 version in its frontmatter, so an agent can tell you when an installed copy has fallen behind.
 
+On Windows, where the installer needs Git Bash or WSL, fetch the two files straight into place
+with PowerShell — `skills/README.md` has the commands.
+
 Then ask for the work in your own words.
 
 **Generating data**
