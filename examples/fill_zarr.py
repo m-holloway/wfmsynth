@@ -92,9 +92,9 @@ def main(argv=None):
         filled += 1
         print(f"{rid:30s} {volts.size:11,d}  {'rendered' if a.dry_run else 'written'}")
 
-    print(f"\n{filled} record(s) {'checked' if a.dry_run else 'filled'}, {bad} refused")
+    print(f"\n{filled} record(s) {'checked' if a.dry_run else 'filled'}, {bad} could not be built")
     if bad:
-        print("A refusal means the recipe and the archive disagree. Nothing partial was written for it.")
+        print("That means the recipe and the archive disagree about the record. Nothing partial was written for it.")
         return 1
     if not filled:
         print("NOTHING WAS FILLED. Check --only, or that the recipe covers this archive.")
