@@ -19,15 +19,59 @@ checks the behavior it claims to model.
 
 ## Working with an agent
 
-`skills/wfmsynth/SKILL.md` is an installable agent skill covering the chain, how to size a record,
-the instrument model, recipes and digests, the pattern registry, and the traps that cost time.
+`skills/wfmsynth/SKILL.md` is an installable skill for Claude Code and other agent CLIs. It covers
+the op chain and its ordering rules, sizing a record from its edge and its pattern period, the
+instrument model, recipes and content digests, the pattern registry, writing records out, and the
+traps that cost time.
 
 ```bash
-./skills/install.sh                  # or --check to compare installed and published versions
+git clone https://github.com/m-holloway/wfmsynth.git
+cd wfmsynth && ./skills/install.sh
 ```
 
+Or without a clone:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/m-holloway/wfmsynth/main/skills/install.sh)
+```
+
+`./skills/install.sh --check` compares what is installed against what is published and changes
+nothing. `--local` installs into one project's `.claude/skills` instead. Each skill carries a
+version in its frontmatter, so an agent can tell you when an installed copy has fallen behind.
+
+Then ask for the work in your own words.
+
+**Generating data**
+- Generate 200 NRZ records at 32 GBd, half with excess insertion loss, labelled — and tell me
+  what the labels mean.
+- I need a set where crosstalk and loss vary independently, so a model cannot learn one from the
+  other.
+
+**Getting the record right**
+- My measured rise time is coming back equal to the sample interval. Size the grid properly for a
+  15 ps edge.
+- How long must this record be to fold 256 repetitions of PRBS13Q, and does that fit in
+  64 Mpoint?
+
+**The instrument**
+- Store this as a 33 GHz 10-bit scope would actually capture it, with a 50 ppm sampler offset.
+- Is the front end I have declared physically possible at this sample rate?
+
+**Writing it out**
+- Put these 500 records in a Zarr store laid out for training — chunked so a window read does not
+  pull a whole record, and keyed so I can split without leaking a defect against its own control.
+- Export this record to HDF5 so it opens both in Python and on the bench.
+
+**Recipes**
+- Here is a recipe.json — rebuild the waveform and confirm it matches the digest.
+- Change the loss to 18 dB and tell me which records' digests change.
+
+**Extending it**
+- Read this clause of the specification and add its stress pattern to the registry, marked with
+  where it came from.
+
 See `skills/README.md`. Point an agent at this repository and ask it to install the skill and it
-has everything it needs to do so.
+has what it needs to do so.
 
 ## Install and verify
 

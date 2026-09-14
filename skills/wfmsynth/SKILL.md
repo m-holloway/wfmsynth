@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, and emit replayable recipes with content digests. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link or an instrument, or reproduce a waveform from a recipe.
-version: 1
+version: 2
 ---
 
 # wfmsynth
@@ -205,10 +205,14 @@ code at all on the other side.
 
 ## Traps
 
-**Unknown op parameters are accepted and ignored.** Ops take `**params`, so a misspelled or
-invented keyword does not raise — it silently does nothing, and the record renders as though you
-never asked. `at_ui=` instead of `indices=`, or `fs_hz=` instead of `n_out=`, both produce a
-plausible waveform that is not the one you specified. Assert the effect, never the call.
+**An op refuses a parameter it does not read.** `sample_clock(fs_hz=...)` and
+`events(..., at_ui=...)` raise, naming the nearest valid key and the whole accepted set, because
+a parameter the physics ignores would sit in the recipe describing a record it did not shape. Read
+the message rather than guessing again: it lists what the op takes.
+
+That gate is recent, and the habit it replaces is still the right one. **Assert the effect, never
+the call.** A knob that is accepted, recorded and ignored is the most convincing kind of wrong, so
+check the output moved.
 
 **Measure with an instrument that can see the effect.** Several plausible measurements cannot:
 sub-sample displacement read with integer sample counts returns exactly zero, so duty-cycle
@@ -221,6 +225,51 @@ every timing figure that follows from it.
 
 **Index per-record data by record identity, never by row position.** One filter or reshard
 upstream and every record wears another record's parameters.
+
+## Writing many records out
+
+There is no archive writer in this library — it produces waveforms, and the container is yours to
+choose. Two formats carry the weight in practice.
+
+**HDF5, for one record that a bench instrument or any HDF5 reader should open.**
+
+```python
+from wfmsynth import hdf5
+hdf5.write_hdf5("record.h5", volts, fs=fs_store, t0=-1e-9, full_scale=0.8)
+volts_back, t = hdf5.read_hdf5("record.h5", channel=1)
+```
+
+Samples go out as `int16` codes with the scale that inverts them (`volts = code * YInc + YOrg`,
+`seconds = index * XInc + XOrg`). Storing floats reads fine in Python and does not load on an
+instrument. Pass `full_scale=` when several records must share one vertical scale, or each
+record's window follows its own range and two records stop being comparable code for code. An
+instrument also looks for metadata identifying a file as its own; `like="a_capture.h5"` copies
+that out of a capture you already have. Needs `h5py`.
+
+**Zarr, for a corpus you will train on.** Use `zarr` directly, and get the layout right the first
+time — it is expensive to change once the data exists.
+
+1. **Array count is what breaks at scale**, not chunk count. Sharding packs chunks inside an
+   array; nothing packs arrays inside a store. One array per record is the natural layout and it
+   stops opening in reasonable time in the thousands. A record dimension inside one array keeps
+   working. One array per record is fine while records are few, large, and of differing length.
+2. **Chunk is the unit of read; shard is the unit of file.** Chunk along time, around a megabyte,
+   so a training loop reading windows pays for roughly what it reads. Size shards to bound how
+   many files exist.
+3. **Consolidated metadata is a cache.** It goes stale silently on any mutation, so nothing that
+   validates a store may read it.
+4. **Choose fill values the data cannot hold** — not-a-number for floats, the dtype minimum for
+   integers, never a boolean. Absence then stays distinguishable from zero, which is what lets a
+   store ship with its arrays declared and unwritten and filled on arrival.
+5. **Digest array values, not files**, in a canonical order and byte order, so recompression or
+   resharding is not a corruption alarm.
+6. **Key every per-record column by record identity**, never by row position. One filter or
+   reshard upstream and every record wears another record's labels.
+
+Two more that matter only for training. Keep a **group id** per record and split on it, or a
+defect and its own matched control land on opposite sides of the split and the model learns the
+pair. And do not store per-sample columns you can recompute — a derived column costs the same
+bytes as the signal and can disagree with it.
 
 ## Check what you built
 
@@ -252,7 +301,7 @@ assert ws.Signal.from_recipe(sig.recipe()).sha256() == sig.sha256()
 
 ## Staying current
 
-This file is `version: 1` in its own frontmatter. The copy in the repository is the source of
+This file is `version: 2` in its own frontmatter. The copy in the repository is the source of
 truth, so an installed copy can fall behind it.
 
 Check the installed version against the published one without cloning anything:
