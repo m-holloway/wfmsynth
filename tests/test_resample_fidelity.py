@@ -147,3 +147,55 @@ def test_the_linear_sites_that_remain_are_bounded_by_the_sizing_rule():
         k = slice(RS.HALF_WIDTH * 2, -RS.HALF_WIDTH * 2)
         err = float(np.max(np.abs(lin[k] - sinc[k])))
         assert err < bound, f"{sps} samples/UI: linear costs {err:.2e}, bound {bound:.0e}"
+
+
+# ------------------------------------------------------- the displacement ops use the kernel
+def _skewable(n=1 << 13, sps=10, seed=2):
+    return _bandlimited(n=n, sps=sps, seed=seed)
+
+
+def test_intra_pair_skew_uses_the_kernel_and_not_linear_interpolation():
+    """A stated skew in picoseconds is a sub-sample number, so the interpolator's error is an
+    error in the impairment. Pinned both ways: it matches the bandlimited answer, and it is
+    measurably not the linear one."""
+    x = _skewable()
+    grid = ws.Grid(fs=256e9, baud=16e9, n=x.size, v_full=2.0)
+    skew_ps = 1.45                                     # 0.371 samples at 256 GSa/s
+    d = skew_ps * 1e-12 * grid.fs
+    _, nn = P.differential_pair(x, grid=grid, skew_ps=skew_ps)
+    # n is -0.5 * the delayed arm
+    got = np.asarray(nn, float) / -0.5
+    idx = np.arange(x.size, dtype=float)
+    k = slice(256, x.size - 256)
+    assert np.allclose(got[k], RS.shift(x, d)[k], atol=1e-9)
+    lin = np.interp(idx - d, idx, x, left=x[0], right=x[-1])
+    assert np.max(np.abs(got[k] - lin[k])) > 1e-4, "indistinguishable from linear interpolation"
+
+
+def test_supply_induced_timing_jitter_uses_the_kernel():
+    x = _skewable(seed=4)
+    grid = ws.Grid(fs=256e9, baud=16e9, n=x.size, v_full=2.0)
+    y = P.supply_coupling(x, grid, f_ripple_hz=1e6, am_depth=0.0, psij_ps=2.0)
+    s = np.sin(2 * np.pi * 1e6 * (np.arange(x.size) / grid.fs))
+    dev = (2.0 * 1e-12 * grid.fs) * s
+    idx = np.arange(x.size, dtype=float)
+    k = slice(256, x.size - 256)
+    assert np.allclose(np.asarray(y, float)[k], RS.displace(x, dev)[k], atol=1e-9)
+    lin = np.interp(idx - dev, idx, x, left=x[0], right=x[-1])
+    assert np.max(np.abs(np.asarray(y, float)[k] - lin[k])) > 1e-6
+
+
+def test_a_displacement_applied_and_removed_comes_back():
+    """The sharpest statement of what the kernel buys. Linear interpolation low-passes the signal
+    on the way out and again on the way back; MEASURED 5.0e-3 against 8.1e-8, a factor of 61,000.
+    """
+    x = _skewable(seed=6)
+    there = RS.shift(x, 0.37)
+    back = RS.shift(there, -0.37)
+    k = slice(256, x.size - 256)
+    assert np.max(np.abs(back[k] - x[k])) < 1e-6
+
+    idx = np.arange(x.size, dtype=float)
+    lin_there = np.interp(idx - 0.37, idx, x, left=x[0], right=x[-1])
+    lin_back = np.interp(idx + 0.37, idx, lin_there, left=lin_there[0], right=lin_there[-1])
+    assert np.max(np.abs(lin_back[k] - x[k])) > 1e-4

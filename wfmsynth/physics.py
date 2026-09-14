@@ -640,8 +640,7 @@ def supply_coupling(x, grid, f_ripple_hz=1e6, am_depth=0.0, psij_ps=0.0, supply=
     y = x * (1.0 + am_depth * s)                              # amplitude modulation
     if psij_ps:
         dev = (psij_ps * 1e-12 * grid.fs) * s                # timing deviation (samples) ∝ supply
-        idx = np.arange(n)
-        y = np.interp(idx - dev, idx, y, left=y[0], right=y[-1])
+        y = RS.displace(y, dev)
     return y
 
 
@@ -665,7 +664,7 @@ def differential_pair(x, grid=None, skew_ps=0.0, skew_samples=None, gain_imbalan
     idx = np.arange(n)
     if skew_samples is None:
         skew_samples = (skew_ps * 1e-12 * grid.fs) if grid is not None else 0.0
-    xd = np.interp(idx - skew_samples, idx, x, left=x[0], right=x[-1])
+    xd = RS.shift(x, skew_samples)      # bandlimited: a stated skew in ps is sub-sample
     p = 0.5 * (1.0 + gain_imbalance) * x + cm
     nn = -0.5 * (1.0 - gain_imbalance) * xd + cm
     return p, nn
@@ -889,8 +888,13 @@ def inject_jitter(x, sigma_rj=0.0, a_pj=0.0, f_pj=5.0, dcd=0.0, rng=None,
     if dcd != 0:
         slope = np.sign(np.gradient(x))
         disp += (dcd / 2.0) * slope
+    if not np.any(disp):
+        return np.asarray(x, float).copy()   # no displacement is no mechanism, and must be exact
+    # Bandlimited, not linear. The displacement here IS the mechanism -- a stated DCD in
+    # picoseconds is a sub-sample number -- so the interpolator's error is an error in the
+    # impairment itself.
     src = np.clip(np.arange(n) + disp, 0, n - 1)
-    return np.interp(src, np.arange(n), x)
+    return RS.resample_at(x, src)
 
 
 # ---------------------------------------------------------------- signaling
