@@ -24,7 +24,10 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7"]
+test = ["pytest>=7", "h5py>=3"]
+# Writing HDF5 needs h5py. Nothing else in the library does, so it stays optional and the
+# exporter reports the missing import rather than the package refusing to install without it.
+hdf5 = ["h5py>=3"]
 
 [tool.setuptools.packages.find]
 include = ["wfmsynth*"]
