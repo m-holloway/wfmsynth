@@ -86,17 +86,26 @@ def _eye_at_phase(x, spb, phase, levels, defn):
     return min(gaps)
 
 
-def eye_height(x, grid, levels=4, defn="contour", n_phases=32):
+def eye_height(x, grid, levels, defn="contour", n_phases=32):
     """Measured eye height at the best sampling phase. ``defn`` is 'contour' (measured
     opening) or 'sigma' (3-sigma construction) — see the module docstring; they diverge
-    under deterministic ISI. ``levels`` is 2 for NRZ, 4 for PAM4."""
+    under deterministic ISI.
+
+    ``levels`` is REQUIRED and has no default: 2 for NRZ, 4 for PAM4, N for PAM-N. It is a
+    property of the record rather than a preference, and the caller always knows it because the
+    caller chose the carrier. A default would be silently wrong for half of all records and would
+    look plausible either way -- MEASURED on one NRZ record, reading it as four levels gave 0.0017
+    against the 0.0432 it actually has, a 25x understatement with nothing to say so.
+    """
     spb = grid.samples_per_ui
     return max(_eye_at_phase(x, spb, ph, levels, defn)
                for ph in np.linspace(0, spb, n_phases, endpoint=False))
 
 
-def best_phase(x, grid, levels=4, defn="contour", n_phases=32):
-    """The sampling phase (in samples, within one UI) that maximizes the eye opening."""
+def best_phase(x, grid, levels, defn="contour", n_phases=32):
+    """The sampling phase (in samples, within one UI) that maximizes the eye opening.
+
+    ``levels`` is required, for the reason `eye_height` gives."""
     spb = grid.samples_per_ui
     phases = np.linspace(0, spb, n_phases, endpoint=False)
     return float(phases[int(np.argmax([_eye_at_phase(x, spb, ph, levels, defn)

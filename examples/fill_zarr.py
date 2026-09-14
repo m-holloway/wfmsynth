@@ -11,7 +11,7 @@ end up with is the one the seed described -- the labels, the decision instants, 
 their provenance were already in it.
 
     python fill_zarr.py SEED.zarr recipes.json
-    python fill_zarr.py SEED.zarr recipes.json --only pcie-4-clean-r0 --dry-run
+    python fill_zarr.py SEED.zarr recipes.json --only <one-record-id> --dry-run
 
 Needs zarr and numpy alongside this library. Nothing else.
 

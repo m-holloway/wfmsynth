@@ -37,6 +37,6 @@ gau = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", c
        .digitize(noise_rms=0.06)).waveform()
 print("\neye-definition divergence:")
 print(f"  deterministic ISI : |contour - sigma| = "
-      f"{abs(ws.eye_height(isi, g, defn='contour') - ws.eye_height(isi, g, defn='sigma')):.3f}")
+      f"{abs(ws.eye_height(isi, g, levels=4, defn='contour') - ws.eye_height(isi, g, levels=4, defn='sigma')):.3f}")
 print(f"  Gaussian noise    : |contour - sigma| = "
-      f"{abs(ws.eye_height(gau, g, defn='contour') - ws.eye_height(gau, g, defn='sigma')):.3f}")
+      f"{abs(ws.eye_height(gau, g, levels=4, defn='contour') - ws.eye_height(gau, g, levels=4, defn='sigma')):.3f}")

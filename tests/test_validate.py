@@ -465,12 +465,15 @@ def test_hold_constant_sweep_pins_measured_metric():
                 .reflect(td_ps=30.0, gamma_s=gamma, gamma_l=gamma))
 
     # eye is measured, monotonic in loss (needed for the bisection to be well posed)
-    eyes = [ws.eye_height(build(0.05, l).waveform(), g) for l in (0.0, 2.0, 4.0)]
+    eyes = [ws.eye_height(build(0.05, l).waveform(), g, levels=4) for l in (0.0, 2.0, 4.0)]
     assert eyes[0] > eyes[1] > eyes[2]
 
-    target = ws.eye_height(build(0.05, 2.0).waveform(), g)
+    target = ws.eye_height(build(0.05, 2.0).waveform(), g, levels=4)
+    # the metric is a callback `hold_constant` calls with (x, grid), so the level count is bound
+    # here rather than defaulted inside the measurement
     recs = ws.hold_constant(build, "gamma", [0.05, 0.15, 0.25, 0.35], "eye", target,
-                            "loss_db", (0.0, 4.0), g, ws.eye_height, tol=0.004)
+                            "loss_db", (0.0, 4.0), g,
+                            lambda x, gg: ws.eye_height(x, gg, levels=4), tol=0.004)
     realized = [r["realized_eye"] for r in recs]
     solved = [r["loss_db"] for r in recs]
     assert max(abs(e - target) for e in realized) <= 0.02            # pin held
@@ -500,8 +503,8 @@ def test_realized_table_exposes_leak_and_two_eye_definitions():
     assert np.corrcoef(gammas, eyes)[0, 1] < -0.8
     # both named eye definitions are computable and finite
     x = build(0.3, 1.0).waveform()
-    assert np.isfinite(ws.eye_height(x, g, defn="sigma"))
-    assert np.isfinite(ws.eye_height(x, g, defn="contour"))
+    assert np.isfinite(ws.eye_height(x, g, levels=4, defn="sigma"))
+    assert np.isfinite(ws.eye_height(x, g, levels=4, defn="contour"))
 
 
 def test_ground_truth_measured_eye_definitions_and_symbol_alignment():
@@ -514,8 +517,8 @@ def test_ground_truth_measured_eye_definitions_and_symbol_alignment():
            .reflect(td_ps=40.0, gamma_s=0.45, gamma_l=0.45)).waveform()
     gau = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
            .digitize(noise_rms=0.06)).waveform()
-    di = abs(ws.eye_height(isi, g, defn="sigma") - ws.eye_height(isi, g, defn="contour"))
-    dg = abs(ws.eye_height(gau, g, defn="sigma") - ws.eye_height(gau, g, defn="contour"))
+    di = abs(ws.eye_height(isi, g, levels=4, defn="sigma") - ws.eye_height(isi, g, levels=4, defn="contour"))
+    dg = abs(ws.eye_height(gau, g, levels=4, defn="sigma") - ws.eye_height(gau, g, levels=4, defn="contour"))
     # 0.035: a correctly-sharp edge leaves more of the record in transition, where the two
     # definitions read a noisy eye slightly differently. The 5.6x separation is the claim.
     assert dg < 0.035 and di > 0.05 and di > dg + 0.03
@@ -641,7 +644,7 @@ def test_tx_ffe_precursor_and_eye_compensation():
     with_ffe = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
                 .tx_ffe(taps=[-0.15, 1.0, -0.25], pre=1)
                 .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)).waveform()
-    assert ws.eye_height(with_ffe, g) > ws.eye_height(no_ffe, g) + 0.02
+    assert ws.eye_height(with_ffe, g, levels=4) > ws.eye_height(no_ffe, g, levels=4) + 0.02
 
 
 def test_composed_chain_causality():
@@ -880,12 +883,12 @@ def test_rx_ctle_opens_eye_and_dfe_cancels_postcursor():
     no = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)
           .lossy(loss_db=9.0, loss_at_ghz=25.0, causal=True)).waveform()
     eq = ws.ctle(no, g, fz_ghz=6.0, fp1_ghz=22.0, fp2_ghz=45.0, dc_gain=1.0)
-    assert ws.eye_height(eq, g) > ws.eye_height(no, g) + 0.02
+    assert ws.eye_height(eq, g, levels=4) > ws.eye_height(no, g, levels=4) + 0.02
     # composes as a fluent op after the channel
     sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)
            .lossy(loss_db=9.0, loss_at_ghz=25.0, causal=True)
            .ctle(fz_ghz=6.0, fp1_ghz=22.0, fp2_ghz=45.0))
-    assert ws.eye_height(sig.waveform(), g) > ws.eye_height(no, g) + 0.02
+    assert ws.eye_height(sig.waveform(), g, levels=4) > ws.eye_height(no, g, levels=4) + 0.02
     # DFE cancels a known post-cursor
     rng = np.random.default_rng(0)
     syms = rng.choice([-1.0, -1 / 3, 1 / 3, 1.0], 2000)
@@ -1044,7 +1047,7 @@ def test_acquisition_chain_bandwidth_and_timebase_jitter():
     assert np.sum(np.abs(np.fft.rfft(scope_bandwidth(x, g, 33e9)))[hi]) < 0.5 * np.sum(np.abs(np.fft.rfft(x))[hi])
     assert np.sum(np.abs(np.fft.rfft(probe_loading(x, g, c_load_f=1e-12)))[hi]) < np.sum(np.abs(np.fft.rfft(x))[hi])
     tb = timebase_jitter(x, g, rms_ps=1.5, rng=np.random.default_rng(0))
-    assert ws.eye_height(tb, g) < ws.eye_height(x, g) - 0.02
+    assert ws.eye_height(tb, g, levels=4) < ws.eye_height(x, g, levels=4) - 0.02
 
 
 def test_de_emphasis_preset():
@@ -1123,8 +1126,8 @@ def test_waveform_clock_recovery_fold():
     base = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)).waveform()
     lf = apply_phase(base, timing_source(g.n, g, pj=dict(amp_ps=8.0, f_hz=2e6)))
     hf = apply_phase(base, timing_source(g.n, g, pj=dict(amp_ps=8.0, f_hz=2e9)))
-    assert recover_and_fold(lf, g) > ws.eye_height(lf, g) + 0.02      # low-freq tracked out
-    assert abs(recover_and_fold(hf, g) - ws.eye_height(hf, g)) < 0.05  # high-freq not
+    assert recover_and_fold(lf, g) > ws.eye_height(lf, g, levels=4) + 0.02      # low-freq tracked out
+    assert abs(recover_and_fold(hf, g) - ws.eye_height(hf, g, levels=4)) < 0.05  # high-freq not
 
 
 def test_differential_pair_skew_and_mode_conversion():
@@ -1138,7 +1141,7 @@ def test_differential_pair_skew_and_mode_conversion():
     assert np.sqrt(np.mean(ws.common_mode(p0, n0) ** 2)) < 1e-9
     # skew closes the differential eye and creates common-mode
     ps, ns = ws.differential_pair(x, g, skew_ps=6.0)
-    assert ws.eye_height(ws.differential_mode(ps, ns), g) < ws.eye_height(x, g) - 0.02
+    assert ws.eye_height(ws.differential_mode(ps, ns), g, levels=4) < ws.eye_height(x, g, levels=4) - 0.02
     assert np.sqrt(np.mean(ws.common_mode(ps, ns) ** 2)) > 0.01
     # gain imbalance -> data-correlated common-mode (mode conversion)
     pg, ng = ws.differential_pair(x, g, gain_imbalance=0.1)
@@ -1146,7 +1149,7 @@ def test_differential_pair_skew_and_mode_conversion():
     # composes fluently (differential-mode with skew closes the eye in-chain)
     sig = (ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=True)
            .intra_pair_skew(skew_ps=6.0))
-    assert ws.eye_height(sig.waveform(), g) < ws.eye_height(x, g) - 0.02
+    assert ws.eye_height(sig.waveform(), g, levels=4) < ws.eye_height(x, g, levels=4) - 0.02
 
 
 def test_supply_coupling_am_and_psij_sidebands():

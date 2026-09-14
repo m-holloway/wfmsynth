@@ -236,6 +236,31 @@ into a file that opens and looks plausible.
 `like="a_capture.h5"` copies the metadata that marks a file as belonging to a particular
 instrument out of a capture you already have; `identity_from` reads it. Needs `h5py`.
 
+**If the file is going onto a bench instrument, model that instrument first.** A record exported
+straight off the synthesis grid has a full-rate, full-bandwidth, infinite-resolution edge, and
+loaded onto a scope it looks like nothing that scope could ever have captured — so anything read
+off it about margin or rise time is about the simulation, not the measurement. Put the target
+instrument in the chain before exporting, and ask what it actually is:
+
+- **the probe**, if there is one: `probe(bw_hz=, c_load_f=, r_source=, atten=)`. Its input
+  capacitance loads the node, which changes the very rise time the link is graded on — a real
+  effect, not a correction factor.
+- **the analog front end**: `scope(bw_hz=)` at the instrument's bandwidth, or the setting it will
+  be used at, which is often narrower than the hardware.
+- **the sample rate and record length**: `acquire(AcquisitionProfile(sample_rate_hz=,
+  record_length=, input_bandwidth_hz=, enob=, sample_clock_jitter_rms_s=))`. Its rate is the
+  instrument's, not the grid's.
+- **the converter**: `enob` rather than the headline bit count — effective bits fall with
+  bandwidth, and it is the honest figure. `digitize(bits=, enob=)` and `store(bits=)` if you are
+  driving the ops directly.
+
+Then pass the STORED rate to the exporter — `write_hdf5(..., fs=fs_store)` — because `XInc` is
+what the instrument will use to lay the record out in time, and the synthesis rate would stretch
+it. `Signal.grid` still holds the synthesis rate after `acquire()`, so do not read it from there.
+
+The point of the exercise is that the file and a real capture of the same link should be
+comparable. If you cannot say which instrument the file represents, it does not represent one.
+
 ### Zarr, for a corpus you will train on
 
 Use `zarr` directly, and get the layout right the first time.

@@ -41,7 +41,7 @@ electrical = (ws.Signal(seed=1, grid=g)
               .scope(bw_hz=40e9).timebase(rms_ps=0.3)
               .digitize(snr_db=32.0, enob=6.5, interleave=dict(m_cores=4, offset_v=1e-3)))
 xe = electrical.waveform()
-print(f"electrical PAM4 link:  {xe.shape},  measured eye = {ws.eye_height(xe, g):.3f}")
+print(f"electrical PAM4 link:  {xe.shape},  measured eye = {ws.eye_height(xe, g, levels=4):.3f}")
 print(f"  recipe: {len(electrical.recipe()['ops'])} composed ops, fully reproducible")
 
 # ---- 2) Optical lane ---------------------------------------------------------

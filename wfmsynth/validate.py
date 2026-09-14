@@ -655,14 +655,16 @@ def _b7(gamma=0.05, loss_db=2.0):
             .lossy(loss_db=loss_db, loss_at_ghz=25.0, causal=True)
             .reflect(td_ps=30.0, gamma_s=gamma, gamma_l=gamma))
 # a naive reflection sweep is ALSO an eye-height sweep -> realized labels expose the leak
-_naive = [_eye(_b7(gm, 0.0).waveform(), _g7) for gm in (0.0, 0.15, 0.3, 0.4)]
+_naive = [_eye(_b7(gm, 0.0).waveform(), _g7, levels=4) for gm in (0.0, 0.15, 0.3, 0.4)]
 check("realized labels expose the confound: reflection alone closes the eye",
       _naive[0] > _naive[-1] and all(_naive[i] >= _naive[i + 1] for i in range(len(_naive) - 1)),
       f"eye {_naive[0]:.3f} -> {_naive[-1]:.3f}")
 # hold eye height fixed by solving insertion loss as reflection is swept
-_tgt = _eye(_b7(0.05, 2.0).waveform(), _g7)
+_tgt = _eye(_b7(0.05, 2.0).waveform(), _g7, levels=4)
+# the metric reaches `hold_constant` as a callback it calls with (x, grid), so the level count
+# is bound here rather than defaulted inside the measurement
 _recs = _hold(_b7, "gamma", [0.05, 0.15, 0.25, 0.35], "eye", _tgt,
-              "loss_db", (0.0, 4.0), _g7, _eye, tol=0.004)
+              "loss_db", (0.0, 4.0), _g7, lambda x, g: _eye(x, g, levels=4), tol=0.004)
 _real = [r["realized_eye"] for r in _recs]
 _solved = [r["loss_db"] for r in _recs]
 check("hold-constant sweep keeps the pinned metric within tolerance",
@@ -683,8 +685,8 @@ _isi = (Signal(seed=1, grid=_g8).carrier("pam4", n_ui=_n8, pattern="prbs13q", ca
         .reflect(td_ps=40.0, gamma_s=0.45, gamma_l=0.45)).waveform()
 _gau = (Signal(seed=1, grid=_g8).carrier("pam4", n_ui=_n8, pattern="prbs13q", causal=True)
         .digitize(noise_rms=0.06)).waveform()
-_di = abs(_eh(_isi, _g8, defn="sigma") - _eh(_isi, _g8, defn="contour"))
-_dg = abs(_eh(_gau, _g8, defn="sigma") - _eh(_gau, _g8, defn="contour"))
+_di = abs(_eh(_isi, _g8, levels=4, defn="sigma") - _eh(_isi, _g8, levels=4, defn="contour"))
+_dg = abs(_eh(_gau, _g8, levels=4, defn="sigma") - _eh(_gau, _g8, levels=4, defn="contour"))
 # The separation is the claim: the two definitions disagree 5.6x more under ISI than under
 # noise. The Gaussian bound is 0.035 rather than 0.02 because a correctly-sharp edge leaves more
 # of the record in transition, where the two definitions read a noisy eye slightly differently.
@@ -796,8 +798,8 @@ _wffe = (Signal(seed=1, grid=_g11).carrier("pam4", n_ui=_n11, pattern="prbs13q",
          .tx_ffe(taps=[-0.15, 1.0, -0.25], pre=1)
          .lossy(loss_db=8.0, loss_at_ghz=25.0, causal=True)).waveform()
 check("Tx FFE de-emphasis opens a lossy-channel eye vs no FFE",
-      _eh(_wffe, _g11) > _eh(_noffe, _g11) + 0.02,
-      f"eye {_eh(_noffe, _g11):.3f} -> {_eh(_wffe, _g11):.3f}")
+      _eh(_wffe, _g11, levels=4) > _eh(_noffe, _g11, levels=4) + 0.02,
+      f"eye {_eh(_noffe, _g11, levels=4):.3f} -> {_eh(_wffe, _g11, levels=4):.3f}")
 
 print("== composition-level causality: a FULL composed chain, not just the channel ==")
 # hazard: causality is asserted for lossy_channel alone, but default zero-phase edge
@@ -1049,7 +1051,7 @@ _no28 = (Signal(seed=1, grid=_g28).carrier("pam4", n_ui=_nui28, pattern="prbs13q
          .lossy(loss_db=9.0, loss_at_ghz=25.0, causal=True)).waveform()
 _eq28 = _ctle(_no28, _g28, fz_ghz=6.0, fp1_ghz=22.0, fp2_ghz=45.0, dc_gain=1.0)
 check("CTLE opens a lossy-channel eye (receiver-side high-frequency peaking)",
-      _eh(_eq28, _g28) > _eh(_no28, _g28) + 0.02, f"eye {_eh(_no28,_g28):.3f} -> {_eh(_eq28,_g28):.3f}")
+      _eh(_eq28, _g28, levels=4) > _eh(_no28, _g28, levels=4) + 0.02, f"eye {_eh(_no28,_g28, levels=4):.3f} -> {_eh(_eq28,_g28, levels=4):.3f}")
 _wc, _hc = sp.freqz(*sp.bilinear([1 / (2 * np.pi * 6e9), 1.0],
                                  np.polymul([1 / (2 * np.pi * 22e9), 1.0], [1 / (2 * np.pi * 45e9), 1.0]),
                                  fs=_g28.fs), worN=2048, fs=_g28.fs)
@@ -1093,7 +1095,7 @@ check("ideal differential pair recovers the data with ~zero common-mode",
       and np.sqrt(np.mean(P.common_mode(_p0, _n0) ** 2)) < 1e-9)
 _ps, _ns = P.differential_pair(_x32, _g32, skew_ps=6.0)
 check("intra-pair skew closes the differential eye and generates common-mode (zero at skew=0)",
-      _eh(P.differential_mode(_ps, _ns), _g32) < _eh(P.differential_mode(_p0, _n0), _g32) - 0.02
+      _eh(P.differential_mode(_ps, _ns), _g32, levels=4) < _eh(P.differential_mode(_p0, _n0), _g32, levels=4) - 0.02
       and np.sqrt(np.mean(P.common_mode(_ps, _ns) ** 2)) > 0.01)
 _pg, _ng = P.differential_pair(_x32, _g32, gain_imbalance=0.1)
 check("gain imbalance converts differential to common-mode, proportional to the data",
@@ -1372,7 +1374,7 @@ check("  ... and the GATE OBSERVED FAILING: the zero-phase opt-out is that close
       f"{min(_pdb0):.4f}..{max(_pdb0):.4f}x the closed form's dB at every frequency")
 _tb40 = _tbj(_x40, _g40, rms_ps=1.5, rng=np.random.default_rng(0))
 check("timebase jitter smears the eye horizontally (closes it)",
-      _eh(_tb40, _g40) < _eh(_x40, _g40) - 0.02, f"eye {_eh(_x40,_g40):.3f} -> {_eh(_tb40,_g40):.3f}")
+      _eh(_tb40, _g40, levels=4) < _eh(_x40, _g40, levels=4) - 0.02, f"eye {_eh(_x40,_g40, levels=4):.3f} -> {_eh(_tb40,_g40, levels=4):.3f}")
 
 print("== Tx de-emphasis preset: a dB preset yields that transition/steady ratio ==")
 _spb42 = 16
@@ -1443,10 +1445,10 @@ _base29 = (Signal(seed=1, grid=_g29).carrier("pam4", n_ui=_nui29, pattern="prbs1
 _lf29 = _ap2(_base29, _ts2(_g29.n, _g29, pj=dict(amp_ps=8.0, f_hz=2e6)))     # slow wander
 _hf29 = _ap2(_base29, _ts2(_g29.n, _g29, pj=dict(amp_ps=8.0, f_hz=2e9)))     # fast jitter
 check("the CDR-folded eye is more OPEN than the fixed-grid eye for low-frequency jitter",
-      _fold(_lf29, _g29) > _eh(_lf29, _g29) + 0.02,
-      f"fixed {_eh(_lf29,_g29):.3f} -> folded {_fold(_lf29,_g29):.3f}")
+      _fold(_lf29, _g29) > _eh(_lf29, _g29, levels=4) + 0.02,
+      f"fixed {_eh(_lf29,_g29, levels=4):.3f} -> folded {_fold(_lf29,_g29):.3f}")
 check("high-frequency jitter is NOT tracked out (folded ~ fixed-grid eye)",
-      abs(_fold(_hf29, _g29) - _eh(_hf29, _g29)) < 0.05)
+      abs(_fold(_hf29, _g29) - _eh(_hf29, _g29, levels=4)) < 0.05)
 
 print("== generalized two-rate acquisition (issue #51): sim grid -> acquisition -> stored record ==")
 import json as _json51

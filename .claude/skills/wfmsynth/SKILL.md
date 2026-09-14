@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link or an instrument, or reproduce a waveform from a recipe.
-version: 5
+version: 6
 ---
 
 # wfmsynth
@@ -96,6 +96,35 @@ was asked for.
     integer sample counts returns exactly zero, so duty-cycle distortion measures as absent when
     it is present and correct. Calibrate on a known answer first.
 
+13. **`eye_height` requires `levels` and has no default.** 2 for NRZ, 4 for PAM4, N for PAM-N.
+    It used to default to 4, which on a binary record measured a four-level eye that is not there
+    and did it silently — 0.0017 against the 0.0432 that record actually has. The level count is a
+    property of the record rather than a preference, so state it.
+14. **`eye_contour` floors once the eye closes**, so it is not a health check on a closed eye:
+    past closure it sits near zero whatever you do to the channel. `eye_sigma` goes negative
+    there, which is the eye being shut rather than an error, and still separates one closed eye
+    from another.
+15. **`eye_density` returning zeros means the clock did not lock, not that the record is empty.**
+    Check `meta['traces']`: zero, with `meta['clock']['reason']` one of `short`, `edges`,
+    `nolock`, `nowindow`, `toofast` or `still`. The threshold is `eye.LOCK_RMS_UI = 0.25` against
+    `clock['lockRmsUi']`, and on a failure the clock dict carries only five keys — every lock
+    diagnostic, `residualRmsUi` included, is absent rather than zero. `reason == 'fromgrid'` is
+    NOT a failure: the period was fitted to the edges but seeded by the grid's rate, so the
+    picture is real and only the clock is partly the grid's. A mid-reach lossy chain failing to
+    lock at the pad is ordinary. To see the impairment anyway, fold on nominal centres with
+    `eye.density(x, centres, ui)` — the lower-level call that takes centres instead of recovering
+    them — and say on the plot that it is a nominal-centre fold rather than a recovered eye.
+16. **Exporting for a bench instrument means modelling that instrument first.** A record taken
+    straight off the synthesis grid has a full-rate, full-bandwidth, infinite-resolution edge;
+    loaded onto a scope it looks like nothing that scope could have captured, so any margin or
+    rise time read off it describes the simulation. Put the probe, the front end, the sample rate
+    and the converter in the chain before writing the file, and pass the STORED rate to the
+    exporter. `REFERENCE.md` has the parameters.
+17. **After `acquire()`, `Signal.grid` is still the SYNTHESIS grid.** It reports the rate and
+    length the chain was built on, not the record you now hold, so handing it to a measurement
+    measures the wrong thing. Build one for the stored record:
+    `Grid(fs=fs_store, baud=baud, n=len(x))`.
+
 ## Where the boundary sits
 
 Mechanisms live in the library; standards knowledge does not. A pseudo-random sequence is a
@@ -105,7 +134,7 @@ populates, and a recipe records both the name and the resolved parameters.
 
 ## Staying current
 
-This file is `version: 5`. The copy in the repository is the source of truth, so an installed copy
+This file is `version: 6`. The copy in the repository is the source of truth, so an installed copy
 can fall behind it. Run this with the same `HOME` the install used:
 
 ```bash

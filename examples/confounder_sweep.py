@@ -29,10 +29,10 @@ def build(gamma=0.05, loss_db=2.0):
 # 1) the confound, made visible: reflection alone closes the eye
 print("naive reflection sweep (loss fixed) — eye height moves with the knob:")
 for gm in (0.0, 0.15, 0.30, 0.40):
-    print(f"  gamma={gm:.2f}  measured eye={ws.eye_height(build(gm, 0.0).waveform(), g):.3f}")
+    print(f"  gamma={gm:.2f}  measured eye={ws.eye_height(build(gm, 0.0).waveform(), g, levels=4):.3f}")
 
 # 2) hold the eye height fixed by solving insertion loss as reflection is swept
-target = ws.eye_height(build(0.05, 2.0).waveform(), g)
+target = ws.eye_height(build(0.05, 2.0).waveform(), g, levels=4)
 print(f"\nhold eye height = {target:.3f} while sweeping reflection (solve insertion loss):")
 recs = ws.hold_constant(build, "gamma", [0.05, 0.15, 0.25, 0.35], "eye", target,
                         "loss_db", (0.0, 4.0), g, ws.eye_height, tol=0.004)
