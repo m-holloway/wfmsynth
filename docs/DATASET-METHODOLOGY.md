@@ -1,15 +1,15 @@
 # Building a defensible synthetic waveform dataset
 
 A handover for a team picking this work up with no context and no tools but this library. It
-covers the mental model, the procedure that produced a dataset whose numbers survive being
-attacked, the traps that cost real time, the arithmetic that sizes a record, the honest state of
-the work, and how a consumer filters what it must not trust.
+covers the mental model, the procedure used to produce parameters that hold up under scrutiny, the
+traps that cost real time, the arithmetic that sizes a record, the honest state of the work, and
+how a consumer filters what it must not trust.
 
 Two conventions apply to everything below, including anything you add to this file:
 
 - **Cite documents by standard designation only** — "IEEE 802.3 Clause 120.5.11.2.1",
-  "PCI Express Base Specification Rev 4.0 Table 8-7". Not a vendor, not an instrument model, not
-  a customer, not another repository or tool. Where you need to refer to the layer that builds
+  "PCI Express Base Specification Rev 4.0 Table 8-7". Never a vendor, an instrument model, a
+  customer, or another repository or tool. Where you need to refer to the layer that builds
   recipes and stores records, say *the caller* or *a planning layer*.
 - **Mark every number with how you know it.** The vocabulary is in §2 and this document uses it on
   its own claims.
@@ -25,8 +25,8 @@ python -m wfmsynth.validate        # the physics gate: PASS/FAIL per property, n
 
 ## 1. The mental model
 
-A record is a pipeline. Each stage has one owner, and every stage you can name is a stage you can
-label, sweep and hold constant.
+A record is a pipeline. Each stage has one owner. Naming a stage is what lets you label it, sweep
+it, and hold it constant.
 
 | # | stage | what it decides | module | ops / entry points |
 |---|---|---|---|---|
@@ -43,27 +43,27 @@ label, sweep and hold constant.
 | 11 | receiver | CTLE, FFE, DFE, AGC, front-end noise, an independent sampling clock | `rx`, `cdr`, `compose` | `ctle`, `rx_ffe`, `dfe`, `agc`, `rx_noise`, `sample_clock` |
 | 12 | instrument | analog bandwidth, timebase jitter, ADC (ENOB, interleave), resampling | `instrument`, `acquire` | `scope`, `timebase`, `digitize`, `acquire` |
 | 13 | stored record | integer codes at a stated full scale — the thing a consumer reads | `instrument` (`store_record`) | `store` |
-| 14 | measurement | labels measured **from** the record, not copied from knobs | `measure`, `eye` | `Signal.ground_truth()`, `eye.eye()` |
+| 14 | measurement | labels measured from the record, independent of the knobs | `measure`, `eye` | `Signal.ground_truth()`, `eye.eye()` |
 
 Around the pipeline: `Grid` binds the abstract grid to Hz/seconds/volts; `Streams` gives every
 stochastic factor its own role-tagged RNG so re-rolling one factor leaves the others bit-identical;
 `Scene` composes correlated lanes; `sweep` holds confounders constant; `validate` and `tests/` are
 the gates.
 
-### Why ops, not helper calls
+### Ops versus helper calls
 
 An **op** is an entry in `compose._EXEC`: a name plus the exact knob values used. It lands in
 `Signal.recipe()["ops"]`, therefore in the key-sorted JSON of `to_json()`, therefore in
 `sha256()` — the content address of the synthesis program. `from_recipe(r).waveform()` reproduces
 the samples bit-for-bit.
 
-A helper call does not. Compute a line code in caller code and feed the result in as
-`symbols=[…]`, and the record is still reproducible — but the recipe says only *these levels*, not
-*this code*. Nothing can filter by code, sweep the code, or diff two datasets on it, and a
-reviewer cannot see it was applied. **If a consumer will ever want to select on it, it has to be
-an op.**
+A helper call does not have this property. Compute a line code in caller code and feed the result
+in as `symbols=[…]`, and the record is still reproducible. The recipe records only the levels; it
+does not record which code produced them. Nothing can filter by code, sweep the code, or diff two
+datasets on it, and a reviewer cannot see it was applied. **Rule:** if a consumer will ever want to
+select on a value, make it an op.
 
-Two rules that follow, and both have bitten:
+Two rules follow. Both have caused real bugs:
 
 - **Emit only the arguments you were given.** The kernel's defaults are the authority. Restating a
   default in the recipe changes the content address of every record carrying that op on the day
@@ -84,8 +84,8 @@ Two rules that follow, and both have bitten:
 
 ## 2. The method that produced defensible parameters
 
-Repeatable, in order. It is slower than guessing and it is the only part that makes the dataset
-arguable in front of an engineer.
+Repeatable, in order, and slower than guessing. It is what lets someone else check a number
+against the standard, instead of taking it on trust.
 
 1. **Obtain the governing document, at the revision the device is graded against.** Record whether
    you actually got it. An extract that says *none obtained* is a result; one that implies
@@ -95,7 +95,7 @@ arguable in front of an engineer.
 
    | column | content |
    |---|---|
-   | symbol | the standard's own name for it (`TTX-UTJ`, not "tx jitter") |
+   | symbol | the standard's own name for it, e.g. `TTX-UTJ` |
    | value + unit | as printed, with rms vs peak-to-peak stated |
    | document | designation |
    | revision | the revision **you read** |
@@ -119,12 +119,13 @@ arguable in front of an engineer.
 
 4. **Have the citations attacked by someone who did not write them**, and who re-obtains the
    primary document rather than taking the author's word. The failure this exists to catch is a
-   `JUDGEMENT` dressed as a `CITED` — a plausible-looking table reference nobody read.
+   `JUDGEMENT` marked as if it were `CITED` — a plausible-looking table reference nobody actually
+   read.
 5. **Apply the corrections, then re-derive the recipes**, and treat any extract the adversarial
    pass did not reach as one researcher's unchecked reading, however well sourced it looks.
 
-**What such a pass actually returns.** Over a 17-document effort it produced **201 corrections** and
-**found no fabricated citation**. The distribution is the useful part, because it says where to aim:
+**What a correction pass returns.** Over a 17-document effort it produced 201 corrections and found
+no fabricated citation. The distribution shows where to focus review:
 
 | corrected | count | what it was |
 |---|---|---|
@@ -135,14 +136,14 @@ arguable in front of an engineer.
 | plane | 16 | the right number at the wrong test point |
 | revision | 15 | the number from a neighbouring revision |
 
-So: the values were usable and the **table-level locators were not**. Until a correction pass lands,
-cite a number to the extract that carries it, not onward to its table reference.
+The values were usable; the table-level locators were not. Until a correction pass lands, cite a
+number to the extract that carries it. Do not cite onward to its table reference.
 
 **The revision trap** is why every row names the revision of the source read: one jitter limit at
 16 GT/s is 12.5 ps in one revision of the base specification and 11.8 ps in the next, and a device
 of that generation is graded against the earlier one. Fifteen of the 201 were this.
 
-**An ABSENCE can never be cited to a table.** `SSC: none [CITED] §6.1 Table 11` is wrong even when
+**An absence can never be cited to a table.** `SSC: none [CITED] §6.1 Table 11` is wrong even when
 the conclusion is right — the table does not mention spread-spectrum clocking, which is precisely
 why there is nothing to cite. Those rows are `NOT_SPECIFIED`, with the note saying where you looked.
 
@@ -152,7 +153,7 @@ why there is nothing to cite. Those rows are `NOT_SPECIFIED`, with the note sayi
 
 Each cost real time. Each will recur.
 
-### 3.1 Sizing the grid from the unit interval instead of the EDGE
+### 3.1 Sizing the grid from the unit interval instead of the edge
 
 `samples across the transition = tr × fs`. A fixed samples-per-UI sets `fs` from the *symbol rate*,
 which says nothing about the edge.
@@ -167,7 +168,8 @@ made on it measures the sample grid. The same defect gave a modelled 1.6 MHz fro
 fall-time error on a slow bus.
 
 **Rule:** choose `fs` from the edge, `fs ≥ k / tr`, and derive samples-per-UI from that.
-`k ≥ 8` [JUDGEMENT — 4 is the fewest that puts three interior points inside a 10–90 % transition;
+`k ≥ 8` [JUDGEMENT — `k` counts sample intervals across the transition, so k = 4 spans it with
+five sample points, three of them interior, which is the fewest that constrains the edge's shape;
 8 keeps the interpolation error small. Falsified by synthesising one edge at k = 4, 8, 16 and
 comparing the measured `tr` to the requested one.]
 **Detection:** measure `tr` on the delivered record. If it comes back near `dt`, the grid is what
@@ -185,17 +187,18 @@ BW · tr = ln((1 - lo) / (1 - hi)) / (2π)          # single-pole, lo/hi as frac
 | 20–80 % | 0.2206 | some transmitter specifications |
 | 30–70 % | 0.1348 | **open-drain bus specifications** |
 
-10–90 % / 30–70 % = **2.59**. Reading a 30–70 % figure with the 10–90 % constant is a factor of 2.6
+10–90 % / 30–70 % = 2.59. Reading a 30–70 % figure with the 10–90 % constant is a factor of 2.6
 in bandwidth, and it is silent — the record looks plausible.
 
-**And an instrument bandwidth is what the compliance procedure NAMES, not what the signal implies.**
-A 2 % rise-time budget on a 21.9 ps edge implies `tr_scope = 21.9 × √(1.02² − 1) = 4.40 ps`, i.e.
-`BW = 0.3497 / 4.40 ps ≈ 80 GHz`. Compliance for that bus runs on 33 GHz: `tr_scope = 10.6 ps`,
-`√(21.9² + 10.6²) = 24.3 ps`, an edge rounded by ~11 % (measured ≈ 12 %). **That rounding is in every
-real capture.** Model the named bandwidth; do not "fix" it to the one the edge implies, or the
-synthetic set is systematically sharper than any measurement it will be compared against.
+An instrument bandwidth is the value the compliance procedure names. It is not derived from what
+the signal implies. A 2 % rise-time budget on a 21.9 ps edge implies `tr_scope = 21.9 × √(1.02² − 1)
+= 4.40 ps`, i.e. `BW = 0.3497 / 4.40 ps ≈ 80 GHz`. Compliance for that bus runs on 33 GHz:
+`tr_scope = 10.6 ps`, `√(21.9² + 10.6²) = 24.3 ps`, an edge rounded by ~11 % (measured ≈ 12 %). This
+rounding appears in every real capture. **Rule:** model the named bandwidth. Do not "fix" it to the
+value the edge implies, or the synthetic set will be systematically sharper than any real
+measurement it is compared against.
 
-### 3.3 Confusing a channel CODE with a line MODULATION
+### 3.3 Confusing a channel code with a line modulation
 
 A **code** (8b/10b, 64b/66b, 128b/13xb, a scrambler) changes *symbol statistics* — run lengths,
 disparity, DC content — on a line whose level count it never touches. A **modulation** (NRZ, PAM4,
@@ -215,14 +218,16 @@ symbols — and today has no op (§5).
 
 ### 3.4 Indexing a per-record column by row position
 
-A per-record column is aligned to **record id**, not to your iteration order. Filtering, sorting,
-sharding or a partial rebuild reorders rows, and a positional read then attaches every record's
-provenance to a different record. It fails silently and it looks like label noise.
-**Join by id. Detection:** shuffle the record order and re-run; a positional bug changes the answer.
+A per-record column is aligned to record id. It has nothing to do with iteration order. Filtering,
+sorting, sharding or a partial rebuild reorders rows, and a positional read then attaches every
+record's provenance to a different record. It fails silently and it looks like label noise.
+**Rule:** join by id. **Detection:** shuffle the record order and re-run; a positional bug changes
+the answer.
 
 ### 3.5 Measuring with the wrong instrument
 
-Several of this repo's best catches were an instrument that was wrong, not a physics bug.
+Several errors traced during this work were caused by the measuring instrument. The physics was
+not at fault.
 
 | measurement | why it lies | use instead |
 |---|---|---|
@@ -230,10 +235,9 @@ Several of this repo's best catches were an instrument that was wrong, not a phy
 | mean step over an exponential | dominated by the settling tail, so it under-reads the edge | the 10–90 % (or the specified) threshold pair on the transition itself |
 | a fold that assumes an integer pattern period | samples-per-UI is generally non-integer, so the fold smears | `Grid.pattern_period_samples`, realigned sub-sample |
 
-**Calibrate on a known answer before trusting a measurement on the real one.** Synthesise with the
-knob set to an exact value, measure, confirm recovery, and only then point the instrument at the
-record you care about. That is what `wfmsynth.validate` does for every primitive, and it is the
-cheapest habit in this document.
+**Rule:** calibrate on a known answer before trusting a measurement on the real one. Synthesise
+with the knob set to an exact value, measure, confirm recovery, and only then point the instrument
+at the record you care about. That is what `wfmsynth.validate` does for every primitive.
 
 ---
 
@@ -261,13 +265,13 @@ Worked, so any bus can be sized the same way:
 | slow bus, 128-UI frame, `fs` from a 10 ns edge | 128 | 128 | 16,384 | 1,600 | 26,214,400 |
 | PRBS31 | 2,147,483,647 | — | — | 16 | **3.4 × 10¹⁰ — impossible** |
 
-Read the last two rows together. A slow bus with a fast edge is expensive in samples *because of
-the edge*, not because of the data rate, and 128 repeats is often the affordable choice there. And
+Read the last two rows together. A slow bus with a fast edge is expensive in samples because of
+the edge. The data rate is not the driver, and 128 repeats is often the affordable choice there.
 **PRBS31 cannot be folded at all**: its period never repeats inside any realistic record, which is
-exactly why short, pattern-lockable stress patterns exist — they are what makes a folded
-measurement possible on a bus whose compliance sequence is unfoldable. A long PRBS is still the
-right *stress* (it carries the run lengths and low-frequency content that actually close an eye);
-it is simply not the right thing to fold.
+why short, pattern-lockable stress patterns exist — they make a folded measurement possible on a
+bus whose compliance sequence is unfoldable. A long PRBS is still the right stress, since it
+carries the run lengths and low-frequency content that actually close an eye. It is not the right
+thing to fold.
 
 Choose the pattern for what it must show, and know what each costs:
 
@@ -278,17 +282,17 @@ Choose the pattern for what it must show, and know what each costs:
 | PRBS9…PRBS15 | 511…32,767 UI | the usable compromise: foldable and still ISI-bearing |
 | PRBS31 / PRBS31Q | 2³¹−1 | unfoldable; no repeat-averaging |
 
-An eye open on `clock` and shut on a long PRBS through the same channel is the signature of ISI
-rather than loss — a free diagnostic worth building into any set.
+An eye that stays open on `clock` but shuts on a long PRBS through the same channel points to ISI;
+loss alone would close both. It is worth including as a diagnostic in any dataset.
 
 **The generator polynomial is not a free parameter.** Several maximal-length polynomials exist at a
 given order, and each gives a valid pseudo-random sequence with the right level statistics — that no
-protocol analyser will ever pattern-lock to. A capture meant to be *analysable* has to carry the
+protocol analyser will pattern-lock to. A capture meant to be *analysable* has to carry the
 standard's polynomial. `physics.PRBS_TAPS` holds only polynomials that are stated somewhere
 (order 13 per IEEE 802.3 Clause 120.5.11.2.1; orders 11 and 23 per ITU-T O.152 and O.151), every one
 of them asserted primitive by `wfmsynth.validate`, and declines any order whose standard polynomial
-is not stated rather than guessing a tap set. Add an order by citing its polynomial, not by picking
-one that works.
+is not stated rather than guessing a tap set. Add an order by citing its polynomial. Do not add one
+just because it happens to work.
 
 ---
 
@@ -306,7 +310,7 @@ this is the shape.
 | `clock` 1010 pattern; a pattern-name error that says *which* carrier a name belongs to | `physics.clock_pattern`, `physics._pattern_error` |
 | NRZ, PAM4, PAM-N for any N; analog and arbitrary carriers | `physics.nrz`, `pam4`, `pam` |
 | Open-drain line: the rise charges through the pull-up, so fall and rise are not mirrors | `bus`, `open_drain` op |
-| Linear (non-circular) convolution; a rendered-and-discarded lead-in whose guard is **measured** from the chain's own impulse response | `compose`, `physics.response_extent` |
+| Linear (non-circular) convolution; a rendered-and-discarded lead-in whose guard is measured from the chain's own impulse response | `compose`, `physics.response_extent` |
 | Two-rate acquisition, interleaved ADC, ENOB as a noise level, stored integer codes | `acquire`, `instrument`, `digitize`/`store` |
 | Role-tagged RNG streams; recipe round-trip; `sha256()` content address | `streams`, `compose` |
 
@@ -314,8 +318,8 @@ this is the shape.
 
 | item | status |
 |---|---|
-| **Line coding is helpers, not ops** (`coding.dc_balanced`, `scramble_64b66b`, `running_disparity`, `max_run`). Symbols are PRBS or uniform over the levels. | Levels and eye structure are right; **symbol statistics are not**, and run lengths are where an engineer spots it first. The code cannot appear in a recipe until it is an op. |
-| Table-level locators in the parameter extracts | 201 corrections returned, not all applied. Cite the extract, not its table reference. |
+| **Line coding has no op.** It runs through helper functions (`coding.dc_balanced`, `scramble_64b66b`, `running_disparity`, `max_run`). Symbols are PRBS or uniform over the levels. | Levels and eye structure are correct. Symbol statistics are not modelled, and run lengths are where an engineer will spot it first. The code cannot appear in a recipe until it is an op. |
+| Table-level locators in the parameter extracts | 201 corrections returned, not all applied. Cite the extract that carries a number. Do not cite its table reference. |
 | Extracts the adversarial pass did not reach (3 of 17 at the time of writing) | Treat as one unchecked reading. |
 | Per-bus `fs`-from-edge values | The mechanism exists; the per-bus numbers are pending. |
 | Slow-bus jitter figures, transmitter preset claims, one receiver-mask row, dual-symbol-rate frames | Corrections identified, application pending — the caller holds the per-bus list. |
@@ -329,17 +333,17 @@ contract those tests hold is the part worth knowing, because it decides what a d
 | decision | consequence |
 |---|---|
 | **Mechanisms in the library, standards knowledge in the caller.** A PRBS is a polynomial, a seed and a length — physics. *Which* pattern a standard names for a given lane rate changes with a document's revision and is the caller's to state, through a registration call. | The library never carries a fact that a revision can invalidate. |
-| **A recipe records the pattern NAME *and* its resolved parameters.** Name alone is unreplayable without the registry; polynomial alone is unreadable. | A consumer with no registry entry still renders the record — through the generic mechanism the entry names, or through embedded symbols-as-data, which needs no code at all. |
-| **A caller-supplied generator that is missing or has changed is NAMED, not silently different** (`needs pattern 'x' @ <hash>`). | The failure mode is a refusal, not different samples under the same name. |
-| **The general arbitrary-polynomial engine must reproduce `physics.prbs` bit-for-bit** on every order in `PRBS_TAPS`, and the block-repeat generator must reproduce `clock_pattern`. | §3.5 again: the arbitrary-polynomial claim is worth exactly as much as the known-answer case underneath it. |
-| **Levels are stated exactly, not constructed.** `np.linspace(-1, 1, 4)` puts the inner PAM4 levels 5.6e-17 off the thirds. | The level map is pinned in both directions — the explicit array agrees to 1 ulp, and linspace's disagreement is measured rather than assumed. |
-| **Gray coding is a statement about errors, not a lookup table**; precoding changes the error structure and nothing else. | Tested by counting bit errors through an adjacent-level slice (exactly one) and through a precoded symbol error (exactly two), each against the unbounded alternative as the control. |
+| **A recipe records the pattern name and its resolved parameters.** Name alone is unreplayable without the registry; polynomial alone is unreadable. | A consumer with no registry entry still renders the record — through the generic mechanism the entry names, or through embedded symbols-as-data, which needs no code at all. |
+| **A caller-supplied generator that is missing or has changed produces a named error** (`needs pattern 'x' @ <hash>`). | The failure mode is a refusal. It does not silently produce different samples under the same name. |
+| **The general arbitrary-polynomial engine must reproduce `physics.prbs` bit-for-bit** on every order in `PRBS_TAPS`, and the block-repeat generator must reproduce `clock_pattern`. | This is the same known-answer check described in §3.5, applied to the arbitrary-polynomial engine. |
+| **Levels are stated exactly, as literal values.** `np.linspace(-1, 1, 4)` puts the inner PAM4 levels 5.6e-17 off the thirds. | The level map is pinned in both directions — the explicit array agrees to 1 ulp, and linspace's disagreement was measured directly. |
+| **Gray coding is defined by its effect on bit errors.** It is not implemented as a lookup table; precoding changes the error structure and nothing else. | Tested by counting bit errors through an adjacent-level slice (exactly one) and through a precoded symbol error (exactly two), each against the unbounded alternative as the control. |
 
 ### Remains
 
 - [ ] A **`line_code` op** (8b/10b, 64b/66b + its self-synchronous scrambler, 128b/13xb framing,
       PAM4 Gray mapping / precoding) that lands in the recipe, with running-disparity and max-run
-      assertions and a knob-sweep row. This is what makes the dataset's symbol statistics real.
+      assertions and a knob-sweep row. This closes the symbol-statistics gap described above.
 - [ ] Standard **compliance/stress patterns** as named, pattern-lockable sequences alongside the
       PRBS family, so a folded measurement is possible on buses whose compliance sequence is not
       (the registry above is the mechanism; the per-standard entries are the caller's to state).
@@ -347,7 +351,7 @@ contract those tests hold is the part worth knowing, because it decides what a d
       currently inherit another bus's channel shape.
 - [ ] Ops for the failure modes that have none — e.g. data-to-strobe skew and mistrain, on-die
       termination switching, bus turnaround, reference-voltage drift. Records for such a bus are
-      structurally incomplete, not merely imprecise, and should say so.
+      structurally incomplete. This is more than imprecision, and the record should say so.
 - [ ] Unipolar open-drain levels (the fall/rise asymmetry is modelled and measured; the absolute DC
       level is not).
 - [ ] Apply the locator corrections, then finish the adversarial pass on the extracts it did not reach.
@@ -362,7 +366,7 @@ the fields are *visible*, never that they are all cited.
 
 ```python
 # --- SAFE -------------------------------------------------------------------
-# Per-record columns keyed BY RECORD ID (§3.4), never by row position.
+# Per-record columns keyed by record id (§3.4), never by row position.
 #   fidelity[rec_id]   -> "cited" | "provisional"
 #   provenance[rec_id] -> "tr_ps=CITED,rj_ps=JUDGEMENT,ssc_ppm=NOT_SPECIFIED,..."
 
@@ -378,19 +382,19 @@ def markers(provenance_cell):
     return out
 
 def usable(rec_id, provenance, required_fields):
-    """True only if EVERY field this experiment depends on is backed by evidence.
+    """True only if every field this experiment depends on is backed by evidence.
 
-    A missing field is unusable, not usable: absence of a marker is not a marker. An
-    unrecognised marker is unusable too, so adding a new one fails loudly instead of
-    quietly widening the filter.
+    A missing field is unusable: absence of a marker is not a marker. An unrecognised
+    marker is unusable too, so adding a new one fails loudly instead of quietly widening
+    the filter.
     """
     m = markers(provenance[rec_id])
     return all(m.get(f) in BACKED for f in required_fields)
 
-fields = ("tr_ps", "rj_ps", "loss_db")               # what YOUR label depends on
+fields = ("tr_ps", "rj_ps", "loss_db")               # what your label depends on
 train = [r for r in record_ids if usable(r, provenance, fields)]
 
-# Report what you dropped and why -- a filter with no census is a filter nobody can check.
+# Report what you dropped and why, so the filter can be checked.
 from collections import Counter
 dropped = Counter(markers(provenance[r]).get(f, "MISSING")
                   for r in record_ids for f in fields
@@ -398,12 +402,12 @@ dropped = Counter(markers(provenance[r]).get(f, "MISSING")
 print(len(train), "of", len(record_ids), "records;", "dropped by marker:", dict(dropped))
 
 
-# --- UNSAFE, and this is what it looks like ---------------------------------
+# --- UNSAFE ------------------------------------------------------------------
 train = [r for r in record_ids if fidelity[r] == "cited"]     # (1)
 prov  = provenance_column[i]                                  # (2)
 if "CITED" in prov: ...                                       # (3)
-# (1) record-level: says the fields are VISIBLE, not that they are cited. A record whose
-#     rj_ps is a JUDGEMENT and whose tr_ps is CITED passes this.
+# (1) record-level: the flag says only that the fields are visible; whether they are cited
+#     is separate. A record whose rj_ps is a JUDGEMENT and whose tr_ps is CITED passes this.
 # (2) positional: the column is aligned to record id. One filter or reshard upstream and
 #     every record now wears another record's provenance.
 # (3) substring: "CITED" is inside "NOT_CITED"; a cited neighbour field satisfies it; and a
@@ -411,8 +415,8 @@ if "CITED" in prov: ...                                       # (3)
 ```
 
 A per-field marker also tells you what a *label* is worth. A label derived from a `JUDGEMENT`
-parameter is a judgement, whatever the digest says about the samples — the digest proves the record
-is the one the recipe describes, not that the recipe describes the bus.
+parameter is a judgement, whatever the digest says about the samples. The digest proves the record
+matches the recipe. It does not prove the recipe matches the bus.
 
 ---
 
