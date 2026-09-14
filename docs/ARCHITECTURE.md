@@ -36,10 +36,10 @@ The alternative design is a generator driven by a configuration file: a schema o
 each a bundle of settings. It is easier to write, and easier to use for the cases its author
 anticipated.
 
-A chain also covers combinations nobody enumerated in advance. Three cases from this dataset:
+A chain also covers combinations nobody enumerated in advance. Three that come up in practice:
 a duty-cycle error on a bus whose specification never mentions one; a probe's loading changing the
 rise time the bus is graded on; an asynchronous sampler interacting with spread-spectrum clocking.
-Each was an existing pair of ops applied together, and each needed no new library code.
+Each is an existing pair of ops applied together, and none needs new library code.
 
 This changes who does the work. Under a configuration schema, a new case is a change request to
 whoever owns the schema, and throughput is limited by that team's capacity. Under a chain, a new case
@@ -56,8 +56,9 @@ Every op is data, so a chain serialises.
 
 Consequences worth knowing about:
 
-- A dataset is distributable as a document. 95 KB of recipe expands to roughly half a gigabyte of
-  waveforms. The recipe is the thing to review, diff, email and keep in version control.
+- A dataset is distributable as a document. Tens of kilobytes of recipe expand to hundreds of
+  megabytes of waveforms, and the ratio grows with record length. The recipe is the thing to
+  review, diff, email and keep in version control.
 - Reproducibility is checkable. Digests are taken over array values, so a rebuilt record either
   matches or it does not. A codec or library upgrade that changed no number leaves the digests alone.
 - Provenance has somewhere to live. Each op records the stage it belongs to and the effect it

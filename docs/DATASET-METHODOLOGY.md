@@ -1,9 +1,9 @@
 # Building a defensible synthetic waveform dataset
 
-A handover for a team picking this work up with no context and no tools but this library. It
-covers the mental model, the procedure used to produce parameters that hold up under scrutiny, the
-traps that cost real time, the arithmetic that sizes a record, the honest state of the work, and
-how a consumer filters what it must not trust.
+For a team building one of these datasets with no tools but this library. It covers the mental
+model, a procedure for producing parameters that hold up under scrutiny, the traps that cost real
+time, the arithmetic that sizes a record, the state of the library, and how a consumer filters what
+it must not trust.
 
 Two conventions apply to everything below, including anything you add to this file:
 
@@ -124,8 +124,9 @@ against the standard, instead of taking it on trust.
 5. **Apply the corrections, then re-derive the recipes**, and treat any extract the adversarial
    pass did not reach as one researcher's unchecked reading, however well sourced it looks.
 
-**What a correction pass returns.** Over a 17-document effort it produced 201 corrections and found
-no fabricated citation. The distribution shows where to focus review:
+**What a correction pass returns.** In one pass over 17 extracted documents it produced 201
+corrections and found no fabricated citation. The distribution is worth knowing because it says
+where to spend review effort:
 
 | corrected | count | what it was |
 |---|---|---|
@@ -136,8 +137,9 @@ no fabricated citation. The distribution shows where to focus review:
 | plane | 16 | the right number at the wrong test point |
 | revision | 15 | the number from a neighbouring revision |
 
-The values were usable; the table-level locators were not. Until a correction pass lands, cite a
-number to the extract that carries it. Do not cite onward to its table reference.
+The values were usable and the table-level locators were not. Before a correction pass has run
+over an extract, cite a number to the extract that carries it, and leave its table reference
+unquoted until it has been checked.
 
 **The revision trap** is why every row names the revision of the source read: one jitter limit at
 16 GT/s is 12.5 ps in one revision of the base specification and 11.8 ps in the next, and a device
@@ -226,8 +228,8 @@ the answer.
 
 ### 3.5 Measuring with the wrong instrument
 
-Several errors traced during this work were caused by the measuring instrument. The physics was
-not at fault.
+Several of the errors described in this document were caused by the measuring instrument rather
+than by the physics.
 
 | measurement | why it lies | use instead |
 |---|---|---|
@@ -296,10 +298,11 @@ just because it happens to work.
 
 ---
 
-## 5. State of the work
+## 5. State of the library
 
-A checklist to pick items off. Per-record specifics live with the dataset's own provenance columns;
-this is the shape.
+What the library carries, what it carries only partly, and what it does not carry yet. A dataset's
+own state belongs with that dataset, in its provenance columns and its own documentation; this
+section is about the tools.
 
 ### Done, in the library
 
@@ -319,16 +322,14 @@ this is the shape.
 | item | status |
 |---|---|
 | **Line coding has no op.** It runs through helper functions (`coding.dc_balanced`, `scramble_64b66b`, `running_disparity`, `max_run`). Symbols are PRBS or uniform over the levels. | Levels and eye structure are correct. Symbol statistics are not modelled, and run lengths are where an engineer will spot it first. The code cannot appear in a recipe until it is an op. |
-| Table-level locators in the parameter extracts | 201 corrections returned, not all applied. Cite the extract that carries a number. Do not cite its table reference. |
-| Extracts the adversarial pass did not reach (3 of 17 at the time of writing) | Treat as one unchecked reading. |
-| Per-bus `fs`-from-edge values | The mechanism exists; the per-bus numbers are pending. |
-| Slow-bus jitter figures, transmitter preset claims, one receiver-mask row, dual-symbol-rate frames | Corrections identified, application pending — the caller holds the per-bus list. |
+| Table-level locators in a parameter extract | A locator naming a table is weaker than it looks: an extract can carry a correct number under a wrong table reference. Cite the extract that carries the number, and verify the table reference separately before quoting it. |
+| An extract no adversarial pass has reached | One unchecked reading. Mark it as such and keep the count of unreached extracts with the dataset. |
+| Per-bus `fs`-from-edge values | The library supplies the sizing arithmetic (§4). The per-bus numbers are the caller's to state and to mark. |
 
-### In flight — the pattern and level-coding layer
+### The pattern and level-coding contract
 
-Being added as this is written, and pinned by `tests/test_patterns.py`,
-`tests/test_level_coding.py` and `tests/test_recipe_replay.py` before the modules exist. The
-contract those tests hold is the part worth knowing, because it decides what a dataset can claim:
+Pinned by `tests/test_patterns.py`, `tests/test_level_coding.py` and `tests/test_recipe_replay.py`.
+This contract is the part worth knowing, because it decides what a dataset built on it can claim:
 
 | decision | consequence |
 |---|---|
@@ -354,7 +355,6 @@ contract those tests hold is the part worth knowing, because it decides what a d
       structurally incomplete. This is more than imprecision, and the record should say so.
 - [ ] Unipolar open-drain levels (the fall/rise asymmetry is modelled and measured; the absolute DC
       level is not).
-- [ ] Apply the locator corrections, then finish the adversarial pass on the extracts it did not reach.
 
 ---
 
