@@ -27,7 +27,7 @@ def _grid():
 def _input(seed=3):
     g = _grid()
     sym = np.random.default_rng(seed).choice([-1.0, 1.0], N_UI)
-    return (Signal(seed=1, grid=g).symbols(sym.tolist(), kind="nrz", tr_frac=0.35, causal=True)
+    return (Signal(seed=1, grid=g).symbols(sym.tolist(), tr_frac=0.35, causal=True)
             .lossy(causal=True, loss_db=10.0, loss_at_ghz=8.0)
             .digitize(noise_rms=0.01)).waveform(), g
 

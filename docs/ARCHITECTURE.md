@@ -50,7 +50,7 @@ is a line the consumer writes.
 Every op is data, so a chain serialises.
 
 ```json
-{"op": "lossy", "args": {"loss_db": 12.0, "loss_at_ghz": 8.0},
+{"op": "lossy", "loss_db": 12.0, "loss_at_ghz": 8.0,
  "_prov": {"stage": "channel", "node": "TP2", "impairment": "loss"}}
 ```
 

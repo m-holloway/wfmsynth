@@ -148,7 +148,7 @@ def _electrical(key, seed=3):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return (Signal(seed=1, grid=g)
-                .symbols(sym.tolist(), kind="nrz", tr_frac=0.35, causal=True)
+                .symbols(sym.tolist(), tr_frac=0.35, causal=True)
                 .lossy(causal=True, loss_db=10.0, loss_at_ghz=8.0)
                 .digitize(noise_rms=0.01)).waveform()
 
@@ -766,7 +766,7 @@ def test_an_upsampling_acquisition_reconstructs_the_record_it_was_given():
     sym = np.random.default_rng(3).choice([-1.0, 1.0], n_ui)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        x = (Signal(seed=1, grid=g).symbols(sym.tolist(), kind="nrz", tr_frac=0.35, causal=True)
+        x = (Signal(seed=1, grid=g).symbols(sym.tolist(), tr_frac=0.35, causal=True)
              .lossy(causal=True, loss_db=10.0, loss_at_ghz=8.0)).waveform()
     y = _run("acquire", dict(profile=dict(sample_rate_hz=4 * g.fs, record_length=4 * g.n),
                              tap="digitized"), x, g)

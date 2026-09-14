@@ -40,6 +40,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from . import physics as P
+from . import opkeys as OPKEYS
 from . import instrument as INST
 from .grid import Grid
 from .streams import Streams
@@ -1195,6 +1196,17 @@ class Signal:
     lead_out: object = None
 
     def _add(self, op, **params):
+        """Append one op, rejecting a parameter this op does not read.
+
+        An op takes its parameters as a dict, so an invented or misspelled name would otherwise
+        be accepted and do nothing: the record renders, the digest is stable, and it is not the
+        record that was asked for.
+
+        A recipe op is FLAT -- `{"op": ..., <parameters>, "_prov": {...}}` -- so the namespace is
+        shared and the rule is: `op` is reserved, anything beginning with an underscore is
+        annotation, and everything else is a parameter this op has to read.
+        """
+        OPKEYS.check(op, params)
         self.ops.append({"op": op, **params}); return self
 
     def annotate(self, **prov):
@@ -1868,7 +1880,10 @@ class Signal:
         """Reconstruct a Signal from a recipe; `.waveform()` reproduces bit-for-bit."""
         grid = Grid(**r["grid"]) if r.get("grid") else None
         s = cls(seed=r["seed"], grid=grid, lead_in=r.get("lead_in"), lead_out=r.get("lead_out"))
-        s.ops = [dict(o) for o in r["ops"]]
+        ops = [dict(o) for o in r["ops"]]
+        for o in ops:                       # the same gate the builders go through: a recipe
+            OPKEYS.check(o.get("op"), o)    # carrying a dead parameter says what it is not
+        s.ops = ops
         return s
 
 

@@ -185,7 +185,7 @@ def edge_lead_ps(causal, n=1 << 12, thresh=0.01):
     n_ui = n // SPB
     k = n_ui // 2
     sym = [-1.0] * k + [1.0] * (n_ui - k)
-    y = Signal(seed=1, grid=g).symbols(sym, kind="nrz", tr_frac=0.25, causal=causal).waveform()
+    y = Signal(seed=1, grid=g).symbols(sym, tr_frac=0.25, causal=causal).waveform()
     k0 = k * SPB
     base = y[:SPB * 4].mean()
     swing = y[-SPB * 4:].mean() - base
@@ -586,7 +586,7 @@ def test_a_record_level_causality_gate_would_false_positive_on_a_legitimate_reco
     k0 = k * SPB
 
     def pre_edge(bw_hz=None):
-        s = (Signal(seed=1, grid=g).symbols(sym, kind="nrz", tr_frac=0.25, causal=True)
+        s = (Signal(seed=1, grid=g).symbols(sym, tr_frac=0.25, causal=True)
              .lossy(loss_db=8.0, loss_at_ghz=8.0, causal=True))
         if bw_hz is not None:
             s = s.scope(bw_hz=bw_hz, kind="brickwall")
