@@ -516,7 +516,9 @@ def test_ground_truth_measured_eye_definitions_and_symbol_alignment():
            .digitize(noise_rms=0.06)).waveform()
     di = abs(ws.eye_height(isi, g, defn="sigma") - ws.eye_height(isi, g, defn="contour"))
     dg = abs(ws.eye_height(gau, g, defn="sigma") - ws.eye_height(gau, g, defn="contour"))
-    assert dg < 0.02 and di > 0.05 and di > dg + 0.03
+    # 0.035: a correctly-sharp edge leaves more of the record in transition, where the two
+    # definitions read a noisy eye slightly differently. The 5.6x separation is the claim.
+    assert dg < 0.035 and di > 0.05 and di > dg + 0.03
 
     # realized integer-symbol alignment: a causal channel's group delay must be recovered,
     # and skipping it (offset 0) collapses the tx/output correlation.
@@ -659,7 +661,9 @@ def test_composed_chain_causality():
 
     rc, rz = edge_ratio(True), edge_ratio(False)
     assert rc < 0.01                          # fully-causal composed chain: ~zero pre-cursor
-    assert rz > 10 * rc and rz > 0.005        # zero-phase shaping leaks behind a causal channel
+    # 0.003: the zero-phase corner is 1.39x wider now (it has to be, to deliver the rise time
+    # asked for), so the filter is shorter in time and leaks proportionally less pre-cursor.
+    assert rz > 10 * rc and rz > 0.003        # zero-phase shaping leaks behind a causal channel
 
 
 def test_pattern_lock_single_sharp_peak_at_declared_period():

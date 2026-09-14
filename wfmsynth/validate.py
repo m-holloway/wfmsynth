@@ -316,8 +316,12 @@ def _lossy_eye(pattern, seed):
 for _sd in (1, 3, 11):
     _e7, _e31, _eck = (_lossy_eye("prbs7", _sd), _lossy_eye("prbs31", _sd),
                        _lossy_eye("clock", _sd))
+    # 1.05, not 1.10. The margin shrank when the edge shaper started delivering the rise time
+    # it is asked for: a sharper edge carries less ISI, so the eye depends less on which pattern
+    # drove it. The direction of the claim is what matters and it is unchanged -- a short pattern
+    # overstates the eye.
     check(f"seed {_sd}: PRBS7 eye is OPTIMISTIC vs PRBS31 through the same 14in channel",
-          _e7 > _e31 * 1.10,
+          _e7 > _e31 * 1.05,
           f"prbs7={_e7:.4f} prbs31={_e31:.4f} ({100 * (_e7 / _e31 - 1):.0f}% overstated)")
     check(f"seed {_sd}: the clock pattern is the ISI-free contrast (most open of the three)",
           _eck > _e7 > 0, f"clock={_eck:.4f} prbs7={_e7:.4f} prbs31={_e31:.4f}")
@@ -681,8 +685,11 @@ _gau = (Signal(seed=1, grid=_g8).carrier("pam4", n_ui=_n8, pattern="prbs13q", ca
         .digitize(noise_rms=0.06)).waveform()
 _di = abs(_eh(_isi, _g8, defn="sigma") - _eh(_isi, _g8, defn="contour"))
 _dg = abs(_eh(_gau, _g8, defn="sigma") - _eh(_gau, _g8, defn="contour"))
+# The separation is the claim: the two definitions disagree 5.6x more under ISI than under
+# noise. The Gaussian bound is 0.035 rather than 0.02 because a correctly-sharp edge leaves more
+# of the record in transition, where the two definitions read a noisy eye slightly differently.
 check("named eye definitions agree under Gaussian noise, diverge under deterministic ISI",
-      _dg < 0.02 and _di > 0.05 and _di > _dg + 0.03, f"|diff| ISI={_di:.3f} Gauss={_dg:.3f}")
+      _dg < 0.035 and _di > 0.05 and _di > _dg + 0.03, f"|diff| ISI={_di:.3f} Gauss={_dg:.3f}")
 # realized integer-symbol alignment: a causal channel's group delay must be recovered
 _sig8 = (Signal(seed=1, grid=_g8).carrier("pam4", n_ui=_n8, pattern="prbs13q", causal=True)
          .lossy(loss_db=3.0, loss_at_ghz=25.0, causal=True)
@@ -806,8 +813,11 @@ def _edge_ratio(shaped_causal):
 _rc18, _rz18 = _edge_ratio(True), _edge_ratio(False)
 check("a fully-causal composed chain (causal shaping + causal channel) has ~zero pre-cursor",
       _rc18 < 0.01, f"pre/post energy @ edge = {_rc18:.4f}")
+# 0.003, not 0.005: the zero-phase path's corner is now 1.39x wider (it has to be, to deliver the
+# rise time asked for), so the filter is shorter in time and leaks proportionally less. The hazard
+# is unchanged in kind -- the ratio to the causal path is still enormous.
 check("the hazard is real: zero-phase edge shaping leaks pre-cursor behind a causal channel",
-      _rz18 > 10 * _rc18 and _rz18 > 0.005, f"zero-phase pre/post = {_rz18:.4f} vs causal {_rc18:.4f}")
+      _rz18 > 10 * _rc18 and _rz18 > 0.003, f"zero-phase pre/post = {_rz18:.4f} vs causal {_rc18:.4f}")
 
 print("== pattern lock-ability: a standard pattern autocorrelates to a single sharp peak ==")
 from wfmsynth.measure import pattern_period as _pp
@@ -1548,8 +1558,17 @@ _enm = _pe(len(_xev), kind="nonmonotonic", on="edges", grid=_gev, x=_xev, which=
            indices=[3], severity=0.9)
 _ynm, _, _enm = _ae(_xev, _enm, grid=_gev)
 _n0, _n1 = _enm.events[0].span(len(_xev))
-check("nonmonotonic edge increases slope reversals in its window",
-      _srev(_ynm[_n0:_n1]) > _srev(_xev[_n0:_n1]))
+# BACKWARD TRAVEL, not a count of slope reversals. A causal Bessel edge rings, so it already has
+# reversals of its own and the count stopped discriminating once the edge was sharp enough for its
+# window to be a handful of samples. Backward travel is what "nonmonotonic" actually asserts --
+# the edge moves away from where it is going -- and it separates by four orders of magnitude:
+# 1e-5 for the plain edge against 0.615 for the perturbed one.
+def _backward(_v):
+    _d = np.diff(np.asarray(_v, float))
+    return float(-_d[_d < 0].sum())
+check("nonmonotonic edge travels backwards inside its window",
+      _backward(_ynm[_n0:_n1]) > 100 * _backward(_xev[_n0:_n1]) + 0.05,
+      f"backward travel {_backward(_ynm[_n0:_n1]):.5f} vs plain {_backward(_xev[_n0:_n1]):.5f}")
 
 from wfmsynth import optical as _OPT
 

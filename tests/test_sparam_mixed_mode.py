@@ -361,7 +361,10 @@ def test_the_band_edge_refusal_names_the_power_it_would_have_deleted(tmp_path):
     fs, spb = 256e9, 16
     x = P.nrz(n_ui=2048, n=2048 * spb, seed=3, tr_frac=0.15)
     lost_lo, lost_hi = SP._band_energy(x, 1 / fs, f.min(), f.max())
-    assert 0.015 < lost_hi < 0.03, f"expected ~1.9 % above 15 GHz, measured {100*lost_hi:.3g} %"
+    # 5.4 %. A 0.15 UI edge at 16 GBd is 9.4 ps, whose knee (0.3497/tr) is 37 GHz, so a 15 GHz
+    # file cannot represent most of it. This read 1.9 % while the edge shaper delivered an edge
+    # 2.1x wider than asked for; see physics.EDGE_CORNER_CAUSAL.
+    assert 0.04 < lost_hi < 0.07, f"expected ~5.4 % above 15 GHz, measured {100*lost_hi:.3g} %"
 
     with pytest.raises(ValueError) as ei:
         SP.sparam_channel(x, f, s21, dt=1 / fs)                     # band='refuse' by default
@@ -373,9 +376,11 @@ def test_the_band_edge_refusal_names_the_power_it_would_have_deleted(tmp_path):
         y_zero = SP.sparam_channel(x, f, s21, dt=1 / fs, band="zero")
     # and so is the explicit extrapolation
     y_hold = SP.sparam_channel(x, f, s21, dt=1 / fs, band="hold")
-    # opting in to the loss by raising the tolerance is allowed, and warns
+    # opting in to the loss by raising the tolerance is allowed, and warns. The tolerance has to
+    # sit above the 5.4 % this record actually loses, or it refuses instead -- which is the point
+    # of the knob.
     with pytest.warns(RuntimeWarning):
-        y_tol = SP.sparam_channel(x, f, s21, dt=1 / fs, band_tol=0.05)
+        y_tol = SP.sparam_channel(x, f, s21, dt=1 / fs, band_tol=0.08)
     assert np.allclose(y_zero, y_tol)
     d = float(np.max(np.abs(y_hold - y_zero))) / float(np.std(y_zero))
     assert d > 0.02, f"'hold' and 'zero' differ by only {d:.3g} of the output rms"
@@ -385,11 +390,19 @@ def test_the_band_edge_refusal_names_the_power_it_would_have_deleted(tmp_path):
 
 
 def test_a_record_that_fits_inside_the_file_is_not_refused(tmp_path):
-    """The refusal has to be proportionate or it will be turned off. A 0.35 UI rise time puts
-    0.027 % above 15 GHz: warned, not refused. And a record whose Nyquist is inside the file's
-    band is neither."""
+    """The refusal has to be proportionate or it will be turned off. A 0.70 UI rise time puts
+    0.033 % above 15 GHz: warned, not refused. And a record whose Nyquist is inside the file's
+    band is neither.
+
+    0.70 UI, not 0.35. At 16 GBd that is 43.8 ps, whose knee is 8.0 GHz, comfortably inside a
+    15 GHz file. 0.35 UI is 21.9 ps with a 16 GHz knee and is now correctly REFUSED by such a
+    file -- it used to pass this test only because the edge shaper delivered 2.1x the rise time
+    asked for, i.e. it was really building the 0.70 UI edge this test now asks for. The old
+    measurement at 0.35 UI was 0.027 %; the new one at 0.70 UI is 0.033 %, which is the same
+    edge.
+    """
     f, s21 = _fifteen_ghz_file(tmp_path)
-    x = P.nrz(n_ui=2048, n=2048 * 16, seed=3, tr_frac=0.35)
+    x = P.nrz(n_ui=2048, n=2048 * 16, seed=3, tr_frac=0.70)
     _, lost_hi = SP._band_energy(x, 1 / 256e9, f.min(), f.max())
     assert lost_hi < 1e-3, f"expected < 0.1 % above 15 GHz, measured {100*lost_hi:.3g} %"
     with pytest.warns(RuntimeWarning, match="within band_tol"):

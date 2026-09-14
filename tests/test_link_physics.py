@@ -320,7 +320,9 @@ def test_the_agc_is_what_makes_a_stated_full_scale_downstream_mean_anything():
         ref = decisions(1.0, with_agc)
         for drive in (10.0, 0.1):
             bad = float(np.mean(decisions(drive, with_agc) != ref))
-            want = {(False, 10.0): 0.865657, (False, 0.1): 0.325354}.get((with_agc, drive), 0.0)
+            # re-measured after the edge shaper was corrected; the shape of the claim is
+            # unchanged -- without AGC most decisions move, with it none do
+            want = {(False, 10.0): 0.857841, (False, 0.1): 0.338544}.get((with_agc, drive), 0.0)
             assert bad == pytest.approx(want, abs=5e-4), (
                 f"{'AGC' if with_agc else 'no-AGC'} chain, drive {drive}x: {bad:.4%} "
                 f"disagreement, expected {want:.4%}")
@@ -428,16 +430,44 @@ DCD_CASES = [0.125, 1.0, 4.0, -2.5]
 @pytest.mark.parametrize("dcd_ps", DCD_CASES)
 def test_a_stated_dcd_in_ps_is_the_high_minus_low_ui_width(dcd_ps):
     """THE DEFINITION, ASSERTED. DCD is ``mean(high pulse width) - mean(low pulse width)``, and
-    that is what `dcd(ps=)` realises — MEASURED +0.12506918 / +1.00048322 / +4.00121205 /
-    -2.50102544 ps for the four requests, i.e. within 0.055 % and sub-sample (1 ps is 0.256
-    samples on this grid). Read off threshold crossings of the op's own output."""
+    that is what `dcd(ps=)` realises — MEASURED +0.125384 / +1.002991 / +4.007498 / -2.506490 ps
+    for the four requests. Read off threshold crossings of the op's own output.
+
+    The realisation carries a +0.3 % scale error, which is 3 fs on a 1 ps request and two orders
+    below anything an instrument resolves. Its origin is the mechanism rather than the
+    interpolator: the displacement is ``sign(gradient) * dcd/2``, which is zero on the flats and
+    ±dcd/2 on the edges, so the shift field STEPS at each edge boundary and resampling across a
+    discontinuous shift field is not a pure delay. It read +0.055 % while the edge shaper
+    delivered an edge twice as wide as asked for, which made that step a smaller fraction of the
+    transition. A mechanism that shifted each half-period as a whole, putting the step where the
+    waveform is flat, would not have the error at all.
+
+    `test_the_dcd_scale_error_is_linear_in_the_request` is what keeps this honest: a bounded
+    scale error is tolerable, a mechanism that has stopped being proportional is not."""
     x, g = _clock(1024)
     hi0, lo0 = _ui_widths(x)
     assert abs(hi0 - lo0) < 2e-17, f"the reference pattern is not symmetric: {hi0 - lo0:.3e} s"
     y = _EXEC["dcd"](x, {"op": "dcd", "ps": dcd_ps}, Streams(0), g, 0)
     hi, lo = _ui_widths(y)
     got_ps = (hi - lo) * 1e12
-    assert got_ps == pytest.approx(dcd_ps, rel=2e-3), f"asked {dcd_ps} ps, realised {got_ps:.8f}"
+    assert got_ps == pytest.approx(dcd_ps, rel=5e-3), f"asked {dcd_ps} ps, realised {got_ps:.8f}"
+
+
+@pytest.mark.parametrize("scale", [2, 4, 8, 32])
+def test_the_dcd_scale_error_is_linear_in_the_request(scale):
+    """The realisation is 0.3 % high. That is tolerable only while it stays a SCALE error: a
+    mechanism that has started to saturate, or to depend on where the edge sits between samples,
+    shows up as a ratio that moves with the request. Pinned over a 32x range."""
+    x, g = _clock(1024)
+    base = 0.125
+    out = {}
+    for ps in (base, base * scale):
+        y = _EXEC["dcd"](x, {"op": "dcd", "ps": ps}, Streams(0), g, 0)
+        hi, lo = _ui_widths(y)
+        out[ps] = (hi - lo) * 1e12 / ps          # realised / requested
+    assert out[base * scale] == pytest.approx(out[base], rel=2e-3), (
+        f"ratio moved from {out[base]:.6f} to {out[base*scale]:.6f} over {scale}x")
+    assert 1.0 < out[base] < 1.006, f"scale error {100*(out[base]-1):.3f} % is outside its bound"
 
 
 def test_dcd_is_stateable_as_a_fraction_of_a_ui_and_only_one_way_at_a_time():
@@ -454,18 +484,23 @@ def test_dcd_is_stateable_as_a_fraction_of_a_ui_and_only_one_way_at_a_time():
 
 
 def test_zero_dcd_is_the_interpolators_identity():
-    """Asking for no impairment must not quietly apply the resampler's error budget as one."""
+    """Asking for no impairment must not quietly apply the resampler's error budget as one.
+
+    EXACTLY identity, not merely close: the op returns the input untouched when the displacement
+    is all zero, so there is no error budget to apply."""
     x, g = _clock(1024)
     y = _EXEC["dcd"](x, {"op": "dcd", "ps": 0.0}, Streams(0), g, 0)
-    assert float(np.max(np.abs(y - x))) < 1e-9
+    assert float(np.max(np.abs(y - x))) == 0.0
     hi, lo = _ui_widths(y)
-    assert abs(hi - lo) * 1e12 == pytest.approx(9.93e-6, rel=0.01)   # the pattern's own
+    # the pattern's own asymmetry, an order of magnitude smaller than it was because the edge
+    # shaper now delivers the rise time it is asked for
+    assert abs(hi - lo) * 1e12 == pytest.approx(8.67e-7, rel=0.05)
 
 
 # ---------------------------------------------------------------- THE GATE OBSERVED FAILING
 # What `carrier(..., jitter=dict(dcd=<samples>))` — the only route to DCD before this — realises
 # for mean(high)-mean(low), MEASURED on a 1024 UI clock pattern at fs=256e9, baud=16e9.
-INDIRECT_DCD_PS = {0.256: -7.672703, 1.024: -7.672703, 2.0: -15.338243, 4.0: -30.656340}
+INDIRECT_DCD_PS = {0.256: -7.835911, 1.024: -7.835911, 2.0: -15.673202, 4.0: -31.331451}
 
 
 @pytest.mark.parametrize("dcd_samples", sorted(INDIRECT_DCD_PS))
@@ -474,7 +509,7 @@ def test_the_indirect_dcd_route_still_fails_this(dcd_samples):
     displaces rising edges by +dcd/2 and falling by -dcd/2, which makes the HIGH pulse SHORTER
     by 2*dcd — so the realised DCD is about -2x the request, wrong in sign and in scale. And
     `_place_symbols` places the displaced edges with `searchsorted` on the INTEGER sample grid,
-    so 0.256 samples (1 ps) and 1.024 samples (4 ps) produce the same -7.672703 ps: every
+    so 0.256 samples (1 ps) and 1.024 samples (4 ps) produce the same -7.835911 ps: every
     sub-sample DCD, which is all of them, is unreachable.
 
     That code is in `physics.py`, which this unit does not own — the numbers are logged in
@@ -537,8 +572,8 @@ def test_a_block_agc_ranges_to_the_delivered_window_and_not_to_the_guard():
                   .ac_couple(fc_hz=0.2e9))
         ext, plan = no_agc.rendered_lead()
         ext = np.asarray(ext, float)
-        assert float(np.max(np.abs(ext))) == pytest.approx(1.7817, abs=2e-3)
-        assert float(np.max(np.abs(ext[plan.window]))) == pytest.approx(1.2256, abs=2e-3)
+        assert float(np.max(np.abs(ext))) == pytest.approx(1.7784, abs=2e-3)
+        assert float(np.max(np.abs(ext[plan.window]))) == pytest.approx(1.2332, abs=2e-3)
 
         assert "agc" in C._LEAD_WINDOW_RANGED
         got = float(np.max(np.abs(chain().waveform())))
@@ -550,8 +585,8 @@ def test_a_block_agc_ranges_to_the_delivered_window_and_not_to_the_guard():
             bad = float(np.max(np.abs(chain().waveform())))
         finally:
             C._EXEC["agc"] = orig
-    assert bad == pytest.approx(0.6879, abs=2e-3), f"{bad:.6f}"
-    assert 20 * np.log10(bad) == pytest.approx(-3.249, abs=0.02)
+    assert bad == pytest.approx(0.6934, abs=2e-3), f"{bad:.6f}"
+    assert 20 * np.log10(bad) == pytest.approx(-3.180, abs=0.02)
     with pytest.raises(AssertionError):
         assert bad == pytest.approx(1.0, rel=1e-12)
 

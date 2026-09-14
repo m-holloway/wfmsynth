@@ -1110,8 +1110,27 @@ def resolve_rise_time(tr_frac, spb, floor_samples=TR_DEFAULT_FLOOR_SAMPLES,
     return floor, True
 
 
+# The corner the edge shaper designs to, as a multiple of 0.7/tr_samples, so that the DELIVERED
+# 10-90 % rise time is the one asked for.
+#
+# scipy's `bessel` defaults to `norm='phase'`, whose realised -3 dB corner sits at about 0.66x the
+# frequency requested. `instrument.scope_bandwidth` was already fixed for this; the edge shaper was
+# not, and a requested rise time came back 1.55x too slow on the causal path and 2.10x on the
+# zero-phase one, at every grid density.
+#
+# The zero-phase path runs the filter TWICE (`sosfiltfilt`) and needs a wider corner for the same
+# rise time. Matching the pair's -3 dB point instead is 4.5 % wrong, because two passes are a
+# different filter shape with a different bandwidth-rise-time product -- so the factor is solved
+# against the rise time itself. `tests/test_edge_rise_time.py` re-solves both and fails on drift.
+EDGE_CORNER_CAUSAL = 1.017046
+EDGE_CORNER_ZEROPHASE = 1.390084
+
+
 def _shape_edges(x, tr_samples, causal=False):
     """Band-limit a piecewise-constant symbol stream into finite-rise-time edges.
+
+    The delivered 10-90 % rise time is `tr_samples`, to a fraction of a percent once the grid
+    resolves the edge. See `EDGE_CORNER_CAUSAL`.
 
     causal=False keeps the original zero-phase (sosfiltfilt) shaping, which is
     symmetric and therefore adds pre-cursor as well as post-cursor content.
@@ -1125,7 +1144,8 @@ def _shape_edges(x, tr_samples, causal=False):
     plants a full-scale settling transient at the head of every record -- caught by
     the validation check for pre-edge disturbance.
     """
-    sos = signal.bessel(4, min(0.7 / tr_samples, 0.98), output="sos")
+    scale = EDGE_CORNER_CAUSAL if causal else EDGE_CORNER_ZEROPHASE
+    sos = signal.bessel(4, min(scale * 0.7 / tr_samples, 0.98), output="sos", norm="mag")
     if not causal:
         return signal.sosfiltfilt(sos, x)
     zi = signal.sosfilt_zi(sos) * x[0]
