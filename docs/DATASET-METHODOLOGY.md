@@ -170,10 +170,13 @@ made on it measures the sample grid. The same defect gave a modelled 1.6 MHz fro
 fall-time error on a slow bus.
 
 **Rule:** choose `fs` from the edge, `fs ≥ k / tr`, and derive samples-per-UI from that.
-`k ≥ 8` [JUDGEMENT — `k` counts sample intervals across the transition, so k = 4 spans it with
-five sample points, three of them interior, which is the fewest that constrains the edge's shape;
-8 keeps the interpolation error small. Falsified by synthesising one edge at k = 4, 8, 16 and
-comparing the measured `tr` to the requested one.]
+`k ≥ 8` [MEASURED — `k` counts sample intervals across the transition, so k = 4 spans it with
+five sample points, three of them interior, which is the fewest that constrains the edge's shape.
+Synthesising one edge and comparing the delivered 10–90 % rise time to the requested one gives
+1.2 % at k = 8, 0.8 % at k = 10 and 0.04 % at k = 32, and the error falls as the grid is refined,
+which is how you know it is the grid's and not the model's. The hard floor is separate and closer:
+under `tr_frac × samples_per_ui = 2` the kernel clamps to two samples and warns, and from there
+down every edge measurement is the grid's. `tests/test_edge_rise_time.py` holds these.]
 **Detection:** measure `tr` on the delivered record. If it comes back near `dt`, the grid is what
 you measured.
 

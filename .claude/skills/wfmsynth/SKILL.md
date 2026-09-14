@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link or an instrument, or reproduce a waveform from a recipe.
-version: 4
+version: 5
 ---
 
 # wfmsynth
@@ -68,9 +68,10 @@ was asked for.
 3. **`Signal(seed=)` does not seed the pattern phase.** `Signal(seed=7)` and `Signal(seed=99)`
    give bit-identical waveforms unless you pass `carrier(..., seed=)`. A thousand records from
    one template otherwise share one PRBS phase, and a model learns the position.
-4. **The rise time you ask for is not the one delivered.** Measured: `tr_frac` × UI comes back
-   ×1.5 with `causal=True` and ×2.0 on the default `causal=False`, at every grid density. Size
-   from the delivered edge and measure `tr` on the record rather than trusting the request.
+4. **Below about 8 samples across the transition you are measuring the grid, not the signal.**
+   The rise time asked for is now the one delivered, to a fraction of a percent — but under
+   `tr_frac × samples_per_ui = 2` the library clamps to two samples and warns, and past that
+   point every rise time, jitter and slew figure is the grid's. Measure `tr` on the record.
 5. **An op refuses a parameter it does not read**, naming the nearest key. Read the message. The
    habit it does not excuse: **assert the effect, never the call.**
 6. **`carrier(pattern=)` takes only built-in sequences.** A registered name renders through
@@ -104,7 +105,7 @@ populates, and a recipe records both the name and the resolved parameters.
 
 ## Staying current
 
-This file is `version: 4`. The copy in the repository is the source of truth, so an installed copy
+This file is `version: 5`. The copy in the repository is the source of truth, so an installed copy
 can fall behind it. Run this with the same `HOME` the install used:
 
 ```bash

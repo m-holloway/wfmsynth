@@ -93,18 +93,17 @@ The bandwidth a given edge needs, or the edge a bandwidth produces, is `BW × tr
 20 M-point step response. On the library's default 4th-order Bessel front end the 10–90 % figure
 holds to 0.15 % (0.3502) while 30–70 % is 0.149, about 10 % off.
 
-**The delivered edge is wider than the request.** Measured on one isolated step, 10–90 % by
-interpolation:
+**The delivered edge is the one requested**, to a fraction of a percent once the grid resolves it.
+Measured on one isolated step, 10–90 % by interpolated crossings:
 
-| | k=4 | k=8 | k=32 |
+| | k=8 | k=10 | k=32 |
 |---|---|---|---|
-| `causal=True` | 1.500× | 1.500× | 1.531× |
-| `causal=False` (default) | 2.000× | 2.000× | 2.125× |
+| `causal=True` | 1.0106× | 1.0065× | 1.0004× |
+| `causal=False` (default) | 1.0124× | 1.0078× | 1.0007× |
 
-So a 20 ps request delivers 30 ps causal, 40 ps otherwise, and asking for a denser grid does not
-close the gap. Size from the delivered edge, and measure `tr` on the record you actually built.
-Below `tr_frac × samples_per_ui = 2` the library clamps to 2 samples and warns; past that point you
-are measuring the grid.
+The residual falls as the grid gets finer, which is how you know it is the grid's and not the
+model's. Below `tr_frac × samples_per_ui = 2` the library clamps to two samples and warns, and past
+that point you are measuring the grid — so measure `tr` on the record you actually built.
 
 ### Record length
 
@@ -131,6 +130,19 @@ smallest that still correlates.
 There is no coherent-averaging fold in the library. `ws.recover_and_fold` splits a record into
 blocks, measures eye height per block and returns the median — it does not average the waveform.
 Write the fold yourself if you want the √N.
+
+## Sub-sample timing
+
+Every timing impairment moves the signal by a fraction of a sample, and all of them are
+interpolated with the same bandlimited kernel rather than linearly — jitter, duty-cycle
+distortion, intra-pair skew, the free-running sample clock, and a reflection's delay. So a
+reflection delay is continuous: `td_ps=100.0` and `td_ps=100.25` give different records, which
+matters because the echo's phase within the eye is what decides whether it lands on a crossing or
+in the middle.
+
+Two places still interpolate linearly, and both act on the synthesis grid where the sizing rule
+keeps the oversample high: the FFE's fractional tap spacing and interleaved-converter channel
+skew. The cost there is bounded and measured (under 0.1 % of peak-to-peak at 20+ samples/UI).
 
 ## Recipes
 
