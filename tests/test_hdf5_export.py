@@ -90,6 +90,26 @@ def test_several_channels_are_keyed_by_number(tmp_path):
     assert np.max(np.abs(got[3][0] - b)) <= half
 
 
+def test_a_window_narrower_than_the_record_is_refused(tmp_path):
+    """The defect this exists to catch: clipping silently. A window taken from the grid's v_full
+    rather than from the record is narrower than the record whenever a channel, a defect or a
+    supply has added overshoot -- and the file then writes, opens, and looks plausible with its
+    peaks destroyed. Found by an agent following the documented example."""
+    v = _signal(2_000)
+    span = float(v.max() - v.min())
+    with pytest.raises(ValueError, match="clips"):
+        hdf5.write_hdf5(tmp_path / "r.h5", v, fs=FS, full_scale=span * 0.5)
+    # and the message says what the record actually spans, so the fix is arithmetic
+    try:
+        hdf5.counts_for(v, full_scale=span * 0.5)
+    except ValueError as e:
+        assert f"{span:.6g}" in str(e)
+    # a window that contains the record is fine
+    p = hdf5.write_hdf5(tmp_path / "ok.h5", v, fs=FS, full_scale=span * 1.05)
+    got, _ = hdf5.read_hdf5(p, channel=1)
+    assert np.max(np.abs(got - v)) <= span * 1.05 / (2 * (2 ** 15 - 1)) / 2 * 1.01
+
+
 def test_a_shared_full_scale_gives_records_one_vertical_scale(tmp_path):
     """Without it the window follows each record's own range, which spends the whole code range on
     the signal but makes two records incomparable code-for-code."""

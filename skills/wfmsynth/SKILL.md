@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, and emit replayable recipes with content digests. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link or an instrument, or reproduce a waveform from a recipe.
-version: 2
+version: 3
 ---
 
 # wfmsynth
@@ -193,15 +193,29 @@ ws.register_pattern(
 symbols = ws.resolve_pattern("my_stress", length=65535)
 ```
 
+Then render it with `Signal.pattern`, which is the path a registered name goes through:
+
+```python
+sig = ws.Signal(seed=1, grid=grid).pattern("my_stress", length=65535, tr_frac=0.35)
+```
+
+**`carrier(pattern=...)` will not take a registered name.** That argument is a closed set of
+built-in sequences — `legacy`, `prbs7/9/11/13/15/23/31`, `clock` — and it never consults the
+registry. A registered name goes through `Signal.pattern(name, length=...)`, which emits a
+`symbols` op; `ws.PATTERNS` lists the built-ins. `levels=` also declares which carrier the symbols
+belong on, so a `levels=4` pattern cannot drive an NRZ carrier and the library says so rather than
+coercing.
+
 `source` and `marker` are deliberately empty on the entries the library ships: which document
 specifies a polynomial, and which word it designates for alignment, is knowledge that belongs with
 the caller. `hash_source=True` records a digest of your generator, so a consumer holding a
 different function under the same name gets a named mismatch instead of different samples.
 
 Register rather than passing a bare callable: a function cannot be serialised or digested, so a
-recipe holding one cannot be replayed. If a consumer may not have your registration, embed the
-symbols as data (`carrier(..., symbols=[...])`, or `pattern(..., embed=True)`), which needs no
-code at all on the other side.
+recipe holding one cannot be replayed. If a consumer may not have your registration, put the
+symbols in the recipe as data -- `Signal.symbols([...])` for a list you already hold, or
+`Signal.pattern(name, length=..., embed=True)` to render from the registry and embed what it
+produced. Either needs no code at all on the other side.
 
 ## Traps
 
@@ -241,9 +255,17 @@ volts_back, t = hdf5.read_hdf5("record.h5", channel=1)
 
 Samples go out as `int16` codes with the scale that inverts them (`volts = code * YInc + YOrg`,
 `seconds = index * XInc + XOrg`). Storing floats reads fine in Python and does not load on an
-instrument. Pass `full_scale=` when several records must share one vertical scale, or each
-record's window follows its own range and two records stop being comparable code for code. An
-instrument also looks for metadata identifying a file as its own; `like="a_capture.h5"` copies
+instrument.
+
+Omit `full_scale` and the window is taken from the record, which spends the whole code range on
+it. Pass it when several records must share one vertical scale, or they stop being comparable code
+for code -- and pass a window that actually contains the record. **It is not the grid's
+`v_full`**: a record that has been through a channel, a defect and a supply has overshoot, so its
+excursion is wider than the transmitter's amplitude. A window narrower than the record is refused,
+naming the span it found, rather than clipping the peaks into a file that opens and looks
+plausible. `volts.min()` and `volts.max()` are what this record actually spans.
+
+An instrument also looks for metadata identifying a file as its own; `like="a_capture.h5"` copies
 that out of a capture you already have. Needs `h5py`.
 
 **Zarr, for a corpus you will train on.** Use `zarr` directly, and get the layout right the first
@@ -301,10 +323,13 @@ assert ws.Signal.from_recipe(sig.recipe()).sha256() == sig.sha256()
 
 ## Staying current
 
-This file is `version: 2` in its own frontmatter. The copy in the repository is the source of
+This file is `version: 3` in its own frontmatter. The copy in the repository is the source of
 truth, so an installed copy can fall behind it.
 
 Check the installed version against the published one without cloning anything:
+
+Run the first of these with the same `HOME` the install used, or it reads a path the skill was
+never written to.
 
 ```bash
 sed -n 's/^version: *//p' ~/.claude/skills/wfmsynth/SKILL.md | head -1

@@ -98,8 +98,21 @@ def counts_for(volts, full_scale=None, bits=16):
     limit = 2 ** (int(bits) - 1) - 1               # leave the most negative code as the fill value
     y_inc = (hi - lo) / (2 * limit)
     y_org = 0.5 * (lo + hi)
-    codes = np.rint((v - y_org) / y_inc).astype("int16")
-    return np.clip(codes, -limit, limit), y_inc, y_org
+    raw = np.rint((v - y_org) / y_inc)
+    over = int(np.count_nonzero(np.abs(raw) > limit))
+    if over:
+        # A window narrower than the record destroys the peaks, and clipping quietly is the worst
+        # way to do it: the file writes, opens, and looks plausible. The excursion that matters is
+        # the one the record actually has after the channel and the defects, which is not the
+        # grid's v_full and not the transmitter's amplitude.
+        span = float(np.max(v) - np.min(v))
+        raise ValueError(
+            f"full_scale={float(full_scale):.6g} V clips {over:,} of {v.size:,} samples. This "
+            f"record spans {span:.6g} V peak-to-peak, from {float(np.min(v)):.6g} to "
+            f"{float(np.max(v)):.6g}. Pass a window that contains it, or omit full_scale and the "
+            f"window is taken from the record.")
+    codes = raw.astype("int16")
+    return codes, y_inc, y_org
 
 
 def write_hdf5(path, channels, *, fs, t0=0.0, full_scale=None, like=None,
@@ -110,7 +123,8 @@ def write_hdf5(path, channels, *, fs, t0=0.0, full_scale=None, like=None,
     fs          sample rate [Hz]; sets XInc
     t0          time of the first sample [s]; sets XOrg. Negative where the record is
                 pre-trigger, which is what a captured record normally is.
-    full_scale  the vertical window in volts peak-to-peak. Omit and the window is taken from the
+    full_scale  the vertical window in volts peak-to-peak, which must contain the record. Omit and
+                it is taken from the
                 data, which spends the whole code range on it but makes the scale record-dependent
                 -- pass it explicitly when several records have to share one scale.
     like        a path to a reference capture, or the dict `identity_from` returns. Supplies the
