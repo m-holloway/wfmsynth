@@ -17,6 +17,18 @@ problem you are testing. It helps you:
 Only NumPy and SciPy are required. Each physical primitive has a validation assertion that
 checks the behavior it claims to model.
 
+## Working with an agent
+
+`skills/wfmsynth/SKILL.md` is an installable agent skill covering the chain, how to size a record,
+the instrument model, recipes and digests, the pattern registry, and the traps that cost time.
+
+```bash
+./skills/install.sh                  # or --check to compare installed and published versions
+```
+
+See `skills/README.md`. Point an agent at this repository and ask it to install the skill and it
+has everything it needs to do so.
+
 ## Install and verify
 
 ```bash
