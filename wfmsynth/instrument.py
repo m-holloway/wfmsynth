@@ -213,56 +213,15 @@ def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4, causal=None):
 # fast one. It establishes that the ratio is offset and stable, which is the mechanism; it does
 # not attribute it.
 
-RESAMPLE_HALF_WIDTH = 32          # taps each side; the kernel is 2*half_width long
-RESAMPLE_CUTOFF = 0.45            # kernel cutoff as a fraction of fs
-RESAMPLE_BETA = 13.0              # Kaiser beta
-RESAMPLE_PASSBAND_FRAC = 0.386    # MEASURED: see resample_at's docstring
+# Re-exported from `resample`, which holds the kernel so `physics` can use it too without
+# importing this module. The names here came first and are kept.
+from . import resample as _RS                                           # noqa: E402
+from .resample import resample_at                                       # noqa: E402,F401
 
-
-def resample_at(x, src, half_width=RESAMPLE_HALF_WIDTH, cutoff=RESAMPLE_CUTOFF,
-                beta=RESAMPLE_BETA, chunk=8192):
-    """Bandlimited interpolation of ``x`` at ARBITRARY real sample positions ``src``.
-
-    ``out[k] = x(src[k])`` where ``x(.)`` is the bandlimited continuous-time signal the samples
-    represent. Implemented as a Kaiser-windowed sinc of ``2*half_width`` taps, normalised per
-    output sample so the DC gain is exactly 1. Linear in ``x`` (``src`` does not depend on it),
-    so it obeys superposition.
-
-    MEASURED ACCURACY (fs=256e9, 64 taps, cutoff 0.45, beta 13, a pure tone at three fractional
-    offsets 0.137/0.5/0.9999 samples, compared against the analytic tone at the shifted times,
-    interior samples only):
-
-        f/fs     0.020     0.100     0.200     0.300     0.386     0.420
-        max err  2.5e-07   1.4e-07   3.2e-07   2.5e-07   1.7e-06   4.4e-02
-
-    i.e. exact to about -130 dB out to ``RESAMPLE_PASSBAND_FRAC = 0.386*fs`` (0.77 of Nyquist),
-    which is the Kaiser passband edge for this length, and USELESS above it -- 0.42*fs is off by
-    4.4 % of full scale. Content above the passband is the one way to misuse this: pass a bigger
-    ``half_width`` (the transition narrows as 1/half_width) or resample from a finer grid.
-
-    ENDS: an output sample within ``half_width`` of either end has no kernel support there, and
-    the indices are CLAMPED (a hold at ``x[0]`` / ``x[-1]``). That is exact for a record whose
-    ends are a settled quiescent line -- which is what `Signal.lead_in` renders and discards --
-    and an edge artefact over ``half_width`` samples for a record that starts mid-pattern."""
-    x = np.asarray(x, float)
-    src = np.asarray(src, float)
-    n = len(x)
-    if n < 2:
-        raise ValueError("resample_at needs at least 2 input samples")
-    L = int(half_width)
-    j = np.arange(-L + 1, L + 1)
-    i0b = _i0(float(beta))
-    out = np.empty(len(src), float)
-    for a in range(0, len(src), int(chunk)):
-        s = src[a:a + int(chunk)]
-        base = np.floor(s).astype(np.int64)
-        d = s[:, None] - (base[:, None] + j[None, :])            # tap distances, in samples
-        u = np.clip(d / L, -1.0, 1.0)
-        w = np.sinc(2.0 * cutoff * d) * (_i0(float(beta) * np.sqrt(1.0 - u * u)) / i0b)
-        w /= w.sum(1, keepdims=True)                             # exact DC gain 1
-        idx = np.clip(base[:, None] + j[None, :], 0, n - 1)      # clamp = hold at the ends
-        out[a:a + int(chunk)] = np.einsum("ij,ij->i", w, x[idx])
-    return out
+RESAMPLE_HALF_WIDTH = _RS.HALF_WIDTH
+RESAMPLE_CUTOFF = _RS.CUTOFF
+RESAMPLE_BETA = _RS.BETA
+RESAMPLE_PASSBAND_FRAC = _RS.PASSBAND_FRAC
 
 
 def out_of_band_fraction(x, passband_frac=RESAMPLE_PASSBAND_FRAC):
