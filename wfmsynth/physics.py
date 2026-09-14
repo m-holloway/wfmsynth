@@ -22,6 +22,7 @@ import warnings
 from scipy import signal
 
 from . import quinary as Q
+from . import resample as RS
 
 N = 4096                       # default working grid
 T = np.linspace(0.0, 1.0, N, endpoint=False)
@@ -825,20 +826,27 @@ def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
     if td_ps is not None:
         if grid is None:
             raise ValueError("td_ps requires grid=Grid(...)")
-        td_samples = round(td_ps * 1e-12 * grid.fs)
-    d = int(td_samples) if td_samples is not None else int(td_frac * nx)
+        td_samples = td_ps * 1e-12 * grid.fs
+    # A FRACTIONAL delay. Rounding it to a whole sample made the echo position a staircase: on a
+    # grid sized from the edge, 100.0, 100.5 and 101.0 ps all landed at 100.0 ps, so a fine sweep
+    # did not move the echo and its phase within the eye was quantised to a sample.
+    #
+    # Taken with the sampler's own kernel, NOT as a phase ramp over the whole record. A phase ramp
+    # is exact in frequency and wrong in time for an echo: its impulse response is an untruncated
+    # sinc, so energy appears BEFORE the echo arrives. A whole-sample delay stays bit-exact.
+    d = float(td_samples) if td_samples is not None else float(td_frac * nx)
     if node not in ("load", "source"):
         raise ValueError("node must be 'load' or 'source'")
+    if d <= 0 or gamma_l == 0.0:
+        return x.copy()                  # no discontinuity is no mechanism, and must be exact
     y = x.copy()
     g = gamma_s * gamma_l
     for k in range(1, n_bounce + 1):
-        shift = 2 * d * k
+        shift = 2.0 * d * k
         if shift >= nx:
             break
-        refl = np.zeros_like(x)
-        refl[shift:] = x[:nx - shift]
         weight = (g ** k) if node == "load" else (g ** (k - 1))   # source sees the echo one bounce sooner
-        y = y + weight * gamma_l * refl
+        y = y + weight * gamma_l * RS.shift(x, shift, fill=0.0)
     return y
 
 

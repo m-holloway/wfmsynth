@@ -156,15 +156,22 @@ def test_lumped_model_cannot_tell_near_from_far():
     x, _ = _pulse()
     k0 = int(np.argmax(np.abs(x)))
     xl = P.lossy_channel(x, length_in=TOTAL, eps_r=EPS, causal=True, grid=GRID)
-    amp = {}
+    energy = {}
     for d in (0.5, 10.0):
         y = P.multi_reflection(xl, td_ps=d * PPI, gamma_s=GAM, gamma_l=GAM, n_bounce=6,
                                grid=GRID, node="source")
-        amp[d] = np.abs((y - xl)[k0 + int(0.6 * 2 * d * PPI * 1e-12 * GRID.fs):]).max()
-    # Flat to 1e-6: the residual is `multi_reflection` rounding td_ps to a whole sample, which
-    # moves the search window, not the amplitude. The cascade's ratio for these same two
-    # distances is >5x (test above); the lumped model's is 1.000000.
-    assert amp[0.5] == pytest.approx(amp[10.0], rel=1e-6)     # flat: no positional structure
+        echo = (y - xl)[k0 + int(0.6 * 2 * d * PPI * 1e-12 * GRID.fs):]
+        energy[d] = float((echo ** 2).sum())
+    # ENERGY, not peak amplitude. The echo's reflection coefficient is frequency-flat, so the
+    # lumped model puts the same energy in the echo wherever the discontinuity is -- that is the
+    # claim, and it is what "no positional structure" means. Peak amplitude is the wrong measure
+    # here: a delay that is not a whole number of samples is realised by interpolation, which
+    # conserves the echo's energy and lowers the peak of a sharp pulse by a couple of per cent
+    # depending on where it lands between samples. The cascade's energy ratio for these same two
+    # distances is large (test above); the lumped model's is 1.
+    # 0.5 %: the two windows start at different offsets, so they catch slightly different tails.
+    # The cascade's ratio for the same pair is over 500 %, so this still discriminates by 1000x.
+    assert energy[0.5] == pytest.approx(energy[10.0], rel=5e-3)   # flat: no positional structure
 
 
 def test_cascade_delay_is_exact_where_multi_reflection_rounds_to_a_sample():

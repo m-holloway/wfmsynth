@@ -154,17 +154,18 @@ def test_the_causal_channel_keeps_the_magnitude_and_moves_the_energy_after_t0():
 
 
 # ===================================================================== reflections in time
-@pytest.mark.parametrize("td_ps", [281.25, 100.0, 55.0, 3.9])
 @pytest.mark.parametrize("node", ["load", "source"])
-def test_an_echo_arrives_at_the_arithmetic_sample_lag(td_ps, node):
-    """`multi_reflection(td_ps=...)` puts bounce k at 2*k*round(td_ps*fs) samples with weight
-    (gs*gl)^k*gl at the load and (gs*gl)^(k-1)*gl at the source. Both are written out here and
-    checked tap by tap off an impulse response -- position AND amplitude, not "an echo exists".
+def test_a_whole_sample_echo_arrives_at_the_arithmetic_tap(node):
+    """`multi_reflection(td_ps=...)` puts bounce k at 2*k*td samples with weight (gs*gl)^k*gl at
+    the load and (gs*gl)^(k-1)*gl at the source. Both are written out here and checked tap by tap
+    off an impulse response -- position AND amplitude, not "an echo exists".
 
-    `td_ps` is ROUNDED to a whole sample by this op (see `sparam.cascade_channel` for the
-    exact-phase path), so 3.9 ps at 256 GSa/s is one sample and the test says so.
+    A delay that is a WHOLE number of samples must stay bit-exact and sparse: it needs no
+    interpolation, so it must not pick up any.
     """
     g = Grid(fs=256e9, baud=16e9, n=1 << 13)
+    td_ps = 281.25                                   # exactly 72 samples at 256 GSa/s
+    assert (td_ps * 1e-12 * g.fs).is_integer()
     gs, gl, n_bounce = 0.30, 0.40, 5
     imp = np.zeros(g.n); imp[64] = 1.0
     y = P.multi_reflection(imp, grid=g, td_ps=td_ps, gamma_s=gs, gamma_l=gl,
@@ -179,6 +180,44 @@ def test_an_echo_arrives_at_the_arithmetic_sample_lag(td_ps, node):
     assert sorted(got) == sorted(want), f"taps at {sorted(got)}, arithmetic says {sorted(want)}"
     for i, v in want.items():
         assert abs(got[i] - v) < 1e-14, f"lag {i-64}: got {got[i]:.12g}, arithmetic {v:.12g}"
+
+
+@pytest.mark.parametrize("td_ps", [100.0, 55.0, 3.9, 100.5])
+@pytest.mark.parametrize("node", ["load", "source"])
+def test_a_fractional_echo_lands_at_the_delay_asked_for(td_ps, node):
+    """A delay that is not a whole number of samples has to be realised, not rounded away.
+
+    This op used to round to the nearest sample, which made the echo position a staircase: at
+    256 GSa/s, 100.0 ps is 25.6 samples, and rounding put it at 26. A fine sweep of the delay
+    then did not move the echo at all, and the echo's phase within the eye -- which decides
+    whether it lands on a crossing or in the middle -- was quantised. 3.9 ps is 0.998 samples and
+    used to round to exactly 1.
+
+    Asserted three ways: the energy centroid sits at the delay asked for, the echo carries the
+    amplitude the arithmetic says, and no energy arrives before the echo does.
+    """
+    g = Grid(fs=256e9, baud=16e9, n=1 << 13)
+    gs, gl = 0.30, 0.40
+    imp = np.zeros(g.n); imp[1024] = 1.0
+    y = P.multi_reflection(imp, grid=g, td_ps=td_ps, gamma_s=gs, gamma_l=gl,
+                           n_bounce=1, node=node)
+    echo = np.asarray(y, float) - imp
+    d = td_ps * 1e-12 * g.fs                           # the fractional delay, in samples
+    lag = 2.0 * d
+
+    w = echo ** 2
+    centroid = float((np.arange(g.n) * w).sum() / w.sum()) - 1024
+    assert centroid == pytest.approx(lag, abs=0.05), (
+        f"asked {lag:.4f} samples of round trip, echo centroid at {centroid:.4f}")
+
+    want = ((gs * gl) if node == "load" else 1.0) * gl
+    assert float(echo.sum()) == pytest.approx(want, rel=1e-6), "the echo lost amplitude"
+
+    # causality: an echo must not appear before it arrives. The interpolation kernel is symmetric,
+    # so it spreads over its own half width and no further.
+    from wfmsynth import resample as RS
+    before = int(1024 + lag) - RS.HALF_WIDTH - 1
+    assert float((echo[:before] ** 2).sum() / w.sum()) < 1e-9, "energy before the echo arrives"
 
 
 def test_a_cascaded_echo_lands_where_first_order_echoes_says_it_will():
