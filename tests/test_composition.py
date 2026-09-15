@@ -380,6 +380,13 @@ KNOBS = [
     ("probe", dict(c_load_f=1e-12, bw_hz=40e9), "bw_hz", 10e9),
     ("probe", dict(c_load_f=1e-12, noise_rms=0.0), "noise_rms", 0.02),
     ("probe", dict(c_load_f=1e-12), "atten", 0.1),
+    # probe pack (Phase 2): tests/test_probe_pack.py calibrates each of these against a real
+    # property; this row is only the dead-knob check the rest of this table performs.
+    ("probe", dict(c_load_f=1e-12, r_source=200.0), "compensate", 2.0),
+    ("probe", dict(c_load_f=5e-12, r_source=50.0), "l_gnd_h", 40e-9),
+    ("probe", dict(c_load_f=1e-12, r_source=200.0), "r_term_ohm", 50.0),
+    ("probe", dict(c_load_f=1e-15, r_source=1.0), "coupling", "ac"),
+    ("probe", dict(c_load_f=1e-15, r_source=1.0), "overload_range", 0.3),
     ("scope", dict(bw_hz=60e9), "bw_hz", 20e9),
     ("scope", dict(bw_hz=60e9), "kind", "gaussian"),
     ("scope", dict(bw_hz=60e9, order=4), "order", 2),
@@ -411,6 +418,12 @@ KNOBS = [
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "v_dd", 5.0),
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "r_sink_ohm", 60.0),
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12, center=False), "center", True),
+    # the wired-AND second sink (Phase 2): tests/test_open_drain_second_sink.py calibrates the
+    # divider physics against closed-form answers.
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "second",
+     dict(kind="nrz", n_ui=32, seed=9)),
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12, second=dict(kind="nrz", n_ui=32, seed=9)),
+     "r_sink_b_ohm", 90.0),
     # The hybrid echo and the summed four-pair observation. The echo's own transmit defaults to
     # the same carrier spec shape `crosstalk`'s aggressor uses, so only the echo's own knobs move
     # here; `multipair`'s three budgets are dB of LOSS, so a SMALLER number is MORE aggression.
@@ -459,9 +472,15 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
     # that already has a carrier, which is not where a source lives. `coded` -- whose knobs are a
     # line code's scheme, polynomial and seed -- is swept in tests/test_line_coding.py, where each
     # of those is asserted to move both the samples and the recipe's content address.
-    excused = {"carrier", "symbols", "coded", "events", "store", "acquire", "cascade", "sparam",
-               "crosstalk_matrix", "dfe", "optical", "dispersion", "eo", "fiber",
-               "optical_mpi", "edfa", "photodetect", "tia"}
+    # `capture` is a SOURCE too, for the same reason `carrier`/`symbols`/`coded` are excused, and
+    # is swept in tests/test_capture.py instead (each knob against a real file/embedded-values
+    # property, not a generic gain-moves-the-output check).
+    # `burst`, `pass_fet` and `modulate` (Phases 2-3) have their own dedicated knob sweeps in
+    # tests/test_burst.py, tests/test_pass_fet.py and tests/test_modulate.py, the same
+    # exclusion `events` already gets.
+    excused = {"carrier", "symbols", "coded", "capture", "events", "store", "acquire", "cascade",
+               "sparam", "crosstalk_matrix", "dfe", "optical", "dispersion", "eo", "fiber",
+               "optical_mpi", "edfa", "photodetect", "tia", "burst", "pass_fet", "modulate"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

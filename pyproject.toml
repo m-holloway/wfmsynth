@@ -39,4 +39,7 @@ include = ["wfmsynth*"]
 # out. Library USERS still see it (this filter applies only under pytest).
 filterwarnings = [
     "ignore:rise time clamped:RuntimeWarning",
+    # The same clamp, for step/pulse/cmos's absolute (tr_s/tr_frac-of-record) edges rather
+    # than a UI fraction. A few tests deliberately probe a much-faster-than-the-record edge.
+    "ignore:edge time clamped:RuntimeWarning",
 ]
