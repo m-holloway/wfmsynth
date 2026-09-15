@@ -315,7 +315,8 @@ section is about the tools.
 | Quaternary PRBS13Q / PRBS31Q, Gray-coded pairs, two PRBS repetitions because the period is odd | `physics.prbs13q`, `physics.prbs31q` (IEEE 802.3 Clause 120.5.11.2.1) |
 | `clock` 1010 pattern; a pattern-name error that says *which* carrier a name belongs to | `physics.clock_pattern`, `physics._pattern_error` |
 | NRZ, PAM4, PAM-N for any N; analog and arbitrary carriers | `physics.nrz`, `pam4`, `pam` |
-| Open-drain line: the rise charges through the pull-up, so fall and rise are not mirrors | `bus`, `open_drain` op |
+| Open-drain line: the rise charges through the pull-up, so fall and rise are not mirrors; a second sink resolves the wired-AND as a real resistor divider | `bus`, `open_drain` op |
+| Analog (`step`/`pulse`/`exp`/`chirp`/`two_tone`/`noise`) and unipolar `cmos` carrier kinds; a real capture from disk (`Signal.capture`, sha256 over sample values); a probe pack (compensation, ground-lead ring, termination, AC coupling, overload recovery); burst/idle; a pass-FET analog switch; AM/ASK/OOK/FM/FSK/PM modulation; a generic clamped-exponential rail event | `physics`, `instrument.probe`, `capture`, `compose` |
 | Linear (non-circular) convolution; a rendered-and-discarded lead-in whose guard is measured from the chain's own impulse response | `compose`, `physics.response_extent` |
 | Two-rate acquisition, interleaved ADC, ENOB as a noise level, stored integer codes | `acquire`, `instrument`, `digitize`/`store` |
 | Role-tagged RNG streams; recipe round-trip; `sha256()` content address | `streams`, `compose` |

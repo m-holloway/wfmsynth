@@ -366,7 +366,11 @@ Candidate areas:
 - explicit connector/via/stub networks;
 - dual-Dirac and target-BER jitter products;
 - ground bounce, EMI, and intermodulation;
-- additional standards-flavored carrier recipes; and
+- additional standards-flavored carrier recipes;
+- a behavioral SMPS / switched-mode converter model (switched inductor, diode/sync FET,
+  C+ESR ripple, optional skip/PFM) -- scoped alongside the analog/instrument extension above
+  and deliberately deferred: it has no closed-form lead-in extent the way `open_drain` does,
+  so it needs its own phase rather than blocking the rest; and
 - distribution-level regression against versioned measured datasets.
 
 ## P3 — dataset tooling and scale
@@ -429,6 +433,7 @@ branches.
 | #41–45 | Open-drain/UART primitives, de-emphasis presets, electrical idle/LFPS, laser chirp, arbitrary-symbol carriers |
 | #47 | Generalized two-rate acquisition and record decimation |
 | events | Localized placeable needles (`Signal.events` / `place_events`) with per-window labels; clock recovery stays external |
+| analog/instrument extension | Analog (`step`/`pulse`/`exp`/`chirp`/`two_tone`/`noise`) and unipolar `cmos` carrier kinds; `Signal.capture()` importing a real file (sha256 over sample values, named errors on a missing/changed file); a probe pack (`compensate`, `l_gnd_h`, `r_term_ohm`, `coupling="ac"`, `overload_range`); an `open_drain` wired-AND second sink; `burst`/idle; a `pass_fet` analog switch; `modulate` (AM/ASK/OOK/FM/FSK/PM). SMPS (behavioral switched-mode converter) was scoped as a follow-on phase and deferred -- see P2 below |
 
 ## Follow-ups owed by the acquisition-path work (recovered-clock DFE + probe op)
 

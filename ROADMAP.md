@@ -18,7 +18,11 @@ of waveform helpers. The current architecture already provides:
 - measured ground truth, confounder-controlled sweeps, and sim-to-real separability checks;
 - localized events (runt, glitch, ring, droop, …) with independent placement and
   per-window labels for an external segmenter;
-- streaming channel application for long records; and
+- streaming channel application for long records;
+- analog, CMOS/PWM, and captured-file sources taking the same later ops a serial carrier
+  does, a fuller probe pack (compensation, ground-lead ring, termination, AC coupling,
+  overload recovery), a wired-AND open-drain second sink, burst/idle, a pass-FET/analog
+  switch, and AM/ASK/OOK/FM/FSK/PM modulation; and
 - a physics validation gate plus automated tests.
 
 Provenance-first composition was the original flagship roadmap item. It is now the primary
@@ -64,7 +68,8 @@ implementations.
   `prbs13q`/`prbs31q`, and the compliance patterns from the specs are still absent.)
 - Decide whether 128b/130b belongs in this package before advertising it as implemented.
 - Add focused low-speed building blocks only where they improve waveform realism; current
-  bus support is open-drain composition and UART framing, not complete SPI/CAN stacks.
+  bus support is open-drain composition (including a wired-AND second sink resolved as a
+  real resistor divider) and UART framing, not complete SPI/CAN stacks.
 - Add standards-flavored presets as transparent recipes, not opaque monolithic generators.
 
 ## Evidence-driven channel and instrument depth

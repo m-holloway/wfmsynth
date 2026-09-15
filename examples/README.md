@@ -100,6 +100,7 @@ digests cannot pass by accident. Its docstring is also the shortest tour of the 
 | [`touchstone_channel.py`](touchstone_channel.py) | You have measured `.sNp` channel data or need resonances absent from an analytic model |
 | [`events.py`](events.py) | Rare localized defects (runt, glitch, ring, droop) in a long record, labelled per UI window |
 | [`replay.py`](replay.py) | Rebuilding and verifying a set of records from recipes alone, as a consumer of a handed-over archive |
+| [`analog_instrument.py`](analog_instrument.py) | The source is not a serial link: a bench signal (`carrier("sine"/"cmos"/...)`) or a real capture from disk (`Signal.capture`), taking the same later ops |
 
 ## Choosing a dataset generator
 

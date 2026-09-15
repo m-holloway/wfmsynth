@@ -217,9 +217,9 @@ legacy array-warp workflows but should not be the default for a new physical cha
 | Area | Modules | Main capabilities |
 |---|---|---|
 | Composition and units | `compose`, `grid`, `streams` | `Signal`, recipes, deterministic factor streams, contrastive pairs |
-| Sources and effects | `physics`, `impairments`, `events`, `grammar` | Digital/RF sources, channels, reflections, jitter, named faults, localized needles, broad shape generation |
-| Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, scope/probe/ADC effects, segmented PAM4 datasets |
-| Links and systems | `rx`, `cdr`, `sparam`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, multi-lane, optical, coding, UART/open-drain |
+| Sources and effects | `physics`, `capture`, `impairments`, `events`, `grammar` | Digital/RF/analog/CMOS sources, a real capture from disk, channels, reflections, jitter, named faults, localized needles (incl. a generic clamped-exponential rail transient), broad shape generation |
+| Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, a probe pack (loading, compensation, ground-lead ring, termination, AC coupling, overload recovery), scope/ADC effects, segmented PAM4 datasets |
+| Links and systems | `rx`, `cdr`, `sparam`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |
 | Dataset quality | `measure`, `sweep`, `simreal` | Measured labels, confounder control, synthetic-vs-real separability |
 | Scale and trust | `stream`, `validate` | Bounded-memory channel processing and physical-property assertions |
 
@@ -740,6 +740,33 @@ ws.Signal(seed=1, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", causal=Tr
   .scope(bw_hz=33e9).timebase(rms_ps=0.5)   # scope bandwidth + sample-clock jitter
 ```
 
+## Analog, CMOS, and captured sources
+A chain does not have to start with a digital carrier. Analog kinds (`sine`, `square`,
+`triangle`, `sawtooth`, `dc`, `step`, `pulse`, `exp`, `chirp`, `two_tone`, `noise`) and the
+unipolar `cmos` kind take the same later ops a serial carrier does, and `capture()` starts a
+chain from a real file instead of a synthesized one:
+
+```python
+g = ws.Grid(fs=10e9, n=4096, v_full=3.3)   # k = tr_s * fs = 20, the k >= 8 rule again
+clock = ws.Signal(seed=1, grid=g) \
+  .carrier("cmos", v_lo=0.0, v_hi=3.3, duty=0.5, f_hz=10e6, tr_s=2e-9) \
+  .probe(r_source=200.0, c_load_f=5e-12).waveform()   # real volts; a loaded-output RC pole
+
+fs_cap = 5e9
+captured = ws.Signal(seed=1, grid=ws.Grid(fs=fs_cap, n=4096)) \
+  .capture(path="scope.npy", fs_hz=fs_cap) \
+  .lossy(loss_db=3.0, loss_at_ghz=1.0).waveform()     # recipe carries a sha256 over the values
+```
+
+`cmos` stays in real volts (0 V is 0, not stretched onto -1); `capture`'s digest is over the
+sample values, not the file's bytes, so a missing or changed file is a named error rather than
+zeros or a silently different waveform. Pass a `grid=Grid(fs=...)` matching the file's own rate
+— `fs_hz=` alone is provenance and does not make a downstream Hz-denominated knob like
+`loss_at_ghz` mean anything real. `modulate()` (AM/ASK/OOK/FM/FSK/PM, message a nested
+carrier spec) and `events("clamped_exp", ...)` (a generic rail transient) round out the set —
+see `.claude/skills/wfmsynth/REFERENCE.md` for the full worked example, including the wired-AND
+`open_drain(second=...)` sink and the `pass_fet()` analog switch.
+
 ## Low-speed buses
 Embedded-bus signaling (open-drain wired-AND, UART framing):
 
@@ -747,6 +774,9 @@ Embedded-bus signaling (open-drain wired-AND, UART framing):
 bus = ws.open_drain([driver_a, driver_b])     # low if any driver pulls; else pull-up high
 wave = ws.uart_frame([0x55, 0xA3], samples_per_bit=16)   # idle-high start/stop framing
 ```
+
+A second sink on the SAME physical line is resolved as a real resistor divider, not a boolean
+OR — `Signal(...).open_drain(r_pullup_ohm=..., c_bus_f=..., second=dict(kind="nrz", ...), r_sink_b_ohm=...)`.
 
 ## Level coding (PAM4 Gray + precoding, PAM3)
 The bit-to-level layer, between a bit stream and a PAM carrier. It changes **symbol and error

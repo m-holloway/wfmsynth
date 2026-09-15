@@ -8,9 +8,14 @@ captures. Everything is validated (`wfmsynth.validate`) and depends only on nump
 
 Modules / public API:
   physics       low-level primitives — lossy_channel, multi_reflection, crosstalk,
-                ac_couple, inject_jitter, nrz, pam4, am, fm, psk, qam, chirp, ...
+                ac_couple, inject_jitter, nrz, pam4, sine/square/triangle/sawtooth/dc,
+                step/pulse/exp/chirp_sweep/two_tone/analog_noise, cmos, pass_fet,
+                am_modulate/fm_modulate/pm_modulate, am, fm, psk, qam, chirp, ...
+  capture       Signal.capture()'s file backend — load_values (.npy/.npz/.csv) and digest
+                (a sha256 over sample VALUES, not file bytes)
   impairments   apply_impairment(name, x, rng), domain_randomize(x, rng), IMPAIRMENTS
   events        place_events / apply_events — localized needles + per-window labels
+                (runt, glitch, ring, droop, slow_edge, clamped_exp, ...)
   eye           eye_density() — a record folded on the clock a CDR recovers from it
   grammar       carrier(), envelope(), sample(), generate() — compositional signals
   quinary       4D-PAM5 / 8B1Q4 — the four-pair quinary line code, its non-uniform symbol
@@ -21,12 +26,19 @@ Modules / public API:
                 general arbitrary-polynomial LFSR and a block-repeat generator. Mechanisms live
                 here; WHICH pattern a standard names is the caller's to register.
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
+
+A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM
+sources, `capture()` starts a chain from a real file, and `probe()`/`open_drain()`/`events()`
+take a fuller instrument/bus pack (compensation, ground-lead ring, termination, AC coupling,
+overload recovery; a wired-AND second sink; a pass-FET/analog switch; AM/FM/PM modulation via
+`modulate()`) — every one of them the same op-chain, no second builder. See
+`.claude/skills/wfmsynth/SKILL.md` and `REFERENCE.md`.
 """
-__version__ = "0.39.1"
+__version__ = "0.40.0"
 
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
-               acquire, patterns, quinary, hdf5)
+               acquire, patterns, quinary, hdf5, capture)
 from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
