@@ -213,6 +213,99 @@ symbols in the recipe as data — `Signal.symbols([...])`, or
 `source` and `marker` are empty on the entries the library ships, because which document specifies
 a polynomial is the caller's knowledge.
 
+## Analog, CMOS, and captured sources
+
+A chain does not have to start with a digital carrier. Analog kinds (`sine`, `square`,
+`triangle`, `sawtooth`, `dc`, `step`, `pulse`, `exp`, `chirp`, `two_tone`, `noise`) and the
+unipolar `cmos` kind take the SAME later ops a serial carrier does:
+
+```python
+g = ws.Grid(fs=10e9, n=4096, v_full=3.3)          # k = tr_s * fs = 20, the same k >= 8 rule
+clock = (ws.Signal(seed=1, grid=g)                # as everywhere else in this library
+         .carrier("cmos", v_lo=0.0, v_hi=3.3, duty=0.5, f_hz=10e6, tr_s=2e-9)
+         .probe(r_source=200.0, c_load_f=5e-12)      # a loaded-output RC pole, not a new knob
+         .waveform())
+assert clock.min() >= -0.2 and clock.max() <= 3.5     # real volts, not stretched onto +/-1
+```
+
+`cmos` stays in real volts (0 V is 0, not -1) and `tr_s` is an absolute edge time in seconds,
+unlike `square`'s `tr_frac` — a real gate's edge does not shrink as it is clocked faster. Like
+every other edge in this library, an under-resolved `tr_s` (fewer than ~2 samples) clamps to the
+floor and warns rather than silently inflating the edge (`physics.resolve_rise_time`'s clamp,
+made visible the same way for an absolute edge). `physics.am`/`fm`/`chirp` predate absolute
+units, take a normalised ramp, and stay bit-identical; `am_modulate`/`fm_modulate`/`pm_modulate`
+(below) are the Grid-native ones.
+
+`capture()` starts a chain from a real file instead of a synthesized one:
+
+```python
+fs_cap = 5e9
+np.save("scope.npy", ws.physics.exp(tau_s=2e-9, n=4096, fs=fs_cap))
+captured = (ws.Signal(seed=1, grid=ws.Grid(fs=fs_cap, n=4096))
+            .capture(path="scope.npy", fs_hz=fs_cap)
+            .lossy(loss_db=3.0, loss_at_ghz=1.0).waveform())
+```
+
+The recipe records the path AND a sha256 digest over the sample VALUES (not the file's bytes),
+taken when `.capture()` is called. A file that no longer matches that digest is a named error
+at replay time; a missing file is a named error, not zeros. `embed=True` reads the file now and
+stores its values inline, so the recipe no longer depends on the file at all.
+
+`fs_hz=` on `capture()` is provenance and what `resample=True` resamples FROM; it does **not**,
+by itself, make a downstream Hz-denominated knob (`lossy(loss_at_ghz=...)`, `probe(bw_hz=...)`)
+mean anything real. Those read `grid.fs`, so pass a `grid=Grid(fs=..., n=...)` matching the
+file's own rate — as above — or a `capture()`-only chain with no `Grid` renders against no real
+rate at all. If the file's own length does not equal `Grid.n`, that is a named error unless
+`resample=True` is passed (which then resamples onto `Grid.n`, or onto the rate implied by
+`Grid.fs` vs `fs_hz` if both are given) — silently truncating or padding a captured record is
+exactly the failure `sample_clock(n_out=)`'s trap above exists to prevent.
+
+`modulate()` is AM/ASK/OOK/FM/FSK/PM, the message a nested carrier spec:
+
+```python
+am = (ws.Signal(seed=1, grid=ws.Grid(fs=1e9, n=1 << 14))
+      .carrier("sine", f_hz=100e6, amp=1.0)
+      .modulate(kind="am", depth=0.5, message=dict(kind="sine", f_hz=1e6))
+      .waveform())
+fm = (ws.Signal(seed=1, grid=ws.Grid(fs=1e9, n=1 << 14))
+      .carrier("dc", level=0.0)                       # unused by FM/PM -- see below
+      .modulate(kind="fm", fc_hz=100e6, dev_hz=5e6, message=dict(kind="sine", f_hz=1e6))
+      .waveform())
+```
+
+AM/ASK/OOK COMBINE with the upstream carrier; FM/FSK/PM GENERATE their own carrier at `fc_hz`
+and never read the upstream signal — frequency/phase modulation is not a per-sample transform
+of an already-rendered fixed-frequency carrier the way AM is. OOK with a unipolar (0/1) message
+needs `suppressed=True`: `(1 + depth*message)` never reaches 0 for a message that only goes
+0..1, while `depth*message` does.
+
+The instrument/bus additions compose the same way:
+
+```python
+g2 = ws.Grid(fs=1e9, n=8192)
+x = (ws.Signal(seed=1, grid=g2)
+     .carrier("nrz", n_ui=64)
+     .open_drain(r_pullup_ohm=1000.0, c_bus_f=200e-12, v_dd=3.3, r_sink_ohm=20.0,
+                 second=dict(kind="nrz", n_ui=64, seed=9), r_sink_b_ohm=90.0)  # wired-AND 2nd sink
+     .burst(t_on_s=2e-6, t_off_s=6e-6, off="hold")           # gate any carrier on/off
+     .pass_fet(gate=dict(kind="square", f_hz=1e6), rds_on_ohm=8.0,
+               r_load_ohm=1e4, v_rail_hi=5.0, v_rail_lo=-5.0)  # off = high-Z / body diode
+     .events("clamped_exp", on="times", times=[1e-6], amp=1.5, tau_s=5e-9, v_clamp=1.0)
+     .waveform())
+```
+
+`r_sink_ohm` (default 20.0) is the FIRST device's on-resistance, shown explicitly here — it is
+easy to reach for `r_sink_a_ohm` by symmetry with `second`'s `r_sink_b_ohm` and get a
+did-you-mean error instead. The upstream carrier's absolute LEVEL never decides sinking: the
+line is thresholded at the MIDPOINT of that carrier's own excursion (`open_drain`'s own
+docstring), so a `dc` carrier — any level, any sign — straddles nothing and never sinks; only a
+carrier that actually toggles (`nrz`, `square`, `cmos`, ...) drives the bus.
+
+None of these add a protocol name: a wired-AND second sink is `open_drain(second=...)`, not
+`i2c()`; `clamped_exp` is the generic rail-transient shape, and which standard's pulse numbers
+apply (amplitude, tau, clamp voltage) is the caller's own registry — the same rule a PRBS
+polynomial already follows.
+
 ## Writing records out
 
 There is no archive writer in this library — it produces waveforms, and the container is yours.

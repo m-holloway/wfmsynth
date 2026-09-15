@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
-description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link or an instrument, or reproduce a waveform from a recipe.
-version: 1
+description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus or an instrument, or reproduce a waveform from a recipe.
+version: 2
 ---
 
 # wfmsynth
@@ -41,6 +41,26 @@ defect placed upstream of a filter that removes it produces a label with no sign
 
 `ws.IMPAIRMENTS` and `ws.PATTERNS` list what exists; `Signal.stage_kinds()` says which stage each
 op in a chain belongs to.
+
+## Not just a serial link
+
+`carrier()` also takes analog and CMOS/PWM sources, and `capture()` starts a chain from a real
+file instead of a synthesized one — both take the SAME later ops (`probe`, `lossy`, `events`, …).
+
+```python
+g = ws.Grid(fs=10e9, n=4096)   # k = tr_s * fs = 20 below, the k >= 8 rule again
+ws.Signal(seed=1, grid=g).carrier("cmos", v_lo=0.0, v_hi=3.3, duty=0.5, f_hz=10e6, tr_s=2e-9)
+ws.Signal(seed=1).capture(path="scope.npy")   # a real capture, first op instead of a carrier
+```
+
+`probe()` also takes a fuller instrument pack (`compensate`, `l_gnd_h`, `r_term_ohm`,
+`coupling="ac"`, `overload_range`/`overload_tau_s`); `open_drain()` takes a `second=` wired-AND
+sink; `burst()` gates any carrier on/off (`off="zero"` or `"hold"`); `pass_fet()` is a
+gate-controlled switch (off is high-Z unless a body diode clamps it to a stated rail);
+`modulate()` is AM/ASK/OOK/FM/FSK/PM, its message a nested carrier spec; `events("clamped_exp",
+...)` is a generic rail transient (which standard's pulse numbers apply is the caller's own
+registry, same as a PRBS polynomial). None of these add a protocol name or a second builder —
+same `Signal`, same one-op-one-effect rule.
 
 ## Two numbers decide whether the data means anything
 
@@ -125,6 +145,34 @@ was asked for.
     the chain was built on rather than the record in your hand, so handing it to a measurement
     measures the wrong thing. Build one for the stored record:
     `Grid(fs=fs_store, baud=baud, n=len(x))`.
+18. **A unipolar source (`cmos`, and any future one) stays in real volts, not the ±1 the rest of
+    `carrier` uses.** `x * 0.5 * v_full` is the wrong conversion once a chain contains one — the
+    array already IS volts. `cmos`'s `tr_s` is also an absolute edge time in seconds, unlike
+    `square`'s `tr_frac`: a real gate's edge does not shrink as it is clocked faster.
+19. **`modulate(kind="ook", ...)` needs `suppressed=True` for a unipolar (0/1) message.**
+    `(1 + depth * message)` never reaches 0 for a message that only goes 0..1; `depth * message`
+    does. The same trap applies to any two-level message that is not centred on 0.
+20. **`capture(path=...)` digests the sample VALUES, not the file's bytes**, at the moment
+    `.capture()` is called — as long as the VALUES a different codec or dtype round-trips are
+    unchanged, the digest still matches (a lossy dtype, e.g. float64 rounded through float32,
+    changes the values and correctly fails to match). A file that has since changed is a named
+    error at render time, not a silently different waveform under the same recipe. `embed=True`
+    drops the file dependency entirely.
+21. **`capture()`'s `fs_hz=` is provenance, not a rate for the rest of the chain.** It is what
+    `resample=True` resamples FROM; it does not make `lossy(loss_at_ghz=...)`, `probe(bw_hz=...)`
+    or any other Hz-denominated knob downstream mean anything real. Those read `grid.fs`, so a
+    `capture()` chain needs its own `Grid(fs=..., n=...)` matching the file's rate — a
+    `capture()`-only `Signal()` with no `Grid` renders against no real rate at all, silently.
+22. **`open_drain`'s sink decision thresholds the incoming carrier at the MIDPOINT of its OWN
+    excursion, not at an absolute level.** A `dc` carrier — any level, any sign — straddles a
+    single value and never sinks; only a carrier that actually toggles (`nrz`, `square`, `cmos`,
+    ...) drives the bus. The first device's on-resistance is the existing `r_sink_ohm` (default
+    20.0); a second device (`second=...`) adds its own `r_sink_b_ohm` — there is no
+    `r_sink_a_ohm`.
+23. **An under-resolved `step`/`pulse`/`cmos` edge clamps to the 2-sample floor and WARNS**,
+    the same visible clamp `physics.resolve_rise_time` gives every UI-fraction edge in this
+    library (`carrier(tr_frac=...)`). `tr_s`/`tr_frac` here are absolute or a fraction of the
+    RECORD, not of a UI, but the floor and the warning are the same mechanism.
 
 ## Where the boundary sits
 
