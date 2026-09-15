@@ -69,12 +69,25 @@ def _carrier(p, streams, grid, idx):
     m = re.fullmatch(r"pam(\d+)", str(p["kind"]))
     if m:
         return P.pam(int(m.group(1)), pattern=p.get("pattern", "uniform"), **common)
+    # a unipolar, VOLTS-NATIVE analog source (see physics.cmos): not on the +/-1 amp/offset
+    # convention every other analog kind shares, so it gets its own small dispatch rather than
+    # being squeezed through the generic kwarg map below.
+    if p["kind"] in P.VOLTS_ANALOG_KINDS:
+        kw = dict(n=_grid_n(grid, p), fs=getattr(grid, "fs", None))
+        for k in ("v_lo", "v_hi", "duty", "f_hz", "cycles", "tr_s", "phase_rad", "causal"):
+            if k in p:
+                kw[k] = p[k]
+        return {"cmos": P.cmos}[p["kind"]](**kw)
     # analog and arbitrary carriers. These are not data, so the symbol-oriented arguments in
     # `common` do not apply to them: they take a frequency and the grid.
     if p["kind"] in P.ANALOG_KINDS or p["kind"] == "arbitrary":
         kw = dict(n=_grid_n(grid, p), fs=getattr(grid, "fs", None))
         for k in ("f_hz", "cycles", "amp", "offset", "phase_rad", "duty", "symmetry",
-                  "tr_frac", "level", "causal", "band_limit_tr"):
+                  "tr_frac", "level", "causal", "band_limit_tr",
+                  "t_step_s", "t_step_frac", "tr_s", "t_start_s", "t_start_frac",
+                  "width_s", "width_frac", "tau_s", "tau_frac", "decay",
+                  "f0_hz", "f1_hz", "method", "amp1", "amp2", "phase1_rad", "phase2_rad",
+                  "f2_hz", "rms", "df", "pink_frac", "band_lo_hz", "band_hi_hz"):
             if k in p:
                 kw[k] = p[k]
         if p["kind"] == "arbitrary":
@@ -86,12 +99,17 @@ def _carrier(p, streams, grid, idx):
             return P.arbitrary(fn, **{k: v for k, v in kw.items()
                                       if k in ("n", "fs", "band_limit_tr", "causal")})
         fn = {"sine": P.sine, "square": P.square, "triangle": P.triangle,
-              "sawtooth": P.sawtooth, "dc": P.dc}[p["kind"]]
+              "sawtooth": P.sawtooth, "dc": P.dc, "step": P.step, "pulse": P.pulse,
+              "exp": P.exp, "chirp": P.chirp_sweep, "two_tone": P.two_tone,
+              "noise": P.analog_noise}[p["kind"]]
         import inspect
         ok = set(inspect.signature(fn).parameters)
-        return fn(**{k: v for k, v in kw.items() if k in ok})
+        kw2 = {k: v for k, v in kw.items() if k in ok}
+        if p["kind"] == "noise" and "rng" in ok:
+            kw2["rng"] = streams.role(f"carrier_noise/{idx}")
+        return fn(**kw2)
     raise ValueError(f"unknown carrier kind {p['kind']!r} (use 'nrz', 'pam4', 'pam<N>', "
-                     f"one of {P.ANALOG_KINDS}, or 'arbitrary')")
+                     f"one of {P.ANALOG_KINDS}, one of {P.VOLTS_ANALOG_KINDS}, or 'arbitrary')")
 
 
 def _op_carrier(x, p, streams, grid, idx):
@@ -183,6 +201,137 @@ def _op_symbols(x, p, streams, grid, idx):
     return P.from_symbols(_source_symbols(p), n=_grid_n(grid, p),
                           tr_frac=p.get("tr_frac", 0.15), causal=p.get("causal", False),
                           jitter=jitter, rng=streams.role(f"jitter/{idx}"))
+
+
+def _op_capture(x, p, streams, grid, idx):
+    from . import capture as CAP
+    if p.get("values") is not None:
+        y = np.asarray(p["values"], float)
+    else:
+        y = CAP.load_values(p["path"])
+        got = CAP.digest(y)
+        want = p.get("sha256")
+        if want is not None and got != want:
+            raise ValueError(
+                f"capture: {p['path']!r} does not match the recipe -- recorded sha256 "
+                f"{want} over the sample values, file now digests to {got}. The file changed "
+                f"since this recipe was made; re-embed it (capture(..., embed=True)) or point "
+                f"the recipe at the file that produced it.")
+    fs_hz = p.get("fs_hz")
+    grid_fs = getattr(grid, "fs", None) if grid is not None else None
+    if fs_hz is not None and grid_fs is None:
+        # fs_hz is provenance and what resample=True resamples FROM; with no Grid.fs to
+        # reconcile it against, a downstream Hz-denominated knob (lossy(loss_at_ghz=...),
+        # probe(bw_hz=...)) has no real rate to mean anything against, silently.
+        warnings.warn(
+            "capture: fs_hz was given but this chain has no Grid(fs=...), so nothing "
+            "downstream has a real sample rate to interpret Hz-denominated knobs against. "
+            "Pass grid=Grid(fs=<fs_hz>, n=...) to Signal(...) if this chain uses any.",
+            RuntimeWarning, stacklevel=2)
+    if fs_hz is not None and grid_fs is not None and float(fs_hz) != float(grid_fs):
+        if not p.get("resample"):
+            raise ValueError(
+                f"capture: the file's fs_hz={float(fs_hz):g} does not match the record's "
+                f"fs={float(grid_fs):g}; pass resample=True to resample onto the record's rate")
+        target = int(round(len(y) * float(grid_fs) / float(fs_hz)))
+        y = resample_poly(y, target, len(y))
+    n_target = _grid_n(grid, p)
+    if n_target is not None and len(y) != n_target:
+        if not p.get("resample"):
+            raise ValueError(
+                f"capture: {len(y)} samples do not match the record length {n_target} "
+                f"(Grid.n or carrier n=); pass resample=True to resample onto it, or match "
+                f"the Grid's n to the file's own length")
+        y = resample_poly(y, n_target, len(y))
+    return y
+
+
+def _op_burst(x, p, streams, grid, idx):
+    """Burst/idle on any carrier -- see `Signal.burst`. Promotes `impairments.burst_gate`
+    (already used for localized-defect gating) to a first-class op so it lands in the recipe
+    and can be composed after an ANALOG or a UNIPOLAR carrier just as easily as a digital one:
+    the gate reads only the sample array, never the carrier's kind."""
+    from . import impairments as IMP
+    x = np.asarray(x, float)
+    n = len(x)
+    fs = grid.fs if grid is not None else p.get("fs")
+    if fs is None:
+        raise ValueError("burst needs a grid (period/phase are given in seconds) or fs=")
+    t_on = float(p["t_on_s"]) * fs
+    t_off = float(p["t_off_s"]) * fs
+    if t_off <= 0:
+        return x                    # no off time at all: nothing to gate, not "gate every UI"
+    period = t_on + t_off
+    phase = float(p.get("phase_s", 0.0)) * fs
+    intervals = []
+    if t_on > 0:
+        start = -(phase % period) if period > 0 else -phase
+        while start < n:
+            s, w = int(round(start)), int(round(t_on))
+            if w > 0 and s + w > 0:
+                intervals.append((s, w))
+            if period <= 0:
+                break
+            start += period
+    mask = (np.ones(n) if not intervals
+            else IMP.burst_gate(n, intervals, edge_frac=float(p.get("edge_frac", 0.1))))
+    off = p.get("off", "zero")
+    if off == "zero":
+        return x * mask
+    if off == "hold":
+        on = mask >= 0.999
+        idx_arr = np.arange(n)
+        on_idx = np.where(on, idx_arr, -1)
+        ffill = np.maximum.accumulate(on_idx)
+        ffill[ffill < 0] = 0                        # nothing on yet: hold the first sample
+        held = x[ffill]
+        return mask * x + (1.0 - mask) * held
+    raise ValueError(f"burst: off must be 'zero' or 'hold', got {off!r}")
+
+
+def _op_pass_fet(x, p, streams, grid, idx):
+    """A pass-FET / analog switch -- see `physics.pass_fet`. `gate` is a nested carrier spec
+    for the gate DRIVE (the same nested-spec shape `open_drain`'s `second` and `crosstalk`'s
+    `aggressor` already use), thresholded at `vth` to decide the boolean `gate_on`."""
+    from .physics import pass_fet
+    spec = {"kind": "square", **p.get("gate", {})}
+    g = np.asarray(_carrier(spec, streams, grid, f"pass_fet_gate{idx}"), float)
+    gate_on = g > float(p.get("vth", 0.0))
+    return pass_fet(x, gate_on, rds_on_ohm=p.get("rds_on_ohm", 5.0),
+                    r_load_ohm=p.get("r_load_ohm", 1e6), v_rail_hi=p.get("v_rail_hi"),
+                    v_rail_lo=p.get("v_rail_lo"), diode_drop=p.get("diode_drop", 0.6),
+                    diode_on_ohm=p.get("diode_on_ohm", 1.0))
+
+
+def _op_modulate(x, p, streams, grid, idx):
+    """AM/ASK/OOK, FM/FSK, PM as one op -- `message` is a nested carrier spec (the same shape
+    `open_drain`'s `second` and `crosstalk`'s `aggressor` already take), so a caller reaches
+    every one of these by choosing the message's `kind`, not a new function per modulation.
+
+    AM/ASK/OOK COMBINE with the upstream `x` (the already-rendered RF carrier -- build it with
+    `carrier("sine", f_hz=fc, ...)` first). FM/FSK and PM GENERATE their own carrier at
+    `fc_hz` and do not read `x`: frequency/phase modulation is not a per-sample transform of an
+    already-rendered fixed-frequency carrier the way AM is (see `physics.fm_modulate`)."""
+    from . import physics as P_
+    kind = p.get("kind", "am")
+    if "message" not in p:
+        raise ValueError("modulate needs message=<a carrier spec dict>")
+    spec = {"kind": "sine", **p["message"]}
+    msg = np.asarray(_carrier(spec, streams, grid, f"modulate_msg{idx}"), float)
+    if kind in ("am", "ask", "ook"):
+        return P_.am_modulate(x, msg, depth=p.get("depth", 1.0),
+                              suppressed=p.get("suppressed", False))
+    if "fc_hz" not in p:
+        raise ValueError(f"modulate(kind={kind!r}) needs fc_hz=")
+    common = dict(n=_grid_n(grid, p), fs=getattr(grid, "fs", None),
+                  amp=p.get("amp", 1.0), phase_rad=p.get("phase_rad", 0.0))
+    if kind in ("fm", "fsk"):
+        if "dev_hz" not in p:
+            raise ValueError("modulate(kind='fm'/'fsk') needs dev_hz=")
+        return P_.fm_modulate(msg, fc_hz=p["fc_hz"], dev_hz=p["dev_hz"], **common)
+    if kind == "pm":
+        return P_.pm_modulate(msg, fc_hz=p["fc_hz"], dev_rad=p.get("dev_rad", 1.0), **common)
+    raise ValueError(f"modulate: unknown kind {kind!r} (use 'am'/'ask'/'ook'/'fm'/'fsk'/'pm')")
 
 
 def _op_lossy(x, p, streams, grid, idx):
@@ -306,10 +455,31 @@ def _op_open_drain(x, p, streams, grid, idx):
     mid = 0.5 * (np.percentile(xa, 1) + np.percentile(xa, 99))
     sink = xa < mid
     v_dd = float(p.get("v_dd", 3.3))
+    sink_b = None
+    if p.get("second") is not None:
+        # a SECOND driver on the same net, same nested-spec shape `crosstalk`'s `aggressor`
+        # and `hybrid_echo`'s `own` already use -- a wired-AND second sink is just another
+        # composition of an existing mechanism, not a new one.
+        spec = {"kind": "nrz", **p["second"]}
+        xb = np.asarray(_carrier(spec, streams, grid, f"open_drain_second{idx}"), float)
+        mid_b = 0.5 * (np.percentile(xb, 1) + np.percentile(xb, 99))
+        sink_b = xb < mid_b
+    if not sink.any() and (sink_b is None or not sink_b.any()):
+        # the sink decision thresholds the incoming carrier at the MIDPOINT of its OWN
+        # excursion, so a carrier that never varies (a `dc` level, any sign) straddles
+        # nothing and never sinks -- the line then does exactly nothing for the whole
+        # record, which is the same silent-impairment failure mode
+        # docs/ARCHITECTURE.md's "impairments can raise" rule exists to catch.
+        warnings.warn(
+            "open_drain: the incoming carrier(s) never sink (thresholded at their own "
+            "midpoint) -- the line reads as released (v_dd) for the whole record. A "
+            "constant carrier can never sink; use one that actually toggles.",
+            RuntimeWarning, stacklevel=2)
     y = open_drain_line(sink, grid.fs,
                         r_pullup_ohm=float(p["r_pullup_ohm"]), c_bus_f=float(p["c_bus_f"]),
                         v_dd=v_dd, r_sink_ohm=float(p.get("r_sink_ohm", 20.0)),
-                        v0=p.get("v0"))
+                        v0=p.get("v0"), sink_b_on=sink_b,
+                        r_sink_b_ohm=(float(p["r_sink_b_ohm"]) if "r_sink_b_ohm" in p else None))
     if p.get("center"):
         lo, hi = float(np.percentile(y, 1)), float(np.percentile(y, 99))
         span = max(hi - lo, 1e-30)
@@ -417,7 +587,11 @@ def _op_probe(x, p, streams, grid, idx):
                       r_source=p.get("r_source", 50.0), bw_hz=p.get("bw_hz"),
                       kind=p.get("kind", "bessel"), order=p.get("order", 4),
                       noise_rms=p.get("noise_rms", 0.0), atten=p.get("atten", 1.0),
-                      causal=p.get("causal"), rng=streams.role(f"probe/{idx}"))
+                      causal=p.get("causal"), rng=streams.role(f"probe/{idx}"),
+                      r_term_ohm=p.get("r_term_ohm"), compensate=p.get("compensate", 1.0),
+                      l_gnd_h=p.get("l_gnd_h", 0.0), coupling=p.get("coupling", "dc"),
+                      ac_fc_hz=p.get("ac_fc_hz"), overload_range=p.get("overload_range"),
+                      overload_tau_s=p.get("overload_tau_s", 1e-6))
 
 
 def _op_store(x, p, streams, grid, idx, win=None):
@@ -777,7 +951,8 @@ def _op_digitize(x, p, streams, grid, idx, win=None):
     return x
 
 
-_EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded, "lossy": _op_lossy, "reflect": _op_reflect,
+_EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
+         "capture": _op_capture, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
          "tx_ffe": _op_tx_ffe, "sparam": _op_sparam, "cascade": _op_cascade,
          "resonant_reflect": _op_resonant_reflect, "nonlinearity": _op_nonlinearity,
@@ -793,7 +968,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded, "lo
          "de_emphasis": _op_de_emphasis, "acquire": _op_acquire, "probe": _op_probe,
          "events": _op_events,
          "dcd": _op_dcd, "agc": _op_agc, "rx_noise": _op_rx_noise,
-         "sample_clock": _op_sample_clock}
+         "sample_clock": _op_sample_clock, "burst": _op_burst, "pass_fet": _op_pass_fet,
+         "modulate": _op_modulate}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -807,10 +983,11 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded, "lo
 # through -- so it gets its own rank rather than sharing the instrument's.
 KIND_RANK = {"source": 0, "shape": 1, "supply": 2, "channel": 3, "probe": 4, "instrument": 5}
 OP_KIND = {
-    "carrier": "source", "symbols": "source", "coded": "source",
+    "carrier": "source", "symbols": "source", "coded": "source", "capture": "source",
     "tx_ffe": "shape", "de_emphasis": "shape", "events": "shape", "nonlinearity": "shape",
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
-    "dcd": "shape", "open_drain": "shape",
+    "dcd": "shape", "open_drain": "shape", "burst": "shape", "pass_fet": "shape",
+    "modulate": "shape",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
     "cascade": "channel",
@@ -917,7 +1094,16 @@ _LEAD_LTI = {"lossy", "reflect", "resonant_reflect", "ac_couple", "sparam", "cas
 _LEAD_SKIP = {"carrier", "symbols", "coded", "nonlinearity", "crosstalk", "crosstalk_matrix", "digitize",
               "store", "timebase", "timing", "ssc", "supply_coupling", "dfe",
               "optical", "dispersion", "eo", "fiber", "optical_mpi", "edfa", "photodetect", "tia",
-              "dcd", "rx_noise", "agc"}
+              "dcd", "rx_noise", "agc",
+              # `burst`'s on/off cadence is periodic, measured from the record's own start --
+              # same as `ssc`/`timing` above, it has no impulse response to size a guard from,
+              # and the caveat is the same one they already carry: a lead-in changes WHERE in
+              # the on/off cycle the delivered window begins, not what the cycle is.
+              "burst",
+              # `pass_fet` is a nonlinear per-sample decision (gate threshold, then either a
+              # divider or a diode clamp) with no impulse response of its own -- the same
+              # bucket `dcd`/`agc` are already in.
+              "pass_fet"}
 # Ops with REAL memory but no probeable impulse response, whose extent is known in closed form.
 #
 # This category exists because `open_drain` fits none of the other three and putting it in the wrong
@@ -982,6 +1168,14 @@ def _lead_analytic_reach(ops, grid):
 # to silently move where these land, and a fault placed at sample 5000 of the record is not the same
 # fault at sample 5000 of the record-plus-guard.
 _LEAD_REJECT = {
+    "modulate": "AM is memoryless but FM/PM integrate the message across the WHOLE record "
+               "(a cumulative phase), and the classification is per OP NAME, not per call -- "
+               "extending the message backward for a lead-in would change that integral, so "
+               "the op is refused uniformly rather than being silently right for one kind and "
+               "wrong for another",
+    "capture": "a captured record has no synthesized pattern to extend backward in time -- "
+               "unlike `carrier`, which renders more of the SAME periodic sequence for the "
+               "guard, a lead-in here would have to invent history the capture never had",
     "acquire": "it resamples the record onto a second rate, so the guard's sample count is not the "
                "record's and the window cannot be sliced back out",
     "events": "it places a localized mechanism at an absolute position in the record, and a lead-in "
@@ -1092,8 +1286,12 @@ def _lead_extent(ops, grid, seed, n, rel=LEAD_IN_REL):
         d = np.zeros(nfft); d[0] = 1.0
         g = None if grid is None else dataclasses.replace(grid, n=nfft, segments=None)
         for i, o in enumerate(todo):
-            if o["op"] == "probe" and o.get("noise_rms"):
-                o = {k: v for k, v in o.items() if k != "noise_rms"}   # noise is not a response
+            if o["op"] == "probe" and (o.get("noise_rms") or o.get("overload_range") is not None):
+                # noise is not a response, and overload recovery is nonlinear/stateful (a unit
+                # impulse never approaches the overload range, so it would probe as a no-op
+                # rather than the op's real behaviour) -- strip both before measuring the
+                # impulse response, the same reason `noise_rms` is already stripped here.
+                o = {k: v for k, v in o.items() if k not in ("noise_rms", "overload_range")}
             d = _EXEC[o["op"]](d, o, st, g, i)
         return np.fft.rfft(d)
 
@@ -1291,6 +1489,61 @@ class Signal:
         is recorded, so the day a default is corrected every record moves with it."""
         return self._add("coded", scheme=scheme, **params)
 
+    def capture(self, path=None, values=None, fs_hz=None, n=None, resample=False, embed=False):
+        """First op: import a REAL capture from disk (or literal samples) as the start of a
+        chain, so it can take the same later ops a synthesized carrier takes --
+        `lossy`/`probe`/`events`/`scope`, anything downstream of a source.
+
+            Signal(seed=1).capture(path="scope.npy")                       # read at render time
+            Signal(seed=1).capture(values=[...], fs_hz=1e9)                # embedded, no file
+            Signal(seed=1).capture(path="scope.npy", embed=True)           # read now, then embed
+
+        `path=` (``.npy`` / ``.npz`` with a ``'values'`` array / a two-column ``.csv``) is read
+        each time the chain renders, and the recipe records the path plus a sha256 DIGEST OVER
+        THE SAMPLE VALUES (not the file's bytes -- the same numbers re-saved through a
+        different codec or dtype still match). A file that no longer matches that digest is a
+        named error at replay time; a missing file is a named error, not zeros.
+
+        `values=[...]` is the always-replayable route -- literal samples embedded in the
+        recipe, the same trade `symbols()` makes for a synthesized source. `embed=True` reads
+        a `path=` capture NOW and stores its values inline instead of the path, for a record
+        that must not depend on the file still being there later.
+
+        `fs_hz` is provenance (and what `resample=True` resamples FROM); it does not change
+        the array length on its own, and by itself it does NOT make a downstream Hz-denominated
+        knob (`lossy(loss_at_ghz=...)`, `probe(bw_hz=...)`) mean anything real -- those read
+        `grid.fs`. Pass a `grid=Grid(fs=..., n=...)` matching the file's own rate; `fs_hz=` with
+        no such `Grid` warns, since nothing downstream then has a real rate to interpret against.
+        If the loaded length does not match the Grid's `n` (or an explicit `n=`), that is a
+        named error unless `resample=True` is passed -- silently truncating or padding a
+        captured record is exactly the failure mode `sample_clock`'s `n_out` warning exists to
+        prevent, and a capture gets the same refusal instead."""
+        if values is not None:
+            params = {"values": [float(v) for v in values]}
+            if fs_hz is not None:
+                params["fs_hz"] = fs_hz
+            if n is not None:
+                params["n"] = n
+            if resample:
+                params["resample"] = True
+            return self._add("capture", **params)
+        if path is None:
+            raise ValueError("capture needs path=... or values=[...]")
+        if embed:
+            from . import capture as CAP
+            y = CAP.load_values(path)
+            params = {"values": [float(v) for v in y], "sha256": CAP.digest(y)}
+        else:
+            from . import capture as CAP
+            params = {"path": str(path), "sha256": CAP.digest(CAP.load_values(path))}
+        if fs_hz is not None:
+            params["fs_hz"] = fs_hz
+        if n is not None:
+            params["n"] = n
+        if resample:
+            params["resample"] = True
+        return self._add("capture", **params)
+
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
         pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter.
@@ -1299,7 +1552,20 @@ class Signal:
         'legacy' (== 'prbs7'), 'prbs7'/'prbs9'/'prbs11'/'prbs13'/'prbs15'/'prbs23'/
         'prbs31' and 'clock'; PAM4 takes 'legacy', 'prbs13q', 'prbs31q'. Crossing them
         raises rather than coercing -- see physics.carrier_symbols for why the order
-        matters to channel ISI."""
+        matters to channel ISI.
+
+        Analog sources are the same op with a different `kind`, not a second builder:
+        'sine'/'square'/'triangle'/'sawtooth'/'dc' (params: f_hz or cycles, amp, offset,
+        phase_rad, duty/symmetry, tr_frac), plus 'step'/'pulse'/'exp' (a band-limited step, a
+        one-shot pulse, a single-pole RC step response -- t_step_s/t_start_s/tau_s in seconds,
+        or their _frac equivalents as a fraction of the record), 'chirp' (f0_hz/f1_hz, a REAL
+        Hz sweep -- see physics.chirp_sweep; physics.chirp is the legacy normalised one and is
+        untouched), 'two_tone' (f1_hz/f2_hz), and 'noise' (rms, df, pink_frac, band_lo_hz/
+        band_hi_hz). 'cmos' is the one UNIPOLAR kind: v_lo/v_hi/duty/f_hz/tr_s, in real volts,
+        not the +/-1 amp/offset the rest of these share (tr_s is an absolute edge time in
+        seconds, unlike every tr_frac above -- a real gate's edge does not shrink with
+        frequency). Compose `probe(r_source=..., c_load_f=...)` after it for a loaded-output
+        RC pole rather than reaching for a knob here."""
         return self._add("carrier", kind=kind, **params)
 
     def nonlinearity(self, **params):
@@ -1444,11 +1710,76 @@ class Signal:
     def probe(self, **params):
         """The probe the measurement is made THROUGH — placed between the channel and the front
         end. Without it a chain models a perfect tap, which does not exist.
+
         params: c_load_f (input capacitance, F — an RC pole at 1/(2*pi*R*C) against r_source),
-        r_source (ohms), bw_hz + kind/order/causal (the probe's OWN bandwidth), noise_rms (its own
-        input-referred noise, added at the tip), atten (divider ratio as a gain, 0.1 = 10:1).
-        Defaults are the bare loading pole: no bandwidth limit, no noise, no division."""
+        r_source (ohms), bw_hz + kind/order/causal (the probe's OWN bandwidth — the "bandwidth
+        limiter" switch on a real instrument is exactly this at a stated corner, e.g.
+        bw_hz=20e6; there is no separate knob for it), noise_rms (its own input-referred noise,
+        added at the tip), atten (divider ratio as a gain, 0.1 = 10:1).
+
+        The probe pack: r_term_ohm (the probe's own input resistance -- 1e6 for a classic
+        high-Z passive probe, 50.0 for a 50-Ohm-terminated input; default None is the original
+        implicitly-infinite termination), compensate (a compensation trimmer's adjustment,
+        1.0 = correctly compensated = no change, <1 rounds off, >1 peaks -- see
+        `instrument._compensation_and_ground_lead_H`), l_gnd_h (ground-lead inductance forming
+        a real second-order ring with c_load_f), coupling ('dc' default or 'ac', the latter
+        applying `ac_couple` at ac_fc_hz), overload_range/overload_tau_s (a stated linear range
+        past which the probe hard-clips and slowly recovers -- default None is off; this stage
+        is nonlinear/stateful, unlike everything else here).
+
+        Defaults are the bare loading pole: no bandwidth limit, no noise, no division, and every
+        probe-pack knob above at its identity, so existing recipes render bit-identically."""
         return self._add("probe", **params)
+
+    def modulate(self, **params):
+        """AM/ASK/OOK, FM/FSK, or PM -- one op, `kind` and the message's own carrier `kind`
+        picking which. `message` is a nested carrier spec, the same shape `open_drain`'s
+        `second` and `crosstalk`'s `aggressor` already take (e.g.
+        ``message=dict(kind="sine", f_hz=1e3)`` for analog, or a `cmos`/digital carrier for
+        ASK/OOK/FSK's two-level message).
+
+        params: kind ('am' default, or 'ask'/'ook' -- the same physics, a two-level message;
+        'fm'/'fsk'; 'pm'), message (required), depth/suppressed (AM), fc_hz/dev_hz (FM/FSK,
+        both required), fc_hz/dev_rad (PM, fc_hz required).
+
+        OOK with a UNIPOLAR message (a `cmos` carrier, 0..1) needs ``suppressed=True``:
+        ``(1 + depth*message)`` never reaches 0 for a message that only goes 0..1, while
+        ``depth*message`` does -- full suppression at message=0, full amplitude at message=1.
+
+        AM/ASK/OOK COMBINE with the upstream carrier (build it with `carrier("sine", f_hz=fc,
+        ...)` first). FM/FSK/PM GENERATE their own carrier at `fc_hz` and do not read the
+        upstream signal -- frequency/phase modulation is not a per-sample transform of an
+        already-rendered fixed-frequency carrier the way AM is."""
+        return self._add("modulate", **params)
+
+    def pass_fet(self, **params):
+        """A gate-controlled series element -- a pass-FET or analog switch. `gate` is a nested
+        carrier spec for the gate DRIVE (the same shape `open_drain`'s `second` and
+        `crosstalk`'s `aggressor` take, e.g. ``gate=dict(kind="square", f_hz=1e6, duty=0.5)``),
+        compared against `vth` (default 0.0) to decide on/off.
+
+        params: gate, vth, rds_on_ohm (the ON channel resistance, a divider against
+        r_load_ohm), r_load_ohm, v_rail_hi/v_rail_lo (default None each = that side's body
+        diode never conducts), diode_drop, diode_on_ohm.
+
+        OFF is HIGH-Z (reads as 0) unless the signal has pushed past a stated rail, in which
+        case the body diode clamps it there -- see `physics.pass_fet`."""
+        return self._add("pass_fet", **params)
+
+    def burst(self, **params):
+        """Burst/idle on ANY carrier -- periodic on/off gating, applied to whatever samples
+        arrive so it composes after an analog carrier, a `cmos` clock, or a digital one alike.
+
+        params: t_on_s, t_off_s (the cadence, in seconds -- needs a Grid), off ('zero', the
+        default, or 'hold': sample-and-hold the last on-value through the gap, e.g. a squelched
+        idle level rather than a return to 0), edge_frac (the on/off transition as a fraction of
+        the shorter of t_on_s/t_off_s, so the gate's own edges do not read as signal edges --
+        see `impairments.burst_gate`), phase_s (shifts where the first on/off boundary falls).
+
+        The cadence is periodic and its phase is measured from the record's own start, the same
+        as `ssc`/`timing`: a lead-in changes WHERE in the on/off cycle the delivered window
+        begins, not what the cycle is."""
+        return self._add("burst", **params)
 
     def drift(self, **params):
         """Slow sub-record drift (thermal/VGA/DC). params: kind('gain'|'amplitude'|'dc'),
@@ -1523,7 +1854,20 @@ class Signal:
         rise-time knob: tr(30-70 %) = 0.8473 * Rp * Cb. `physics.rc_tau_for_rise_time` inverts that
         if you have the specified rise time and want the resistor. Raise Cb far enough and the line
         stops reaching the input-high threshold inside a bit, which is how these buses actually
-        fail and which a symmetric slow-edge model cannot produce."""
+        fail and which a symmetric slow-edge model cannot produce.
+
+        `second=` adds a SECOND driver sharing this net -- a nested carrier spec, the same shape
+        `crosstalk`'s `aggressor` and `hybrid_echo`'s `own` already take (e.g.
+        ``second=dict(kind="nrz", n_ui=32, seed=9)``), with its own on-resistance `r_sink_b_ohm`
+        (defaults to `r_sink_ohm`). This resolves the wired-AND at the ANALOG level: when both
+        devices sink together the target is the divider against their PARALLEL on-resistance, an
+        analog mid-level dominated by whichever sink is stronger -- not the logic-level OR
+        `bus.open_drain`/`combine_drivers` give a boolean carrier.
+
+        The sink decision thresholds each incoming carrier at the MIDPOINT of its OWN
+        excursion, so a `dc` carrier -- any level, any sign -- straddles nothing and never
+        sinks; only a carrier that actually toggles drives the bus. If NEITHER device ever
+        sinks the op warns, since the line then does exactly nothing for the whole record."""
         return self._add("open_drain", **params)
 
     def lossy(self, **params):

@@ -1597,21 +1597,32 @@ def rc_tau_for_rise_time(tr_s, lo_frac=0.3, hi_frac=0.7):
     return float(tr_s) / math.log((1.0 - lo) / (1.0 - hi))
 
 
-def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.0, v0=None):
+def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.0, v0=None,
+                    sink_b_on=None, r_sink_b_ohm=None):
     """Line voltage on an open-drain bus, integrated as a first-order RC.
 
-      `sink_on`        boolean per sample: is ANY device pulling the line down. Several devices on
-                       one line is the OR of their sinks -- that is the wired-AND, at this level.
+      `sink_on`        boolean per sample: is device A pulling the line down.
       `r_pullup_ohm`   the pull-up to `v_dd`
       `c_bus_f`        total bus capacitance (wiring + every device's input)
-      `r_sink_ohm`     the sink's on-resistance while it is pulling down
+      `r_sink_ohm`     device A's on-resistance while it is pulling down
       `v0`             initial line voltage; default is the settled value for the first sample, so
                        a record does not open with an edge nobody asked for
+      `sink_b_on`      a SECOND device's boolean per sample (same shape as `sink_on`), or None
+                       (the default -- one sink, unchanged from before this parameter existed)
+      `r_sink_b_ohm`   device B's on-resistance; defaults to `r_sink_ohm` when B is given
 
-    Two resistances, so two time constants and two targets:
+    With one sink, two resistances give two time constants and two targets:
 
-        released   target v_dd,                          tau = Rp * Cb
-        sinking    target v_dd * Rs/(Rp+Rs)  (a divider), tau = (Rp||Rs) * Cb
+        released       target v_dd,                          tau = Rp * Cb
+        A sinking       target v_dd * Rs/(Rp+Rs)  (a divider), tau = (Rp||Rs) * Cb
+
+    With a second sink the bus is WIRED-AND resolved at the ANALOG level, not the logic level
+    `bus.open_drain`'s OR of booleans: several devices sharing one line is a resistor network,
+    so when A and B sink TOGETHER the target is the divider against their PARALLEL on-resistance
+    (Rs*Rs_b/(Rs+Rs_b)) -- lower than either alone, and dominated by whichever sink is stronger
+    (lower Ron), which is what "a low anywhere wins" means once the line is a real circuit rather
+    than a boolean. Each of the four (A, B) states has its own closed-form target and time
+    constant; which one applies is chosen per sample.
 
     Integrated by exponential stepping, v <- target + (v - target) exp(-dt/tau), which is EXACT for
     a piecewise-constant target rather than an Euler approximation of it -- so the rise time the
@@ -1627,9 +1638,35 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
     if rp <= 0 or rs <= 0 or cb <= 0:
         raise ValueError("r_pullup_ohm, r_sink_ohm and c_bus_f must all be positive")
     fs = float(fs)
+    has_b = sink_b_on is not None
+    if has_b:
+        sink_b = np.asarray(sink_b_on)
+        if sink_b.dtype != bool:
+            sink_b = sink_b.astype(bool)
+        if sink_b.shape != sink.shape:
+            raise ValueError(f"open_drain_line: sink_b_on must be the same shape as sink_on "
+                             f"({sink.shape}), got {sink_b.shape}")
+        rs_b = float(r_sink_b_ohm) if r_sink_b_ohm is not None else rs
+        if rs_b <= 0:
+            raise ValueError("r_sink_b_ohm must be positive")
+        r_par = (rs * rs_b) / (rs + rs_b)
+
+    def _divider(r):
+        target = float(v_dd) * r / (rp + r)
+        tau = (rp * r / (rp + r)) * cb
+        return target, tau
+
     tau_hi = rp * cb                                     # released: the slow one
-    tau_lo = (rp * rs / (rp + rs)) * cb                  # sinking
-    v_low = float(v_dd) * rs / (rp + rs)
+    v_release = float(v_dd), tau_hi
+    v_a, tau_a = _divider(rs)
+    if has_b:
+        v_b, tau_b = _divider(rs_b)
+        v_both, tau_both = _divider(r_par)
+        # the smallest tau among every sinking case is the hardest edge to resolve -- always the
+        # BOTH-on case, since a parallel resistance is never larger than either resistor alone
+        tau_lo = tau_both
+    else:
+        tau_lo = tau_a
     dt = 1.0 / fs
     # Which edge must the grid resolve? Exponential stepping is EXACT for a piecewise-constant
     # target at any dt, so at dt >> tau the line settling inside one sample is the correct answer
@@ -1651,24 +1688,311 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
     if dt > 0.5 * tau_lo:
         warnings.warn(
             f"sample rate {fs:.4g} Sa/s does not resolve the fall: dt = {dt:.4g} s against "
-            f"tau = {tau_lo:.4g} s ((Rp||Rs) * Cb). The level is correct and the rise is "
-            f"resolved; the falling edge completes inside one sample, as it would on a real "
-            f"capture at this rate.", RuntimeWarning, stacklevel=2)
-    k_hi = math.exp(-dt / tau_hi)
-    k_lo = math.exp(-dt / tau_lo)
+            f"tau = {tau_lo:.4g} s (the fastest sinking case's (Rp||Rs) * Cb). The level is "
+            f"correct and the rise is resolved; the falling edge completes inside one sample, "
+            f"as it would on a real capture at this rate.", RuntimeWarning, stacklevel=2)
     n = sink.size
     v = np.empty(n, dtype=float)
-    cur = (v_low if (n and sink[0]) else float(v_dd)) if v0 is None else float(v0)
+    if has_b:
+        cases = {(False, False): (v_release[0], math.exp(-dt / v_release[1])),
+                 (True, False): (v_a, math.exp(-dt / tau_a)),
+                 (False, True): (v_b, math.exp(-dt / tau_b)),
+                 (True, True): (v_both, math.exp(-dt / tau_both))}
+        first = cases[(bool(sink[0]), bool(sink_b[0]))][0] if n else float(v_dd)
+        cur = first if v0 is None else float(v0)
+        for i in range(n):
+            target, k = cases[(bool(sink[i]), bool(sink_b[i]))]
+            cur = target + (cur - target) * k
+            v[i] = cur
+        return v
+    k_hi = math.exp(-dt / tau_hi)
+    k_lo = math.exp(-dt / tau_a)
+    cur = (v_a if (n and sink[0]) else float(v_dd)) if v0 is None else float(v0)
     for i in range(n):
         if sink[i]:
-            cur = v_low + (cur - v_low) * k_lo
+            cur = v_a + (cur - v_a) * k_lo
         else:
             cur = v_dd + (cur - v_dd) * k_hi
         v[i] = cur
     return v
 
 
-ANALOG_KINDS = ("sine", "square", "triangle", "sawtooth", "dc")
+def _resolve_abs_edge(requested_samples, floor_samples=TR_DEFAULT_FLOOR_SAMPLES, warn=True):
+    """Like `resolve_rise_time`, for an edge stated directly in samples rather than as a
+    fraction of a symbol (`step`/`pulse`/`cmos`, whose edges are `tr_s`/`tr_frac` of the
+    RECORD, not of a UI). Same floor, same visible clamp -- a silently inflated edge is the
+    same defect `resolve_rise_time`'s docstring describes, on a different set of callers."""
+    floor = max(float(floor_samples), TR_NYQUIST_LIMIT_SAMPLES)
+    if requested_samples >= floor:
+        return requested_samples, False
+    if warn:
+        warnings.warn(
+            f"edge time clamped: {requested_samples:.3f} samples requested, floor is "
+            f"{floor:.3f} ({floor / max(requested_samples, 1e-12):.1f}x). Edge shaping will "
+            f"dominate the pulse response. Raise the sample rate, or raise the requested "
+            f"edge time.", RuntimeWarning, stacklevel=3)
+    return floor, True
+
+
+def _fs_of(fs, grid):
+    """The sample rate an absolute-time knob needs, from whichever of `fs`/`grid` was given."""
+    if fs:
+        return float(fs)
+    if grid is not None and getattr(grid, "fs", None):
+        return float(grid.fs)
+    return None
+
+
+def step(amp=1.0, offset=0.0, t_step_s=None, t_step_frac=0.5, tr_s=None, tr_frac=0.02,
+         n=None, fs=None, grid=None, causal=False):
+    """A single band-limited step from ``offset - amp`` to ``offset + amp``.
+
+    ``t_step_s`` (seconds, needs ``fs``/``grid``) or ``t_step_frac`` (fraction of the record,
+    default the midpoint) place it; ``tr_s`` (seconds) is the edge's absolute 10-90 % duration,
+    else ``tr_frac`` of the RECORD -- there is no period here to be a fraction of, unlike
+    `square`'s ``tr_frac``."""
+    t = timebase(n, fs, grid)
+    nn = t.size
+    if t_step_s is not None:
+        fs_eff = _fs_of(fs, grid)
+        if fs_eff is None:
+            raise ValueError("step: t_step_s needs fs= or grid=")
+        i_step = int(round(float(t_step_s) * fs_eff))
+    else:
+        i_step = int(round(float(t_step_frac) * nn))
+    ideal = np.where(np.arange(nn) < i_step, -1.0, 1.0)
+    if tr_s is not None:
+        fs_eff = _fs_of(fs, grid)
+        if fs_eff is None:
+            raise ValueError("step: tr_s needs fs= or grid=")
+        tr, _ = _resolve_abs_edge(float(tr_s) * fs_eff)
+    else:
+        tr, _ = _resolve_abs_edge(float(tr_frac) * nn)
+    return offset + amp * _shape_edges(ideal, tr, causal)
+
+
+def pulse(amp=1.0, offset=0.0, t_start_s=None, t_start_frac=0.4, width_s=None,
+          width_frac=0.1, tr_s=None, tr_frac=0.02, n=None, fs=None, grid=None, causal=False):
+    """A single band-limited rectangular pulse -- `square`'s one-shot cousin. ``t_start``/
+    ``width`` take the same seconds-or-fraction-of-record pair `step` does."""
+    t = timebase(n, fs, grid)
+    nn = t.size
+    fs_eff = _fs_of(fs, grid)
+    if t_start_s is not None:
+        if fs_eff is None:
+            raise ValueError("pulse: t_start_s needs fs= or grid=")
+        i0 = int(round(float(t_start_s) * fs_eff))
+    else:
+        i0 = int(round(float(t_start_frac) * nn))
+    if width_s is not None:
+        if fs_eff is None:
+            raise ValueError("pulse: width_s needs fs= or grid=")
+        w = int(round(float(width_s) * fs_eff))
+    else:
+        w = int(round(float(width_frac) * nn))
+    w = max(w, 1)
+    idx = np.arange(nn)
+    ideal = np.where((idx >= i0) & (idx < i0 + w), 1.0, -1.0)
+    if tr_s is not None:
+        if fs_eff is None:
+            raise ValueError("pulse: tr_s needs fs= or grid=")
+        tr, _ = _resolve_abs_edge(float(tr_s) * fs_eff)
+    else:
+        tr, _ = _resolve_abs_edge(float(tr_frac) * nn)
+    return offset + amp * _shape_edges(ideal, tr, causal)
+
+
+def exp(amp=1.0, offset=0.0, t_start_s=None, t_start_frac=0.0, tau_s=None, tau_frac=0.1,
+        decay=False, n=None, fs=None, grid=None):
+    """A single-pole exponential step response: from ``offset`` toward ``offset + amp``
+    (``decay=False``, the default) or from ``offset + amp`` back toward ``offset``
+    (``decay=True``), starting at ``t_start``, with time constant ``tau``.
+
+    Exact integration of ``v <- target + (v - target) * exp(-dt/tau)`` (see
+    `open_drain_line`/`rc_tau_for_rise_time`, the same construction), so a caller can size a
+    channel or a probe against a KNOWN RC answer rather than a step and a guessed filter."""
+    t = timebase(n, fs, grid)
+    nn = t.size
+    if t_start_s is not None:
+        fs_eff = _fs_of(fs, grid)
+        if fs_eff is None:
+            raise ValueError("exp: t_start_s needs fs= or grid=")
+        i0 = int(round(float(t_start_s) * fs_eff))
+    else:
+        i0 = int(round(float(t_start_frac) * nn))
+    if tau_s is not None:
+        fs_eff = _fs_of(fs, grid)
+        if fs_eff is None:
+            raise ValueError("exp: tau_s needs fs= or grid=")
+        tau = max(float(tau_s) * fs_eff, 1e-9)
+    else:
+        tau = max(float(tau_frac) * nn, 1e-9)
+    idx = np.arange(nn, dtype=float)
+    dtt = np.clip(idx - i0, 0.0, None)
+    progress = 1.0 - np.exp(-dtt / tau)                # 0 at t_start, -> 1
+    if decay:
+        progress = 1.0 - progress                      # 1 at t_start, -> 0
+    y = np.where(idx < i0, (1.0 if decay else 0.0), progress)
+    return offset + amp * y
+
+
+def chirp_sweep(f0_hz=None, f1_hz=None, amp=1.0, offset=0.0, phase_rad=0.0, method="linear",
+                n=None, fs=None, grid=None):
+    """A frequency sweep in REAL Hz between ``f0_hz`` and ``f1_hz`` over the record's duration.
+
+    This is deliberately a different function from `chirp` below: that one predates absolute
+    units, sweeps in CYCLES over a normalised ``[0, 1)`` record, and stays bit-identical (see
+    the SKILL file). Undefaulted frequencies fall back to the same 3-to-40-cycles-per-record
+    shape `chirp` uses, translated into Hz by the record's own duration, so a caller who omits
+    them still gets a sweep rather than a silent single tone."""
+    t = timebase(n, fs, grid)
+    span = t[-1] - t[0] + (t[1] - t[0] if t.size > 1 else 1.0)
+    f0 = 3.0 / span if f0_hz is None else float(f0_hz)
+    f1 = 40.0 / span if f1_hz is None else float(f1_hz)
+    y = signal.chirp(t, f0=f0, f1=f1, t1=span, method=method, phi=math.degrees(phase_rad))
+    return offset + amp * y
+
+
+def two_tone(f1_hz=None, f2_hz=None, amp1=1.0, amp2=1.0, offset=0.0, phase1_rad=0.0,
+             phase2_rad=0.0, n=None, fs=None, grid=None):
+    """Two sinusoids summed at real frequencies ``f1_hz``/``f2_hz`` -- the standard two-tone /
+    intermodulation stimulus. Undefaulted frequencies fall back to 5 and 11 cycles per record
+    (Hz via the record's duration), two frequencies with no small common factor."""
+    t = timebase(n, fs, grid)
+    span = t[-1] - t[0] + (t[1] - t[0] if t.size > 1 else 1.0)
+    f1 = 5.0 / span if f1_hz is None else float(f1_hz)
+    f2 = 11.0 / span if f2_hz is None else float(f2_hz)
+    return (offset + amp1 * np.sin(2 * np.pi * f1 * t + phase1_rad)
+            + amp2 * np.sin(2 * np.pi * f2 * t + phase2_rad))
+
+
+def analog_noise(rms=0.2, offset=0.0, df=None, pink_frac=0.0, band_lo_hz=None,
+                 band_hi_hz=None, n=None, fs=None, grid=None, rng=None):
+    """Broadband, optionally band-limited and/or partly 1/f, noise as a carrier in its own
+    right -- for a record that is a noise floor rather than a link with a noise floor on it.
+
+    Reuses `impairments.realistic_noise` (heavy tails via `df`, 1/f via `pink_frac`) rather
+    than a second noise generator; ``band_lo_hz``/``band_hi_hz`` (needs ``fs``/``grid``) apply
+    an additional brick-wall band limit and renormalise back to the requested rms, the same
+    two-step `instrument.scope_bandwidth`'s ``'brickwall'`` kind already uses elsewhere."""
+    from .impairments import realistic_noise
+    t = timebase(n, fs, grid)
+    nn = t.size
+    y = realistic_noise(nn, rms=1.0, df=(1e6 if df is None else df), pink_frac=pink_frac, rng=rng)
+    if band_lo_hz is not None or band_hi_hz is not None:
+        fs_eff = _fs_of(fs, grid)
+        if fs_eff is None:
+            raise ValueError("analog_noise: band_lo_hz/band_hi_hz need fs= or grid=")
+        freqs = np.fft.rfftfreq(nn, d=1.0 / fs_eff)
+        mask = np.ones_like(freqs, dtype=bool)
+        if band_lo_hz is not None:
+            mask &= freqs >= float(band_lo_hz)
+        if band_hi_hz is not None:
+            mask &= freqs <= float(band_hi_hz)
+        y = np.fft.irfft(np.fft.rfft(y) * mask, n=nn)
+        cur = float(np.sqrt((y * y).mean()))
+        if cur > 0:
+            y = y / cur
+    return offset + rms * y
+
+
+def cmos(v_lo=0.0, v_hi=3.3, duty=0.5, f_hz=None, cycles=None, tr_s=1e-9, phase_rad=0.0,
+         n=None, fs=None, grid=None, causal=False):
+    """A rail-to-rail CMOS/PWM waveform IN REAL VOLTS, ``v_lo`` to ``v_hi`` -- unipolar, not
+    the normalised +/-1 the other analog carriers use. A clock is ``duty=0.5``; PWM is any
+    other duty. See the module docstring above `open_drain_line` for why a unipolar source is
+    kept in real volts rather than stretched onto +/-1 (0 V has to stay 0, not become -1).
+
+    ``tr_s`` is the edge's 10-90 % duration in ABSOLUTE SECONDS, unlike `square`'s ``tr_frac``:
+    a real gate's output-stage edge time does not shrink as the gate is clocked faster. Compose
+    with `probe(r_source=..., c_load_f=...)` for the loaded-output RC pole (an output
+    impedance only does something where it drives a load) rather than a knob here."""
+    t, f, _ = _cycles_and_t(f_hz, cycles, n, fs, grid)
+    fs_eff = _fs_of(fs, grid)
+    if fs_eff is None:
+        raise ValueError("cmos: needs fs= or grid= (tr_s is an absolute time)")
+    ph = (f * t + phase_rad / (2 * np.pi)) % 1.0
+    ideal = np.where(ph < float(duty), 1.0, -1.0)
+    tr, _ = _resolve_abs_edge(float(tr_s) * fs_eff)
+    y01 = 0.5 * (1.0 + _shape_edges(ideal, tr, causal))          # 0 .. 1
+    return float(v_lo) + (float(v_hi) - float(v_lo)) * y01
+
+
+def pass_fet(x, gate_on, rds_on_ohm=5.0, r_load_ohm=1e6, v_rail_hi=None, v_rail_lo=None,
+             diode_drop=0.6, diode_on_ohm=1.0):
+    """A gate-controlled series element -- a pass-FET or analog switch -- between `x` and a
+    load `r_load_ohm`.
+
+      ON  (`gate_on` True):  the channel conducts through `rds_on_ohm`, a plain resistive
+          divider against the load: ``x * r_load/(r_load + rds_on)``.
+      OFF (`gate_on` False): the channel is OPEN -- HIGH-Z, reads as 0 -- UNLESS the input has
+          pushed past a stated rail. A real switch's body diode conducts once the node exceeds
+          ``v_rail_hi + diode_drop`` or falls below ``v_rail_lo - diode_drop``, clamping it
+          there through the diode's own (small) on-resistance against the same load. Either
+          rail defaults to None (no diode on that side, e.g. an unbounded rail).
+
+    `gate_on` is a boolean per sample -- the composed knob is `Vth`: a gate DRIVE carrier
+    compared against a threshold upstream of this function (see `compose._op_pass_fet`, which
+    renders the gate the same way `open_drain`'s second sink or `crosstalk`'s aggressor do)."""
+    x = np.asarray(x, float)
+    gate = np.asarray(gate_on, bool)
+    on_out = x * (r_load_ohm / (r_load_ohm + rds_on_ohm))
+    off_out = np.zeros_like(x)
+    diode_gain = r_load_ohm / (r_load_ohm + diode_on_ohm)
+    if v_rail_hi is not None:
+        hi_clip = float(v_rail_hi) + float(diode_drop)
+        off_out = np.where(x > hi_clip, hi_clip * diode_gain, off_out)
+    if v_rail_lo is not None:
+        lo_clip = float(v_rail_lo) - float(diode_drop)
+        off_out = np.where(x < lo_clip, lo_clip * diode_gain, off_out)
+    return np.where(gate, on_out, off_out)
+
+
+def am_modulate(carrier, message, depth=1.0, suppressed=False):
+    """AM/ASK/OOK, on real Hz/seconds via whatever generated `carrier`/`message`: a plain
+    per-sample combination, so ASK/OOK fall out of choosing a two-level `message` (a `cmos`
+    carrier or a digital one) rather than needing their own function.
+
+    ``suppressed=False`` (AM, ASK, OOK): ``(1 + depth*message) * carrier``.
+    ``suppressed=True`` (double-sideband suppressed carrier): ``depth * message * carrier`` --
+    no carrier term, so the spectrum has no energy left at `fc` itself.
+    """
+    carrier = np.asarray(carrier, float)
+    message = np.asarray(message, float)
+    if suppressed:
+        return float(depth) * message * carrier
+    return (1.0 + float(depth) * message) * carrier
+
+
+def fm_modulate(message, fc_hz, dev_hz, amp=1.0, phase_rad=0.0, n=None, fs=None, grid=None):
+    """FM/FSK in REAL Hz: instantaneous frequency ``fc_hz + dev_hz * message``, generated
+    fresh (frequency modulation is not expressible as a per-sample transform of an
+    already-rendered fixed-frequency carrier, unlike `am_modulate`) -- FSK falls out of a
+    two-level `message` the same way OOK falls out of `am_modulate`.
+
+    This is a NEW function on the Grid, not `physics.fm` (which predates absolute units, takes
+    a unitless `beta`, and stays bit-identical -- see the SKILL file)."""
+    message = np.asarray(message, float)
+    t = timebase(len(message) if n is None else n, fs, grid)
+    dt = t[1] - t[0] if t.size > 1 else (1.0 / fs if fs else 1.0)
+    phase = 2 * np.pi * fc_hz * t + 2 * np.pi * float(dev_hz) * np.cumsum(message) * dt
+    return float(amp) * np.cos(phase + phase_rad)
+
+
+def pm_modulate(message, fc_hz, dev_rad=1.0, amp=1.0, phase_rad=0.0, n=None, fs=None, grid=None):
+    """PM in REAL Hz/radians: phase ``2*pi*fc_hz*t + dev_rad*message``, generated fresh for
+    the same reason `fm_modulate` is. A NEW function, not `physics.psk`, which predates
+    absolute units and takes a symbol count over a normalised record."""
+    message = np.asarray(message, float)
+    t = timebase(len(message) if n is None else n, fs, grid)
+    return float(amp) * np.cos(2 * np.pi * fc_hz * t + float(dev_rad) * message + phase_rad)
+
+
+ANALOG_KINDS = ("sine", "square", "triangle", "sawtooth", "dc",
+                "step", "pulse", "exp", "chirp", "two_tone", "noise")
+# Unipolar, volts-native sources: NOT on the +/-1 amp/offset convention the rest of
+# ANALOG_KINDS shares, so `compose._carrier` dispatches them separately.
+VOLTS_ANALOG_KINDS = ("cmos",)
 
 # ---------------------------------------------------------------- RF / analog
 def am(fc=40.0, fm=3.0, depth=0.6, n=None):

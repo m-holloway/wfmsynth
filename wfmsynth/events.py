@@ -45,7 +45,7 @@ import numpy as np
 
 PLACEMENTS = ("symbols", "edges", "pattern", "aggressor", "intervals", "poisson", "times")
 MECHANISMS = ("runt", "glitch", "ring", "overshoot", "undershoot",
-              "nonmonotonic", "droop", "slow_edge")
+              "nonmonotonic", "droop", "slow_edge", "clamped_exp")
 
 def _jsonable(v):
     if isinstance(v, (np.floating, np.integer)):
@@ -863,6 +863,39 @@ def _apply_slow_edge(y, ev, grid, x0):
     ev.width = hi - lo
 
 
+def _apply_clamped_exp(y, ev, grid, x0):
+    """A rail transient: single-pole exponential from the local baseline toward
+    ``baseline + direction*amp``, CLAMPED at ``v_clamp`` if given, with time constant
+    ``tau_s``. This is the generic behavioural shape behind load-dump / ESD / supply-glitch
+    style pulses -- which standard's pulse NUMBERS apply (amplitude, tau, clamp voltage) is
+    the caller's own registry (see the module docstring's mechanisms-in/knowledge-out split),
+    never a name this function knows."""
+    n = len(y)
+    dt = _dt(grid)
+    t0 = int(ev.sample)
+    if t0 >= n:
+        ev.width = 0
+        return
+    tau = max(float(ev.params.get("tau_s", 1e-6)), dt)
+    amp = _edge_amp(x0, ev, 0.5)
+    pol = ev.params.get("polarity", ev.direction if ev.direction else 1.0)
+    direc = float(pol) if pol else 1.0
+    if "width" in ev.params:
+        width = int(ev.params["width"])
+    else:
+        dur = float(ev.params.get("width_s", 8.0 * tau))
+        width = max(2, int(round(dur / dt)))
+    width = max(1, min(width, n - t0))
+    baseline = y[t0 - 1] if t0 > 0 else y[t0]
+    target = baseline + direc * amp
+    v_clamp = ev.params.get("v_clamp")
+    if v_clamp is not None:
+        target = min(target, float(v_clamp)) if direc >= 0 else max(target, float(v_clamp))
+    k = np.arange(width, dtype=float) * dt
+    y[t0 : t0 + width] = baseline + (target - baseline) * (1.0 - np.exp(-k / tau))
+    ev.width = width
+
+
 _APPLY = {
     "runt": _apply_runt,
     "glitch": _apply_glitch,
@@ -872,6 +905,7 @@ _APPLY = {
     "nonmonotonic": _apply_ring_family,
     "droop": _apply_droop,
     "slow_edge": _apply_slow_edge,
+    "clamped_exp": _apply_clamped_exp,
 }
 
 

@@ -11,6 +11,8 @@ which produce the characteristic interleave spurs: offset mismatch -> tones at k
 k*fs/M +/- f_in. Set all mismatch to zero for an ideal ADC (no spurs). numpy/scipy only.
 """
 from __future__ import annotations
+import math
+
 import numpy as np
 from scipy import signal as _sig
 from scipy.special import i0 as _i0
@@ -340,7 +342,7 @@ def rc_pole_hz(r_ohm, c_f):
     return 1.0 / (2.0 * np.pi * float(r_ohm) * float(c_f))
 
 
-def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0, causal=True):
+def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0, causal=True, r_term_ohm=None):
     """A passive probe's input capacitance LOADS the node it measures — an RC low-pass with a
     pole at ``1/(2*pi*R*C)`` that attenuates high frequency. Real probes perturb the DUT.
 
@@ -354,50 +356,145 @@ def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0, causal=True):
     (6.027 dB where the closed form says 3.014, 14.014 where it says 6.989) with -0.007 deg of
     phase where an RC pole has -45. Pass it only to reproduce a record made before the fix.
 
+    ``r_term_ohm`` is the probe's own input resistance (1 MOhm for a classic high-Z passive
+    probe, 50 Ohm for a 50-Ohm-terminated input). The default (``None``) is the ORIGINAL
+    behaviour: an implicitly infinite termination, so the pole comes from ``r_source`` alone
+    and there is no resistive divider. A FINITE termination adds two things a real 50-Ohm-
+    terminated probe actually has: the pole moves to ``1/(2*pi*(r_source||r_term)*C)``, and the
+    signal is attenuated by the divider ``r_term/(r_source+r_term)`` even at DC.
+
     A note on what this path does NOT fix: the pole is applied by dividing the record's rfft,
     which is a CIRCULAR convolution, so the response to the record's tail lands on its head.
     The pole's time constant is 22.5 ps at R=50, C=0.45 pF, so on any record long against that
     the wrap is negligible -- but it is not zero, and making it linear would change the
     arithmetic that the exact-closed-form gate checks. Logged in BACKLOG.md."""
-    fc = rc_pole_hz(r_source, c_load_f)
+    if r_term_ohm is None:
+        r_eff, gain = r_source, 1.0
+    else:
+        r_eff = (r_source * r_term_ohm) / (r_source + r_term_ohm)
+        gain = r_term_ohm / (r_source + r_term_ohm)
+    fc = rc_pole_hz(r_eff, c_load_f)
     if not causal:
-        return scope_bandwidth(x, grid, fc, kind="bessel", order=1, causal=False)
+        return gain * scope_bandwidth(x, grid, fc, kind="bessel", order=1, causal=False)
     x = np.asarray(x, float)
     f = np.fft.rfftfreq(len(x), d=1.0 / grid.fs)
-    return np.fft.irfft(np.fft.rfft(x) / (1.0 + 1j * (f / fc)), len(x))
+    return gain * np.fft.irfft(np.fft.rfft(x) / (1.0 + 1j * (f / fc)), len(x))
+
+
+def _compensation_and_ground_lead_H(f, fc, compensate, l_gnd_h, c_load_f, r_eff):
+    """One combined frequency response for the probe's compensation trimmer and its ground-lead
+    inductance -- both real, both usually taught with the SAME square-wave test signal, so one
+    stage carries both rather than two independent circular-convolution passes.
+
+    Compensation: a passive attenuator probe has a trimmer capacitor across its tip resistor
+    that a technician adjusts so the divider is frequency-INDEPENDENT. Modelled as a zero at
+    ``fc/compensate`` against the loading pole at ``fc``: at ``compensate=1`` the zero sits
+    exactly on the pole and cancels it (``H=1``, correctly compensated = flat, the identity --
+    which is why the default leaves `probe`'s existing output untouched). Below 1 the zero
+    moves to a HIGHER frequency than the pole, so the pole dominates sooner -- extra roll-off,
+    the textbook "rounded corners" of an under-compensated probe. Above 1 the zero moves BELOW
+    the pole and boosts the band between them -- the "peaked corners" of over-compensation.
+
+    Ground-lead inductance: a long ground lead in series with the tip capacitance forms a
+    series R-L-C -- a real second-order low-pass, ``H(f) = wn^2 / (wn^2 - w^2 + j*2*zeta*wn*w)``
+    with ``wn = 1/sqrt(L*C)`` and ``zeta = (R/2)*sqrt(C/L)`` -- the same construction as
+    `events.second_order_step`, applied here to the whole record instead of one localized event.
+    ``l_gnd_h=0`` (the default) leaves this factor at exactly 1.
+    """
+    H = np.ones_like(f, dtype=complex)
+    if compensate != 1.0:
+        fc_zero = fc / float(compensate)
+        H = H * (1.0 + 1j * (f / fc_zero)) / (1.0 + 1j * (f / fc))
+    if l_gnd_h:
+        w = 2 * np.pi * f
+        wn = 1.0 / math.sqrt(float(l_gnd_h) * float(c_load_f))
+        zeta = 0.5 * float(r_eff) * math.sqrt(float(c_load_f) / float(l_gnd_h))
+        H = H * (wn * wn) / (wn * wn - w * w + 2j * zeta * wn * w)
+    return H
 
 
 def probe(x, grid, c_load_f=0.5e-12, r_source=50.0, bw_hz=None, kind="bessel", order=4,
-          noise_rms=0.0, atten=1.0, rng=None, causal=None):
+          noise_rms=0.0, atten=1.0, rng=None, causal=None, r_term_ohm=None, compensate=1.0,
+          l_gnd_h=0.0, coupling="dc", ac_fc_hz=None, overload_range=None, overload_tau_s=1e-6):
     """The thing a measurement is made THROUGH. A chain that runs channel -> front end models
     an ideal tap, which does not exist: a probe is an instrument in its own right and
-    contributes three separate mechanisms, all of them here.
+    contributes several separate mechanisms, all of them here.
 
-      * **loading** — its input capacitance across the source resistance is an RC pole at
-        ``1/(2*pi*R*C)``. This is the one that also perturbs the DUT, and it is applied as the
-        exact causal single pole (`probe_loading(causal=True)`).
-      * **bandwidth** — its own analog roll-off, independent of the loading pole and usually
-        well below the front end's. ``kind``/``order``/``causal`` are `scope_bandwidth`'s, so it
-        too is a single-pass causal analog stage realising the corner it is given.
-      * **noise** — its own input-referred noise, ``noise_rms`` in the record's units, added
-        at the probe tip (i.e. BEFORE the front end sees it, which is where a probe's noise
-        actually enters).
-
-    ``atten`` is the divider ratio as a GAIN (``0.1`` for a 10:1 probe); it scales the signal
-    and, being applied at the tip, the noise is added after it — a divider attenuates the
-    signal it passes, not the noise the probe itself makes.
+      * **loading** — its input capacitance across the (possibly terminated) source resistance
+        is an RC pole; see `probe_loading` for ``r_term_ohm``.
+      * **compensation / ground lead** — a trimmer capacitor that can be under/over-adjusted
+        (``compensate``, 1.0 = correctly compensated = no change) and a ground lead's series
+        inductance with the tip capacitance (``l_gnd_h``, a real second-order ring). See
+        `_compensation_and_ground_lead_H`. Both are LINEAR, so they run through
+        `physics.apply_transfer` (a linear, not circular, convolution) rather than the older
+        bare-pole division above.
+      * **atten** — the divider ratio as a GAIN (``0.1`` for a 10:1 probe).
+      * **bandwidth** — ``bw_hz`` is the probe's own analog roll-off (the "bandwidth limiter"
+        switch on a real instrument is exactly this knob at a stated corner, e.g. 20 MHz — no
+        separate knob for it).
+      * **coupling** — ``'dc'`` (default) or ``'ac'``, the latter applying `physics.ac_couple`
+        at ``ac_fc_hz`` (default: `ac_couple`'s own default corner) so the probe blocks the
+        node's DC level the way an AC-coupled input does.
+      * **overload recovery** — ``overload_range`` (default ``None`` = off) hard-clips to the
+        probe's linear range and adds a decaying "excess" tail with time constant
+        ``overload_tau_s``, the slow baseline recovery a real overdriven front end shows after
+        the signal returns inside range. This stage is NONLINEAR and STATEFUL, unlike
+        everything else here — see `compose._lead_extent`, which strips it before probing this
+        op's impulse response, exactly as it already strips `noise_rms`.
+      * **noise** — its own input-referred noise, ``noise_rms``, added at the probe tip.
 
     Defaults are a bare loading pole with no bandwidth limit and no noise, so ``probe(x, g)``
-    is exactly ``probe_loading(x, g, causal=True)``."""
-    y = probe_loading(x, grid, c_load_f=c_load_f, r_source=r_source, causal=True)
+    is exactly ``probe_loading(x, g, causal=True)`` -- every new knob above is an identity at
+    its default, so existing recipes render bit-identically."""
+    r_eff = r_source if r_term_ohm is None else (r_source * r_term_ohm) / (r_source + r_term_ohm)
+    y = probe_loading(x, grid, c_load_f=c_load_f, r_source=r_source, causal=True,
+                      r_term_ohm=r_term_ohm)
+    if compensate != 1.0 or l_gnd_h:
+        fc = rc_pole_hz(r_eff, c_load_f)
+
+        def make_H(nfft):
+            f = np.fft.rfftfreq(nfft, d=1.0 / grid.fs)
+            return _compensation_and_ground_lead_H(f, fc, compensate, l_gnd_h, c_load_f, r_eff)
+
+        y = _P.apply_transfer(y, make_H, linear=True)
     if atten != 1.0:
         y = y * float(atten)
     if bw_hz is not None:
         y = scope_bandwidth(y, grid, float(bw_hz), kind=kind, order=order, causal=causal)
+    if coupling == "ac":
+        kw = {"fc_hz": ac_fc_hz} if ac_fc_hz is not None else {}
+        y = _P.ac_couple(y, grid=grid, **kw)
+    elif coupling != "dc":
+        raise ValueError(f"probe: coupling must be 'dc' or 'ac', got {coupling!r}")
+    if overload_range is not None:
+        y = _overload_recovery(y, grid, float(overload_range), float(overload_tau_s))
     if noise_rms:
         rng = rng or np.random.default_rng()
         y = y + rng.normal(0.0, float(noise_rms), len(y))
     return y
+
+
+def _overload_recovery(x, grid, overload_range, overload_tau_s):
+    """Hard-clip to the probe's linear range -- a real front end cannot exceed its own rail no
+    matter how hard it is driven, so the output stays AT ``clipped`` for as long as the input is
+    outside range -- then, once the input returns inside range, add a DECAYING baseline residual
+    left over from how far outside range it just was. This is a peak-hold-with-slow-release
+    charge (like `open_drain_line`, a per-sample recurrence rather than a plain filter, because
+    the charge and release phases follow different rules): it tracks the excess exactly while
+    overloaded, and relaxes toward zero with time constant ``overload_tau_s`` once the excess
+    ends -- so the recovery tail is a real POST-overload artefact, not a way to exceed the rail
+    during the overload itself."""
+    x = np.asarray(x, float)
+    clipped = np.clip(x, -overload_range, overload_range)
+    excess = x - clipped
+    decay = math.exp(-(1.0 / grid.fs) / overload_tau_s)
+    n = len(x)
+    charge = np.empty(n)
+    acc = 0.0
+    for i in range(n):
+        acc = excess[i] if excess[i] != 0.0 else acc * decay
+        charge[i] = acc
+    return clipped + (charge - excess)
 
 
 def timebase_jitter(x, grid, rms_ps=0.5, rng=None):
