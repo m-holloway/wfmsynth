@@ -582,7 +582,7 @@ def test_the_new_ops_are_classified_for_the_lead_in_and_swept_for_dead_knobs():
         assert op in C._EXEC and op in C.OP_KIND
         assert (op in C._LEAD_LTI) + (op in C._LEAD_SKIP) + (op in C._LEAD_REJECT) \
             + (op in C._LEAD_ANALYTIC) == 1, f"{op} must be in exactly one lead-in class"
-    from tests.test_composition import KNOBS
+    from test_composition import KNOBS
     swept = {o for o, _, _, _ in KNOBS}
     assert {"hybrid_echo", "multipair"} <= swept
 
