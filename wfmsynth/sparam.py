@@ -42,6 +42,7 @@ See the long comment above `C_IN_PER_NS` for why the topology lives here and not
 """
 from __future__ import annotations
 
+import re
 import warnings
 
 import numpy as np
@@ -180,6 +181,197 @@ def write_touchstone(path, freqs_hz, S, fmt="RI", funit="HZ", z0=50.0):
         lines.append(" ".join(f"{v:.9g}" for v in vals))
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
+
+
+# =====================================================================================
+# MDIF -- one S-matrix over one or more swept independent variables
+# =====================================================================================
+# A Touchstone file is one network. An MDIF (.mdf) file is a sequence of ``BEGIN ... END``
+# blocks, each one full S-matrix sweep over frequency at one point in an outer parameter sweep
+# (a stub length, a via stackup, a temperature) stated by that block's own ``VAR`` lines. The
+# format has no single governing standard the way Touchstone's is versioned -- tool vendors
+# disagree on block names, VAR placement and whether the S-parameter columns carry RI, MA or dB
+# pairs. This reads exactly ONE well-documented dialect (below) and RAISES, naming the line, on
+# anything outside it, rather than guessing at a layout it cannot confirm:
+#
+#     BEGIN ACDATA
+#     VAR stub_mm(real) = 0.20
+#     VAR z0(real) = 50.0
+#     %Freq(GHz) S[1,1] S[2,1] S[1,2] S[2,2]
+#     1.0  0.11 -30.0  0.89 10.0  0.89 10.0  0.11 -30.0
+#     ...
+#     END
+#     BEGIN ACDATA
+#     VAR stub_mm(real) = 0.40
+#     ...
+#     END
+#
+# -- one ``%`` column-header line per block naming each column ``S[i,j]`` (so the port mapping
+# is read off the header rather than assumed, unlike Touchstone's 2-port transpose quirk); each
+# numeric column pair is REAL, IMAGINARY (no MA/dB support -- an unrecognised column raises);
+# the frequency column's own name may carry a ``(UNIT)`` suffix (``Hz``/``kHz``/``MHz``/``GHz``),
+# defaulting to Hz when absent; every block must share one frequency axis and the same set of
+# VAR names, since together they are one N-dimensional sweep, not N unrelated networks.
+
+_MDIF_S_RE = re.compile(r"[Ss]\[\s*(\d+)\s*,\s*(\d+)\s*\]")
+_MDIF_UNIT_RE = re.compile(r"^(.*?)\(([A-Za-z]+)\)$")
+_MDIF_VAR_RE = re.compile(r"^VAR\s+(\w+)(?:\([^)]*\))?\s*=\s*(.+)$", re.IGNORECASE)
+
+
+class MdifSweep:
+    """The result of `read_mdif`: an S-matrix swept over frequency AND one or more outer
+    variables (a stub length, a Z0, ...).
+
+    ``.freqs`` -- the one shared frequency axis, ``(nf,)`` Hz.
+    ``.S`` -- ``(n_blocks, nf, n, n)`` complex, one full S-matrix per outer sweep point.
+    ``.axes`` -- ``{var_name: array of length n_blocks}``, that VAR's value in each block, in
+    the file's own block order -- e.g. ``{"stub_mm": [0.2, 0.4, ...], "z0": [50.0, 50.0, ...]}``.
+
+    `.select(**kwargs)` names one point in the outer sweep and returns ``(freqs, S)`` for it,
+    ``S`` shape ``(nf, n, n)`` -- exactly `sparam_channel`'s/`touchstone_channel`'s own slicing
+    (``S[:, 1, 0]`` for S21) applies to the result unchanged."""
+
+    __slots__ = ("freqs", "S", "axes")
+
+    def __init__(self, freqs, S, axes):
+        self.freqs = freqs
+        self.S = S
+        self.axes = axes
+
+    def select(self, **kwargs):
+        """The one block whose VAR values match every given `axis=value` (within float
+        tolerance). Raises if zero or more than one block matches -- narrow the axes rather
+        than silently take the first hit."""
+        if not kwargs:
+            raise ValueError("MdifSweep.select needs at least one axis=value")
+        mask = np.ones(self.S.shape[0], dtype=bool)
+        for name, val in kwargs.items():
+            if name not in self.axes:
+                raise ValueError(f"MdifSweep.select: unknown axis {name!r}; have {sorted(self.axes)}")
+            mask &= np.isclose(self.axes[name], float(val), rtol=1e-9, atol=1e-12)
+        hits = np.flatnonzero(mask)
+        if len(hits) == 0:
+            raise ValueError(f"MdifSweep.select: no block matches {kwargs}")
+        if len(hits) > 1:
+            raise ValueError(f"MdifSweep.select: {len(hits)} blocks match {kwargs}; narrow the axes")
+        return self.freqs, self.S[hits[0]]
+
+
+def read_mdif(path, n_ports=None):
+    """Read an MDIF (.mdf) file of one or more `BEGIN`/`END` S-parameter sweeps into one
+    `MdifSweep`. See the module comment above for the exact dialect read; anything outside it
+    (an unrecognised column, MA/dB data, mismatched blocks) raises rather than guesses.
+    `n_ports` overrides the port count inferred from the column header's `S[i,j]` count."""
+    with open(path) as fh:
+        text = fh.read()
+    return _parse_mdif(text, n_ports)
+
+
+def _parse_mdif_columns(header, n_ports):
+    toks = header.split()
+    if not toks:
+        raise ValueError("MDIF: empty '%' column header")
+    freq_tok, s_toks = toks[0], toks[1:]
+    m = _MDIF_UNIT_RE.match(freq_tok)
+    if m:
+        unit = m.group(2).upper()
+        if unit not in _FUNIT:
+            raise ValueError(f"MDIF: unknown frequency unit {unit!r} in column {freq_tok!r}")
+        scale = _FUNIT[unit]
+    else:
+        scale = 1.0
+    pairs = []
+    for tok in s_toks:
+        m = _MDIF_S_RE.fullmatch(tok)
+        if not m:
+            raise ValueError(
+                f"MDIF: unrecognised column {tok!r} -- only 'S[i,j]' real/imaginary pairs are "
+                "supported (MA/dB dialects are not)")
+        pairs.append((int(m.group(1)), int(m.group(2))))
+    n = n_ports
+    if n is None:
+        root = int(round(len(pairs) ** 0.5))
+        if root * root != len(pairs):
+            raise ValueError(
+                f"MDIF: {len(pairs)} S-parameter columns is not a perfect square; pass n_ports=")
+        n = root
+    elif len(pairs) != n * n:
+        raise ValueError(f"MDIF: {len(pairs)} S-parameter columns, expected {n * n} for a {n}-port file")
+    return scale, pairs, n
+
+
+def _parse_mdif(text, n_ports):
+    blocks = []
+    in_block, cur_vars, cols, rows = False, None, None, None
+    for raw in text.splitlines():
+        stripped = raw.split("!", 1)[0].strip()
+        if not stripped:
+            continue
+        low = stripped.lower()
+        if low.startswith("begin"):
+            if in_block:
+                raise ValueError("MDIF: nested BEGIN before a matching END")
+            in_block, cur_vars, cols, rows = True, {}, None, []
+            continue
+        if not in_block:
+            continue                                       # ignore anything outside a block
+        if low.startswith("end"):
+            if cols is None:
+                raise ValueError("MDIF: a block ended with no '%' column header")
+            if not rows:
+                raise ValueError("MDIF: a block has a column header but no data rows")
+            blocks.append((cur_vars, cols, rows))
+            in_block = False
+            continue
+        if stripped.startswith("%"):
+            cols = _parse_mdif_columns(stripped[1:], n_ports)
+            continue
+        m = _MDIF_VAR_RE.match(stripped)
+        if m:
+            cur_vars[m.group(1)] = float(m.group(2))
+            continue
+        if low.startswith("var"):
+            raise ValueError(f"MDIF: cannot parse VAR line {stripped!r}")
+        if cols is None:
+            raise ValueError(f"MDIF: data row before a '%' column header: {stripped!r}")
+        _scale, pairs, _n = cols
+        toks = stripped.split()
+        expected = 1 + 2 * len(pairs)
+        if len(toks) != expected:
+            raise ValueError(f"MDIF: data row has {len(toks)} numbers, expected {expected}: {stripped!r}")
+        rows.append([float(t) for t in toks])
+    if in_block:
+        raise ValueError("MDIF: BEGIN with no matching END")
+    if not blocks:
+        raise ValueError("MDIF: no BEGIN/END data block found")
+
+    var_sets = [set(vs) for vs, _, _ in blocks]
+    if any(vs != var_sets[0] for vs in var_sets[1:]):
+        raise ValueError("MDIF: blocks declare different VAR names; cannot form one sweep")
+    var_names = list(blocks[0][0])
+    n_ref = blocks[0][1][2]
+
+    freqs0 = None
+    S_list = []
+    axes = {name: [] for name in var_names}
+    for vs, (scale, pairs, n), rows_b in blocks:
+        if n != n_ref:
+            raise ValueError("MDIF: blocks disagree on port count")
+        arr = np.asarray(rows_b, float)
+        f = arr[:, 0] * scale
+        if freqs0 is None:
+            freqs0 = f
+        elif len(f) != len(freqs0) or not np.allclose(f, freqs0):
+            raise ValueError("MDIF: blocks do not share one frequency axis")
+        S = np.zeros((len(f), n, n), complex)
+        for col_idx, (i, j) in enumerate(pairs):
+            S[:, i - 1, j - 1] = arr[:, 1 + 2 * col_idx] + 1j * arr[:, 2 + 2 * col_idx]
+        S_list.append(S)
+        for name in var_names:
+            axes[name].append(vs[name])
+
+    axes = {name: np.asarray(v, float) for name, v in axes.items()}
+    return MdifSweep(freqs0, np.stack(S_list, axis=0), axes)
 
 
 # =====================================================================================

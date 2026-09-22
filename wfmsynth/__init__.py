@@ -94,7 +94,7 @@ from .cdr import (recover_clock, jitter_transfer, tracked_out_fraction, ssc_phas
                   apply_ssc, timing_source, apply_phase, phase_noise, recover_and_fold)
 from .eye import eye_density, eye_recover, eye_crossings
 from .sparam import (read_touchstone, write_touchstone, sparam_channel, touchstone_channel,
-                     renormalize_s, check_response)
+                     renormalize_s, check_response, read_mdif, MdifSweep)
 from .stream import stream_convolve, stream_blocks, channel_fir
 from .simreal import separability, feature_vector
 from .rx import ctle, dfe, ffe
@@ -149,7 +149,7 @@ __all__ = [
     "recover_clock", "jitter_transfer", "tracked_out_fraction", "ssc_phase", "apply_ssc",
     "timing_source", "apply_phase", "phase_noise", "recover_and_fold",
     "read_touchstone", "write_touchstone", "sparam_channel", "touchstone_channel",
-    "renormalize_s", "check_response",
+    "renormalize_s", "check_response", "read_mdif", "MdifSweep",
     "N", "T", "Grid", "Jitter", "Streams", "tx_ffe", "carrier_symbols", "from_symbols", "resonant_reflection", "de_emphasis_taps",
     "nominal_nonlinearity", "crosstalk_matrix", "crosstalk_sum", "hybrid_echo",
     "single_pair_observation", "db_to_coupling",
