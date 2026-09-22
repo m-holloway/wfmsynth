@@ -468,15 +468,19 @@ def test_ctle_response_is_its_pole_zero_expression(f_ghz):
 
 @pytest.mark.parametrize("db", [2.0, 3.5, 6.0, 9.0])
 def test_de_emphasis_db_is_the_measured_transition_to_steady_ratio(db):
-    """`de_emphasis_taps(db)` claims 20*log10(V_transition / V_steady) = db. Build the taps,
-    run a real pulse through `tx_ffe`, and measure that ratio at the symbol centres."""
+    """`de_emphasis_taps(db)` claims 20*log10(V_steady / V_transition) = db (GitHub #53: this
+    used to be the other way around -- V_transition/V_steady -- so a negative db gave
+    pre-emphasis and a positive one gave de-emphasis, backwards from how every spec quotes it,
+    e.g. PCIe "-3.5 dB"). `-db` here is that many dB of DE-EMPHASIS; build the taps, run a
+    real pulse through `tx_ffe`, and measure the transition/steady ratio at the symbol
+    centres, which is +db for de-emphasis."""
     spb = 64
     sym = np.array([-1.0] * 8 + [1.0] * 8 + [-1.0] * 8)
     x = P.from_symbols(sym, n=len(sym) * spb, tr_frac=0.15)
-    y = P.tx_ffe(x, P.de_emphasis_taps(db), spb, pre=0)
+    y = P.tx_ffe(x, P.de_emphasis_taps(-db), spb, pre=0)
     centre = lambda ui: y[int((ui + 0.5) * spb)]
     meas = 20.0 * np.log10(centre(8) / centre(15))
-    assert abs(meas - db) < 0.01, f"asked {db} dB, measured {meas:.4f} dB"
+    assert abs(meas - db) < 0.01, f"asked {db} dB de-emphasis, measured {meas:.4f} dB"
 
 
 def test_tx_ffe_puts_its_taps_exactly_one_ui_apart():

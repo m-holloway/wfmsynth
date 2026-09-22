@@ -407,8 +407,10 @@ def _coupled_kernel(aggressor, kind, d_samples, n):
     a = np.asarray(aggressor, float)
     if kind == "fext":
         k = np.gradient(a)
-    else:                                                 # next: delayed coupling
+    elif kind == "next":
         d = int(d_samples); k = np.zeros(n); k[d:] = a[:n - d]
+    else:
+        raise ValueError(f"unknown crosstalk kind {kind!r}; use 'fext' or 'next'")
     return k / (np.abs(k).max() + 1e-9)
 
 
@@ -593,10 +595,17 @@ def single_pair_observation(wanted, own_tx, near, far, grid=None,
 
 def de_emphasis_taps(db):
     """2-tap Tx FFE weights ``[main, post]`` realizing a de-emphasis of ``db`` — the
-    standardized preset real transmitters expose. The first bit after a transition is at
-    full amplitude and steady-state bits are reduced, with 20·log10(V_transition/V_steady)
-    = db. Use with `tx_ffe(..., pre=0)`."""
-    r = 10 ** (db / 20.0)
+    standardized preset real transmitters expose, quoted the way every spec quotes it
+    (PCI Express Gen1/Gen2: "-3.5 dB"). The first bit after a transition is at full
+    amplitude and steady-state bits are reduced, with 20·log10(V_steady/V_transition) = db
+    -- so a NEGATIVE db is de-emphasis (steady state below transition) and a positive one is
+    pre-emphasis. Use with `tx_ffe(..., pre=0)`.
+
+    GitHub #53: this used to compute the ratio the other way around
+    (20·log10(V_transition/V_steady) = db), so a negative db produced pre-emphasis and a
+    positive one produced de-emphasis -- backwards from how every spec quotes it. Existing
+    callers passing a POSITIVE db for de-emphasis now need its sign flipped."""
+    r = 10 ** (-db / 20.0)
     a = (r - 1.0) / (r + 1.0)
     return [1.0, -a]
 

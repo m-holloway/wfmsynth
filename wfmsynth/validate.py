@@ -1378,13 +1378,13 @@ check("timebase jitter smears the eye horizontally (closes it)",
 
 print("== Tx de-emphasis preset: a dB preset yields that transition/steady ratio ==")
 _spb42 = 16
-_taps42 = P.de_emphasis_taps(3.5)
+_taps42 = P.de_emphasis_taps(-3.5)   # -3.5 dB is 3.5 dB of DE-emphasis, the PCIe convention
 _sq = np.repeat(np.array([-1.0]*8 + [1.0]*8), _spb42).astype(float)     # 8-UI runs, sharp edges
 _y42 = P.tx_ffe(_sq, _taps42, _spb42, pre=0)
 _lo_run = 8 * _spb42                                               # index where the high run starts
 _emph = _y42[_lo_run + _spb42 // 2]                                # first UI after the transition
 _steady = _y42[_lo_run + 5 * _spb42 + _spb42 // 2]                 # a mid-run (steady) UI
-check("de_emphasis_taps(3.5 dB) yields ~3.5 dB transition-to-steady ratio",
+check("de_emphasis_taps(-3.5 dB) yields ~3.5 dB transition-to-steady ratio",
       abs(20 * np.log10(_emph / _steady) - 3.5) < 0.3, f"measured {20*np.log10(_emph/_steady):.2f} dB")
 
 print("== electrical idle / LFPS: idle carries no data energy; LFPS is a low-freq burst ==")

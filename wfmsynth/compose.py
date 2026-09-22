@@ -910,9 +910,18 @@ def _op_sample_clock(x, p, streams, grid, idx):
 
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
+    common = {k: p[k] for k in ("band", "dc", "band_tol", "linear", "guard") if k in p}
     if "path" in p:
-        return SP.touchstone_channel(x, p["path"], grid=grid, ports=tuple(p.get("ports", (2, 1))))
-    return SP.sparam_channel(x, np.asarray(p["freqs"]), np.asarray(p["s21"], complex), grid=grid)
+        # `ports` is passed THROUGH, not coerced: a mixed-mode pairing can be a STRING
+        # ("13_24") or a tuple of pairs, and `tuple(...)`-wrapping a string shreds it into
+        # its individual characters (GitHub #57) instead of forwarding the pairing
+        # `touchstone_channel` itself already documents and accepts.
+        kw = {k: p[k] for k in ("n_ports", "mode", "term", "check") if k in p}
+        if "ports" in p:
+            kw["ports"] = p["ports"]
+        return SP.touchstone_channel(x, p["path"], grid=grid, **kw, **common)
+    return SP.sparam_channel(x, np.asarray(p["freqs"]), np.asarray(p["s21"], complex),
+                             grid=grid, **common)
 
 
 def _op_cascade(x, p, streams, grid, idx):
@@ -1620,7 +1629,8 @@ class Signal:
         return self._add("tia", **params)
 
     def de_emphasis(self, **params):
-        """Tx de-emphasis preset (dB). params: db."""
+        """Tx de-emphasis preset. params: db -- NEGATIVE is de-emphasis, quoted the way every
+        spec quotes it (PCIe Gen1/Gen2: "-3.5 dB"); see `physics.de_emphasis_taps`."""
         return self._add("de_emphasis", **params)
 
     def scope(self, **params):
@@ -1877,8 +1887,11 @@ class Signal:
         return self._add("lossy", **params)
 
     def sparam(self, **params):
-        """Measured S-parameter channel. params: path=<.sNp file> (+ ports=(2,1)), or
-        freqs=[Hz] + s21=[complex]. Reproduces resonances/structure the analytic model can't."""
+        """Measured S-parameter channel. params: path=<.sNp file> (+ ports=(2,1), or a
+        mixed-mode pairing -- ports="13_24"/"12_34" or ports=((1,3),(2,4)), passed through
+        exactly as `sparam.touchstone_channel` documents; plus n_ports, mode, term, check), or
+        freqs=[Hz] + s21=[complex]. band/dc/band_tol/linear/guard forward to either form.
+        Reproduces resonances/structure the analytic model can't."""
         return self._add("sparam", **params)
 
     def cascade(self, path, **params):

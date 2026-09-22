@@ -51,7 +51,7 @@ OP_KEYS = {
     "rx_noise": frozenset({"bw_hz", "density", "exact_rms", "rms"}),
     "sample_clock": frozenset({"band_tol", "drift_ppm_per_s", "half_width", "n_out", "phase0_s", "ppm", "span"}),
     "scope": frozenset({"bw_hz", "causal", "kind", "order"}),
-    "sparam": frozenset({"freqs", "path", "ports", "s21"}),
+    "sparam": frozenset({"band", "band_tol", "check", "dc", "freqs", "guard", "linear", "mode", "n_ports", "path", "ports", "s21", "term"}),
     "ssc": frozenset({"f_ssc", "profile", "spread"}),
     "store": frozenset({"bits", "clip", "dither_lsb", "full_scale", "headroom"}),
     "supply_coupling": frozenset({"am_depth", "f_ripple_hz", "psij_ps", "supply"}),

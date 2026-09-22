@@ -113,7 +113,12 @@ def drift(x, grid=None, kind="gain", amount=0.2, shape="linear"):
     x = np.asarray(x, float)
     n = len(x)
     k = np.arange(n) / max(n - 1, 1)
-    prof = k if shape == "linear" else np.sin(np.pi * k)       # 0..1 across the record
+    if shape == "linear":
+        prof = k
+    elif shape == "sine":
+        prof = np.sin(np.pi * k)                               # 0..1 across the record
+    else:
+        raise ValueError(f"unknown drift shape {shape!r} (use 'linear' or 'sine')")
     if kind in ("gain", "amplitude"):
         return x * (1.0 + amount * prof)
     if kind == "dc":

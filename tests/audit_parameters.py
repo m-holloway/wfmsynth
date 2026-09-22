@@ -571,16 +571,18 @@ def test_lossy_realises_loss_db_at_loss_at_ghz(loss_db, at_ghz):
 
 @pytest.mark.parametrize("db", [1.0, 3.0, 6.0, 9.0])
 def test_de_emphasis_realises_its_stated_db(db):
-    """`de_emphasis_taps` claims 20*log10(V_transition/V_steady) = db. Measured exact to
-    1e-4 dB on ideal rectangular symbols at integer samples/UI, which is where the closed form
-    is the answer and nothing of ours is."""
+    """`de_emphasis_taps` claims 20*log10(V_steady/V_transition) = db (GitHub #53: fixed from
+    V_transition/V_steady, which was backwards from how every spec quotes de-emphasis, e.g.
+    PCIe "-3.5 dB"). `-db` here is that many dB of de-emphasis. Measured exact to 1e-4 dB on
+    ideal rectangular symbols at integer samples/UI, which is where the closed form is the
+    answer and nothing of ours is."""
     sym = np.array([-1.0] * 8 + [1.0] * 8 + [-1.0] * 8 + [1.0] * 8)
     x = np.repeat(sym, SPB)
-    y = P.tx_ffe(x, P.de_emphasis_taps(db), SPB, pre=0)
+    y = P.tx_ffe(x, P.de_emphasis_taps(-db), SPB, pre=0)
     trans = y[8 * SPB + SPB // 2]
     steady = y[8 * SPB + 7 * SPB + SPB // 2]
     got = 20.0 * np.log10(abs(trans / steady))
-    assert abs(got - db) < 0.01, f"ask {db} dB, realised {got:.4f} dB"
+    assert abs(got - db) < 0.01, f"ask {db} dB de-emphasis, realised {got:.4f} dB"
 
 
 @pytest.mark.parametrize("dc_gain", [0.4, 0.65, 1.0])
@@ -1098,9 +1100,9 @@ def _report():
               f"{d[0]:.4f} / {d[1]:.4f} / {d[2]:.4f}")
 
     print("\n[10] CLEAN -- parameters measured against a closed form and found honest")
-    for db in (1.0, 3.0, 6.0, 9.0):
+    for db in (1.0, 3.0, 6.0, 9.0):   # de_emphasis_taps(-db) is db dB of DE-emphasis (GitHub #53)
         s = np.repeat(np.array([-1.0] * 8 + [1.0] * 8 + [-1.0] * 8 + [1.0] * 8), SPB)
-        y = P.tx_ffe(s, P.de_emphasis_taps(db), SPB, pre=0)
+        y = P.tx_ffe(s, P.de_emphasis_taps(-db), SPB, pre=0)
         got = 20 * np.log10(abs(y[8*SPB+SPB//2] / y[8*SPB+7*SPB+SPB//2]))
         print(f"    de_emphasis db      ask {db:6.2f} dB   -> {got:9.4f} dB")
     for ldb, at in ((3.0, 4.0), (6.0, 8.0), (20.0, 16.0)):
