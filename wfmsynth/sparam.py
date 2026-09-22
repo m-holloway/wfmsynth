@@ -516,6 +516,57 @@ def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None,
     return P.apply_transfer(x, make_H, linear=linear, guard=guard)
 
 
+def check_response(freqs, S, tol=1e-6, n=None):
+    """Report whether a measured S-parameter response is PASSIVE and whether its impulse
+    response is CAUSAL, without altering the samples -- the same idea `sparam_channel`'s
+    ``band=refuse`` already applies to a truncated band: name the problem, leave the data alone.
+
+    ``S`` is either a single term ``(nf,)`` complex (e.g. ``S[:, 1, 0]``, as read off
+    `read_touchstone`) or a full scattering matrix ``(nf, n, n)``.
+
+        info = check_response(freqs, S[:, 1, 0])
+        info["passive"]           True if the max singular value is <= 1 (+ tol) at every
+                                   frequency. For a single term this is just |S(f)| <= 1 --
+                                   NECESSARY but not sufficient for passivity of the full
+                                   network; pass the full matrix for the real test.
+        info["max_singular_value"]  the worst-case value the check above is against.
+        info["precursor_frac"]    the fraction of impulse-response ENERGY that arrives before
+                                   t=0 -- ~0 for a causal response, and the same construction
+                                   `tests/audit_causality.py`'s `pre_energy_fraction` uses
+                                   elsewhere in this repo (a unit impulse centred in an
+                                   n-sample buffer, room on both sides so a circular wrap
+                                   cannot masquerade as a real precursor).
+
+    Measured on a single term, ``precursor_frac`` is a diagnostic on the term you handed it,
+    not the network as a whole -- a mixed-mode term built from four single-ended ones
+    (`mixed_mode_term`) may show energy the individual terms do not.
+    """
+    freqs = np.asarray(freqs, float)
+    S = np.asarray(S, complex)
+    is_matrix = S.ndim == 3
+    if is_matrix:
+        sv = np.array([np.linalg.svd(S[k], compute_uv=False)[0] for k in range(S.shape[0])])
+        term = S[:, 1, 0] if S.shape[1] > 1 else S[:, 0, 0]
+    else:
+        sv = np.abs(S)
+        term = S
+    max_sv = float(sv.max()) if sv.size else 0.0
+    passive = bool(np.all(sv <= 1.0 + tol))
+
+    fmax = float(freqs.max())
+    n = n or max(256, int(2 ** np.ceil(np.log2(2 * len(freqs)))))
+    fs_eff = 2.0 * fmax
+    fu = np.fft.rfftfreq(n, d=1.0 / fs_eff)
+    mag = np.interp(fu, freqs, np.abs(term))
+    ph = np.interp(fu, freqs, np.unwrap(np.angle(term)))
+    m = n // 2
+    shift = np.exp(-2j * np.pi * fu * m / fs_eff)   # centres the impulse at index m
+    h = np.fft.irfft(mag * np.exp(1j * ph) * shift, n)
+    e = h ** 2
+    precursor_frac = float(e[:m].sum() / (e.sum() + 1e-300))
+    return {"passive": passive, "max_singular_value": max_sv, "precursor_frac": precursor_frac}
+
+
 def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
                        linear=True, guard=None, mode=None, term="SDD21",
                        band="refuse", dc="extend", band_tol=1e-3, check=True, z0=None):
