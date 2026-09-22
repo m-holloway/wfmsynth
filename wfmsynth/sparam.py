@@ -802,13 +802,21 @@ def discontinuity(freqs, gamma):
     return TwoPort(freqs, G, t, t, -G)
 
 
-def measured(freqs, path, ports=(2, 1), n_ports=None, S=None, file_freqs=None,
-             band="zero", dc="zero"):
+def measured(freqs, path=None, ports=(2, 1), n_ports=None, S=None, file_freqs=None,
+             band="zero", dc="zero", left=None, right=None):
     """One SECTION taken from a measured Touchstone file — a real connector or via dropped into
     an otherwise synthetic path. The file's full 2-port block (both reflections, both
     transmissions) is interpolated onto `freqs`; outside the measured band every element is
     zeroed, which makes the section an open stub there rather than an extrapolation nobody
     measured. `ports=(2,1)` names which two ports of an N-port file form the section.
+
+    `left=`/`right=` treat the file as a DIFFERENTIAL section instead, for a 4-port (or more)
+    block — a via, a connector — sitting between two differential `line` sections without
+    dropping to a single-ended 2-port: each is a (P, N) port pair, 1-based, the same convention
+    `diff_pairs` already uses (`left` is the driven/input pair, `right` the receiving/output
+    pair). The section's own S-matrix becomes the mixed-mode SDD block (`se2mm`), so a chain of
+    these composes exactly like a chain of ordinary 2-port sections. Both must be given, or
+    neither.
 
     `band=`/`dc=` are `_interp_response`'s band-edge decisions and DEFAULT TO THE LEGACY
     ZEROING here, deliberately: a cascade section is a two-port block whose neighbours' bounce
@@ -816,18 +824,70 @@ def measured(freqs, path, ports=(2, 1), n_ports=None, S=None, file_freqs=None,
     statement about a SECTION in a way it is not about a whole channel. `dc="extend"` is
     available and is what a section that carries DC (a connector, a package) should use — see
     `sparam_channel` for why zeroing the low band DC-blocks the record."""
+    if (left is None) != (right is None):
+        raise ValueError("measured: left= and right= must both be given, or neither")
     if S is None:
         file_freqs, Sfull = read_touchstone(path, n_ports=n_ports)
     else:
         Sfull = np.asarray(S, complex)
-    i, j = ports[0] - 1, ports[1] - 1
     freqs = np.asarray(freqs, float)
 
     def _ip(z):
         return _interp_response(freqs, file_freqs, z, band=band, dc=dc)
 
+    if left is not None:
+        n = Sfull.shape[1]
+        Si = np.empty((len(freqs), n, n), complex)
+        for a in range(n):
+            for b in range(n):
+                Si[:, a, b] = _ip(Sfull[:, a, b])
+        mm = se2mm(Si, (tuple(left), tuple(right)))
+        return TwoPort(freqs, mm[:, 0, 0], mm[:, 0, 1], mm[:, 1, 0], mm[:, 1, 1])
+
+    i, j = ports[0] - 1, ports[1] - 1
     return TwoPort(freqs, _ip(Sfull[:, j, j]), _ip(Sfull[:, j, i]),
                    _ip(Sfull[:, i, j]), _ip(Sfull[:, i, i]))
+
+
+def stub(freqs, length_in=None, td_ps=None, z0=50.0, end="open", eps_r=4.0, ps_per_in=None,
+         sys_z0=50.0):
+    """An OPEN or SHORT stub, as its own inline cascade SECTION: a length, a characteristic
+    impedance, and an end condition — the exact lossless transmission-line formula, not the
+    phenomenological band-pass shape `physics.resonant_reflection` fits for a resonance already
+    measured:
+
+        Z_in = -j*z0/tan(beta*L)   (open)          Z_in = j*z0*tan(beta*L)   (short)
+
+    seen as a shunt admittance `Y = 1/Z_in` across the main (`sys_z0`-ohm) line, giving the
+    standard shunt two-port
+
+        S11 = S22 = -Y*sys_z0 / (2 + Y*sys_z0)      S21 = S12 = 2 / (2 + Y*sys_z0)
+
+    which is lossless and reciprocal by construction, like `discontinuity`. An OPEN stub is
+    invisible at DC (`Y -> 0`, S21 -> 1) and looks like a dead short at its quarter-wave
+    resonance; a SHORT stub is the mirror image. `length_in`/`td_ps`/`eps_r`/`ps_per_in` size the
+    electrical length exactly as `line` does."""
+    freqs = np.asarray(freqs, float)
+    if td_ps is None:
+        if length_in is None:
+            raise ValueError("stub() needs td_ps= or length_in=")
+        pp = ps_per_in if ps_per_in is not None else ps_per_inch(eps_r)
+        td_ps = float(length_in) * pp
+    if end not in ("open", "short"):
+        raise ValueError(f"stub: end must be 'open' or 'short', got {end!r}")
+    beta_l = 2.0 * np.pi * freqs * (float(td_ps) * 1e-12)
+    ratio = float(sys_z0) / float(z0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tan_bl = np.tan(beta_l)
+        # Y*sys_z0, built without inverting Z_in, so the only pole left is the physical one --
+        # Y -> infinity (a dead short: the open stub at its quarter-wave, the short stub at DC).
+        yz = 1j * tan_bl * ratio if end == "open" else -1j * ratio / tan_bl
+        s11 = -yz / (2.0 + yz)
+        s21 = 2.0 / (2.0 + yz)
+    shorted = ~np.isfinite(yz)
+    s11 = np.where(shorted, -1.0 + 0j, s11)
+    s21 = np.where(shorted, 0j, s21)
+    return TwoPort(freqs, s11, s21, s21, s11)
 
 
 def build_sections(path, freqs):
@@ -840,7 +900,10 @@ def build_sections(path, freqs):
          {"line": {"length_in": 5.0}},
          {"disc": {"gamma": 0.055}},                       # the via, 6.0 in out
          {"line": {"length_in": 2.0}},
-         {"file": {"path": "connector.s2p"}}]              # a measured section
+         {"file": {"path": "connector.s2p"}},              # a measured 2-port section
+         {"file": {"path": "via.s4p", "left": (1, 3), "right": (2, 4)}},  # a measured 4-port,
+                                                             # taken differentially (see `measured`)
+         {"stub": {"length_in": 0.08, "z0": 50.0, "end": "open"}}]  # an open/short stub
 
     Plain JSON, so it round-trips through a recipe. A bare `TwoPort` may also appear in the
     list and is used as-is."""
@@ -869,7 +932,9 @@ def _section(sec, freqs, k=0):
         return discontinuity(freqs, g)
     if kind == "file":
         return measured(freqs, **args)
-    raise ValueError(f"path[{k}]: unknown section kind {kind!r} (line|disc|file)")
+    if kind == "stub":
+        return stub(freqs, **args)
+    raise ValueError(f"path[{k}]: unknown section kind {kind!r} (line|disc|file|stub)")
 
 
 def cascade(path, freqs):
