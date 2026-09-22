@@ -56,9 +56,24 @@ def _n_ports_from_ext(path):
     return None
 
 
+class TouchstoneResult(tuple):
+    """``(freqs, S)`` -- unpacks exactly like the plain tuple `read_touchstone` always
+    returned -- plus ``.z0``, the file's own reference impedance (the option line's ``R``
+    value, or 50 if unstated). A ``[Reference]`` block naming a DIFFERENT impedance per port
+    (Touchstone 2.0) makes ``.z0`` a per-port array instead of a scalar; `renormalize_s`
+    only handles the uniform (scalar) case."""
+
+    def __new__(cls, freqs, S, z0):
+        obj = super().__new__(cls, (freqs, S))
+        obj.z0 = z0
+        return obj
+
+
 def read_touchstone(path, n_ports=None):
     """Read a Touchstone (.sNp) file. Returns ``(freqs_hz, S)`` where ``S`` has shape
-    ``(nf, n, n)`` complex. Supports RI / MA / DB formats and HZ/KHZ/MHZ/GHZ; comments
+    ``(nf, n, n)`` complex, plus a ``.z0`` attribute (the file's own reference impedance --
+    the option line's ``R`` value, 50 if unstated, or a per-port array from a Touchstone 2.0
+    ``[Reference]`` block). Supports RI / MA / DB formats and HZ/KHZ/MHZ/GHZ; comments
     (``!``) and multi-line frequency rows are handled. Port count is taken from the ``.sNp``
     extension (override with ``n_ports``)."""
     with open(path) as fh:
@@ -67,11 +82,29 @@ def read_touchstone(path, n_ports=None):
 
 
 def _parse_touchstone(text, n):
-    funit, fmt = 1e9, "MA"
+    funit, fmt, z0 = 1e9, "MA", 50.0
+    ref = None                                             # a Touchstone 2.0 [Reference] block
     nums = []
-    for line in text.splitlines():
-        line = line.split("!", 1)[0].strip()
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        line = raw.split("!", 1)[0].strip()
         if not line:
+            continue
+        low = line.lower()
+        if low.startswith("[reference]"):
+            toks = line.split()[1:]
+            j = i
+            while len(toks) < n and j + 1 < len(lines):
+                j += 1
+                cont = lines[j].split("!", 1)[0].strip()
+                if not cont or cont.startswith("[") or cont.startswith("#"):
+                    break
+                toks += cont.split()
+            if toks:
+                vals = [float(t) for t in toks[:n]]
+                ref = vals[0] if len(set(vals)) == 1 else np.asarray(vals, float)
+            continue
+        if line.startswith("["):                           # an unhandled Touchstone 2.0 keyword
             continue
         if line.startswith("#"):
             toks = line[1:].split()
@@ -79,8 +112,14 @@ def _parse_touchstone(text, n):
                 funit = _FUNIT[toks[0].upper()]
             if len(toks) >= 3:
                 fmt = toks[2].upper()
+            if "R" in (t.upper() for t in toks):
+                ri = [t.upper() for t in toks].index("R")
+                if ri + 1 < len(toks):
+                    z0 = float(toks[ri + 1])
             continue
         nums.extend(float(t) for t in line.split())
+    if ref is not None:
+        z0 = ref
     per = 1 + 2 * n * n
     if len(nums) % per != 0:
         raise ValueError(f"Touchstone: {len(nums)} numbers not a multiple of {per} for {n}-port")
@@ -98,16 +137,36 @@ def _parse_touchstone(text, n):
     S = flat.reshape(len(rows), n, n)
     if n == 2:                          # Touchstone's 2-port quirk: order is S11 S21 S12 S22
         S = S.transpose(0, 2, 1)
-    return freqs, S
+    return TouchstoneResult(freqs, S, z0)
 
 
-def write_touchstone(path, freqs_hz, S, fmt="RI", funit="HZ"):
+def renormalize_s(S, z0_old, z0_new):
+    """Renormalize an S-matrix ``(nf, n, n)`` from a UNIFORM real reference impedance
+    ``z0_old`` (the same on every port) to ``z0_new``, via ``S' = (S - G*I)(I - G*S)^-1``
+    with ``G = (z0_new - z0_old) / (z0_new + z0_old)`` -- the standard closed form for a
+    reference-impedance change applied equally to every port. ``z0_old == z0_new`` is the
+    identity (no computation, no rounding). Does not handle a per-port `[Reference]` block
+    whose values differ -- that needs a per-port renormalization this does not attempt."""
+    if z0_old == z0_new:
+        return S
+    S = np.asarray(S, complex)
+    g = (z0_new - z0_old) / (z0_new + z0_old)
+    n = S.shape[-1]
+    eye = np.eye(n)
+    out = np.empty_like(S)
+    for k in range(S.shape[0]):
+        out[k] = (S[k] - g * eye) @ np.linalg.inv(eye - g * S[k])
+    return out
+
+
+def write_touchstone(path, freqs_hz, S, fmt="RI", funit="HZ", z0=50.0):
     """Write ``(freqs_hz, S)`` (S shape ``(nf, n, n)``) to a Touchstone file. Mainly for
-    tests and round-trips; RI format by default."""
+    tests and round-trips; RI format by default. ``z0`` is the option line's ``R`` value
+    (the reference impedance the S-matrix was measured/computed at), 50 by default."""
     S = np.asarray(S)
     n = S.shape[1]
     scale = _FUNIT[funit.upper()]
-    lines = [f"# {funit.upper()} S {fmt.upper()} R 50"]
+    lines = [f"# {funit.upper()} S {fmt.upper()} R {z0:g}"]
     for i, f in enumerate(freqs_hz):
         mat = S[i].T if n == 2 else S[i]        # invert the 2-port quirk on the way out
         vals = [f / scale]
@@ -459,7 +518,7 @@ def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None,
 
 def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
                        linear=True, guard=None, mode=None, term="SDD21",
-                       band="refuse", dc="extend", band_tol=1e-3, check=True):
+                       band="refuse", dc="extend", band_tol=1e-3, check=True, z0=None):
     """Read a Touchstone file and apply one of its transfers to ``x``.
 
     ``ports`` says WHICH transfer, and its form says which kind:
@@ -475,11 +534,26 @@ def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
     `PAIR_CONVENTIONS`). Pass a pairing, or say ``mode="se"`` to mean the single-ended term on
     purpose. ``term=`` picks a different mixed-mode term (SDD11, SCD21, SCC21, ...).
 
+    ``z0=`` renormalizes the file's S-matrix to a stated system impedance FIRST, if the file's
+    own reference impedance (`read_touchstone`'s ``.z0``, from the option line's ``R`` or 50 if
+    unstated) differs from it -- see `renormalize_s`. Default ``None`` is the file's own
+    impedance, unchanged (an existing ``R 50`` file renders exactly as before). Left unhandled:
+    a Touchstone 2.0 file whose ``[Reference]`` block states a DIFFERENT impedance per port --
+    ``z0=`` on one of those raises rather than renormalizing it wrongly.
+
     ``check=True`` runs `check_pairing`: the chosen pairing is measured against the other two
     partitions of the four ports, and a pairing that yields an all-zero or far-too-small
     response raises instead of returning zeros. ``band=``/``dc=``/``band_tol=`` are
     `sparam_channel`'s band-edge decisions."""
-    freqs, S = read_touchstone(path, n_ports=n_ports)
+    result = read_touchstone(path, n_ports=n_ports)
+    freqs, S = result
+    if z0 is not None:
+        if isinstance(result.z0, np.ndarray):
+            raise ValueError(
+                f"{path}: this file states a per-port reference impedance "
+                f"({result.z0.tolist()}), which renormalize_s does not handle; renormalize "
+                f"it yourself with a per-port method before calling touchstone_channel")
+        S = renormalize_s(S, result.z0, z0)
     n = S.shape[1]
     is_pairing = isinstance(ports, str) or (
         len(ports) == 2 and all(isinstance(p, (tuple, list)) for p in ports))
