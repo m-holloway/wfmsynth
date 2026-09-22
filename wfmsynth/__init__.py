@@ -34,7 +34,34 @@ overload recovery; a wired-AND second sink; a pass-FET/analog switch; AM/FM/PM m
 `modulate()`) — every one of them the same op-chain, no second builder. See
 `.claude/skills/wfmsynth/SKILL.md` and `REFERENCE.md`.
 """
-__version__ = "0.40.0"
+def _read_version():
+    """The single source is `pyproject.toml`'s `version =`. GitHub #54: `__version__` and
+    `pyproject.toml` were two independently-stated strings and had already drifted (0.39.1 vs
+    0.40.0), so `Signal.recipe()` stamped provenance with a version that did not match the
+    installed package. An installed distribution's own metadata is read first (the normal
+    case); a source checkout with no install (this repo's own `PYTHONPATH=$PWD` route) falls
+    back to reading `pyproject.toml` directly, next to this package -- so there is exactly one
+    place this number is ever written, not two that can disagree."""
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+    except ImportError:                                    # pragma: no cover
+        version, PackageNotFoundError = None, Exception
+    if version is not None:
+        try:
+            return version("wfmsynth")
+        except PackageNotFoundError:
+            pass
+    import re
+    from pathlib import Path
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    try:
+        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M)
+    except OSError:
+        m = None
+    return m.group(1) if m else "0.0.0+unknown"
+
+
+__version__ = _read_version()
 
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
