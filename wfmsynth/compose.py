@@ -916,7 +916,7 @@ def _op_sparam(x, p, streams, grid, idx):
         # ("13_24") or a tuple of pairs, and `tuple(...)`-wrapping a string shreds it into
         # its individual characters (GitHub #57) instead of forwarding the pairing
         # `touchstone_channel` itself already documents and accepts.
-        kw = {k: p[k] for k in ("n_ports", "mode", "term", "check") if k in p}
+        kw = {k: p[k] for k in ("n_ports", "mode", "term", "check", "z0") if k in p}
         if "ports" in p:
             kw["ports"] = p["ports"]
         return SP.touchstone_channel(x, p["path"], grid=grid, **kw, **common)
@@ -1889,7 +1889,9 @@ class Signal:
     def sparam(self, **params):
         """Measured S-parameter channel. params: path=<.sNp file> (+ ports=(2,1), or a
         mixed-mode pairing -- ports="13_24"/"12_34" or ports=((1,3),(2,4)), passed through
-        exactly as `sparam.touchstone_channel` documents; plus n_ports, mode, term, check), or
+        exactly as `sparam.touchstone_channel` documents; plus n_ports, mode, term, check, and
+        z0 -- renormalize the file's own reference impedance to a stated system impedance
+        first, if they differ; default None is the file's own, unchanged), or
         freqs=[Hz] + s21=[complex]. band/dc/band_tol/linear/guard forward to either form.
         Reproduces resonances/structure the analytic model can't."""
         return self._add("sparam", **params)
