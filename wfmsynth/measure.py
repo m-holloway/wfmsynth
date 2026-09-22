@@ -139,7 +139,13 @@ def align_symbols(x, grid, tx, levels=4, defn="contour", n_phases=32):
 
     Returns ``(offset, corr_aligned, corr_zero)``: the best integer offset, the normalized
     tx/output correlation at that offset, and the correlation at zero offset (skipping the
-    realignment) — so the cost of ignoring the delay is visible."""
+    realignment) — so the cost of ignoring the delay is visible.
+
+    The offset is chosen by ``argmax(|corr|)``, not ``argmax(corr)``: on an INVERTED record (a
+    differential pair wired backwards, or any inverting stage) every true-alignment correlation
+    is negative, and a plain argmax locks onto noise instead. The magnitude identifies the
+    alignment and the returned sign identifies the polarity — the only way to detect a swapped
+    pair, since eye height, peak-to-peak and RMS are all identical under negation."""
     spb = grid.samples_per_ui
     y = sample_at_phase(x, spb, best_phase(x, grid, levels, defn, n_phases))
     m = min(len(y), len(tx))
@@ -148,7 +154,7 @@ def align_symbols(x, grid, tx, levels=4, defn="contour", n_phases=32):
     denom = np.sqrt((yc ** 2).sum() * (sc ** 2).sum()) + 1e-12
     corr = np.correlate(yc, sc, mode="full") / denom
     lags = np.arange(-m + 1, m)
-    k = int(np.argmax(corr))
+    k = int(np.argmax(np.abs(corr)))
     corr_zero = float(corr[lags.tolist().index(0)])
     return int(lags[k]), float(corr[k]), corr_zero
 
