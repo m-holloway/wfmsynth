@@ -832,6 +832,10 @@ Carrier-agnostic (NRZ/PAM4/clocks/buses/optical). `peak_hold` decimation keeps a
 
 ## Roadmap and backlog
 
+**[docs/FIDELITY.md](docs/FIDELITY.md)** says which of this library's numbers are calibrated
+against real captured hardware, which are closed form, and which are fitted shapes — using the
+evidence markers `DATASET-METHODOLOGY.md` defines. Read it before trusting a figure.
+
 **[ROADMAP.md](ROADMAP.md)** describes future direction from the current composable,
 provenance-first architecture. **[BACKLOG.md](BACKLOG.md)** contains only active work,
 known limitations, and concise delivered milestones. Current priorities are consolidating
