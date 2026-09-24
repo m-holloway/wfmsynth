@@ -145,11 +145,13 @@ def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4, causal=None):
         causal = kind in ANALOG_KINDS
     wn = min(bw_hz / (grid.fs / 2.0), 0.99)
     if kind == "brickwall":
+        _P.warn_if_awkward_length(len(x), "scope_bandwidth(kind='brickwall')")
         X = np.fft.rfft(x)
         X[np.fft.rfftfreq(len(x)) > wn / 2.0] = 0.0   # rfftfreq's Nyquist is 0.5
         return np.fft.irfft(X, len(x))
     if kind == "gaussian":
         if not causal:
+            _P.warn_if_awkward_length(len(x), "scope_bandwidth(kind='gaussian', causal=False)")
             f = np.fft.rfftfreq(len(x))
             H = np.exp(-0.5 * (f / (wn / 2.0 + 1e-12)) ** 2)
             return np.fft.irfft(np.fft.rfft(x) * H, len(x))
@@ -377,6 +379,7 @@ def probe_loading(x, grid, c_load_f=0.5e-12, r_source=50.0, causal=True, r_term_
     if not causal:
         return gain * scope_bandwidth(x, grid, fc, kind="bessel", order=1, causal=False)
     x = np.asarray(x, float)
+    _P.warn_if_awkward_length(len(x), "probe_loading")
     f = np.fft.rfftfreq(len(x), d=1.0 / grid.fs)
     return gain * np.fft.irfft(np.fft.rfft(x) / (1.0 + 1j * (f / fc)), len(x))
 

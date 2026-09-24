@@ -197,6 +197,52 @@ def _circular_support(loud):
     return _circular_arc(loud)[1]
 
 
+# A CIRCULAR stage transforms at the record's own length and cannot choose a friendlier one --
+# padding would change the operation, not just its cost. So the record length itself decides the
+# price, and an FFT of a length with a large prime factor is not a little slower, it is several
+# times slower. MEASURED at ~2 M samples, against a 5-smooth length of the same size:
+#
+#     2,097,152 = 2**21          1.00x        1,999,992 (leftover 83,333)     9.5x
+#     2,000,000 (5-smooth)       0.85x        2,097,153 (leftover 233,017)   10.4x
+#     2,097,150 (leftover 1,271) 2.08x        2,097,143 (PRIME)              12.5x
+#
+# That is worth naming rather than silently charging: on a chain carrying a probe it was the
+# whole of a 3.3x end-to-end slowdown. Every round length anyone actually picks -- 2**k, 10**k,
+# 2,500,000, and the 40,000,000 = 2**9 * 5**7 of a deep capture -- leaves nothing behind, so this
+# is quiet in the common case by construction rather than by tuning.
+_AWKWARD_LEFTOVER = 1000            # below this the mixed-radix transform copes; 1,271 costs 2x
+_AWKWARD_MIN_N = 1 << 16            # and under this the whole transform is cheap anyway
+
+
+def _small_radix_leftover(n, radices=(2, 3, 5, 7, 11)):
+    """What is left of `n` after dividing out every small radix -- 1 for a friendly length."""
+    m = int(n)
+    for r in radices:
+        while m % r == 0:
+            m //= r
+    return m
+
+
+def warn_if_awkward_length(n, stage):
+    """Warn when a CIRCULAR stage is about to transform at an FFT-hostile record length.
+
+    Only for stages that transform at the record's own length. A linear convolution picks its
+    own 5-smooth transform length (`linear_fft_length`) and is never affected."""
+    n = int(n)
+    if n < _AWKWARD_MIN_N:
+        return
+    leftover = _small_radix_leftover(n)
+    if leftover <= _AWKWARD_LEFTOVER:
+        return
+    better = next_smooth_length(n)
+    warnings.warn(
+        f"{stage}: this stage transforms at the RECORD's own length, and {n} has a large prime "
+        f"factor ({leftover}), which costs several times a friendly length -- MEASURED up to "
+        f"12x at this size. It cannot pad without changing the operation. Choose a record "
+        f"length with small factors: the next one is {better} "
+        f"(physics.next_smooth_length).", RuntimeWarning, stacklevel=3)
+
+
 def linear_fft_length(n_signal, n_response, radix=SMOOTH_RADIX):
     """The transform length for a LINEAR convolution of `n_signal` samples with an
     `n_response`-sample impulse response: the next `radix`-smooth length at or above
@@ -368,6 +414,7 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
         if method == "overlap":
             raise ValueError("apply_transfer: method='overlap' is a LINEAR convolution; it has "
                              "no circular form. Pass linear=True, or method='fft'.")
+        warn_if_awkward_length(n, "apply_transfer(linear=False)")
         return np.fft.irfft(np.fft.rfft(x) * make_H(n), n)
     if guard is None:
         # The guard is capped at TWICE the record. A response that long is one whose level at
