@@ -122,7 +122,7 @@ def modulate_field(drive, kind="mzm", vpi=1.0, bias=0.5, er_db=None, p_avg=1.0,
         phi = np.cumsum((alpha / 2.0) * (np.gradient(np.log(P + 1e-12)) / dt + adiabatic * P)) * dt
         field = np.sqrt(P) * np.exp(1j * phi)
     else:
-        raise ValueError("modulate_field kind must be 'mzm' or 'dml'")
+        raise ValueError(f"modulate_field: kind must be 'mzm' or 'dml', got {kind!r}")
     if linewidth_hz:                                        # finite laser linewidth -> phase noise
         rng = rng or np.random.default_rng()               # random-walk phase, var = 2π·Δν·dt per step
         dphi = rng.standard_normal(len(field)) * np.sqrt(2 * np.pi * linewidth_hz * dt)

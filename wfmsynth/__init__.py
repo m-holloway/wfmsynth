@@ -126,6 +126,11 @@ __all__ = [
     "patterns", "register_pattern", "resolve_pattern", "describe_pattern", "replay_pattern",
     "PATTERNS",
     "measure", "sweep", "cdr", "eye", "sparam", "stream", "simreal", "rx", "scene", "optical", "coding", "bus", "acquire", "ctle", "dfe", "ffe", "Scene",
+    # `capture` and `hdf5` are named as public modules in this file's own docstring, and
+    # `resample` holds the interpolation kernel `physics` and `instrument` share. All three
+    # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
+    # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
+    "capture", "hdf5", "resample",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "combine_drivers", "uart_frame", "uart_decode",
     "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",

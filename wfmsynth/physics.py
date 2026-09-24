@@ -1186,7 +1186,7 @@ def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
     # sinc, so energy appears BEFORE the echo arrives. A whole-sample delay stays bit-exact.
     d = float(td_samples) if td_samples is not None else float(td_frac * nx)
     if node not in ("load", "source"):
-        raise ValueError("node must be 'load' or 'source'")
+        raise ValueError(f"multi_reflection: node must be 'load' or 'source', got {node!r}")
     if d <= 0 or gamma_l == 0.0:
         return x.copy()                  # no discontinuity is no mechanism, and must be exact
     y = x.copy()
@@ -2114,7 +2114,7 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
                              f"({sink.shape}), got {sink_b.shape}")
         rs_b = float(r_sink_b_ohm) if r_sink_b_ohm is not None else rs
         if rs_b <= 0:
-            raise ValueError("r_sink_b_ohm must be positive")
+            raise ValueError(f"open_drain_line: r_sink_b_ohm must be positive, got {r_sink_b_ohm!r}")
         r_par = (rs * rs_b) / (rs + rs_b)
 
     def _divider(r):

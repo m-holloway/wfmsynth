@@ -1222,7 +1222,7 @@ def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0,
             raise ValueError("cascade_channel needs grid=Grid(...) or dt=")
         dt = grid.dt
     if node not in ("load", "source"):
-        raise ValueError("node must be 'load' or 'source'")
+        raise ValueError(f"cascade_channel: node must be 'load' or 'source', got {node!r}")
 
     def make_H(nfft):
         tp = cascade(path, np.fft.rfftfreq(nfft, d=dt))

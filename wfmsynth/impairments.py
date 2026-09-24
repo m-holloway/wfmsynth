@@ -175,7 +175,7 @@ def mix_at_constant_power(components, weights, total_rms):
     comps = [np.asarray(c, float) for c in components]
     w = np.asarray(weights, float)
     if w.min() < 0:
-        raise ValueError("weights must be non-negative")
+        raise ValueError(f"weights must be non-negative, got {w.tolist()!r}")
     w = w / (w.sum() + 1e-300)
     rms = lambda a: np.sqrt(np.mean(a ** 2)) + 1e-12
     out = np.zeros_like(comps[0])
