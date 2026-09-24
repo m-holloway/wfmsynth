@@ -54,6 +54,11 @@ from wfmsynth.acquire import AcquisitionProfile                      # noqa: E40
 BASELINE = Path(__file__).resolve().parent / "benchmark_baseline.json"
 
 MEM_TOL = 0.15      # peak memory may grow 15 % before it is a regression
+# ...but only once there is enough of it to mean anything. A stage whose peak is a few tens of
+# kilobytes (a symbol sequence, a bit array) swings 100 % on a rounding of the allocator, and a
+# percentage gate on it is a gate that cries wolf. The quantity this gate exists to protect is
+# RECORD-SCALE memory, so anything under a megabyte is reported and not failed.
+MEM_FLOOR_MB = 1.0
 TIME_TOL = 2.5      # wall time may grow 2.5x before it is a regression (runner noise is large)
 SCALE_MAX = 2.8     # t(2n)/t(n) above this is a complexity regression, not a constant factor
 
@@ -235,7 +240,7 @@ def table(results, sizes):
               f"{r['peak_x_record']:8.1f} {sc if sc is None else f'{sc:6.2f}'}")
 
 
-def check(results, base, sizes, gate_time=False):
+def check(results, base, sizes, gate_time=False, mem_tol=MEM_TOL):
     """Compare against the committed baseline. Returns a list of regression strings."""
     bad = []
     for name, e in results.items():
@@ -248,9 +253,11 @@ def check(results, base, sizes, gate_time=False):
             if k not in b:
                 continue
             got, want = e[k]["peak_mb"], b[k]["peak_mb"]
-            if want > 0 and got > want * (1.0 + MEM_TOL):
+            if max(got, want) < MEM_FLOOR_MB:
+                continue
+            if want > 0 and got > want * (1.0 + mem_tol):
                 bad.append(f"{name} @n={n}: peak memory {got:.1f} MB vs baseline "
-                           f"{want:.1f} MB (+{100*(got/want-1):.0f} %, tol {100*MEM_TOL:.0f} %)")
+                           f"{want:.1f} MB (+{100*(got/want-1):.0f} %, tol {100*mem_tol:.0f} %)")
             if gate_time:
                 gt, wt = e[k]["time_s"], b[k]["time_s"]
                 if wt > 0 and gt > wt * TIME_TOL:
@@ -272,6 +279,10 @@ def main():
     ap.add_argument("--gate-time", action="store_true", help="also gate on wall time")
     ap.add_argument("--only", metavar="SUBSTR", help="only cases containing SUBSTR")
     ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--mem-tol", type=float, default=MEM_TOL,
+                    help="fractional peak-memory headroom before it is a regression. The "
+                         "committed baseline is captured on one machine, so a CI runner on "
+                         "another platform wants more slack than a local re-run does.")
     a = ap.parse_args()
 
     sizes = QUICK_SIZES if a.quick else FULL_SIZES
@@ -302,7 +313,7 @@ def main():
             print(f"baseline was captured at sizes {base.get('sizes')}, not {list(sizes)} -- "
                   f"compare like with like (use the same --quick/full mode)")
             return 2
-        bad = check(results, base["cases"], sizes, gate_time=a.gate_time)
+        bad = check(results, base["cases"], sizes, gate_time=a.gate_time, mem_tol=a.mem_tol)
         if bad:
             print("\nREGRESSIONS:")
             for b in bad:

@@ -64,3 +64,22 @@ def test_omitting_method_records_nothing_and_renders_as_before(op):
 def test_an_unknown_method_is_refused_by_the_op_rather_than_ignored():
     with pytest.raises(ValueError, match="unknown method"):
         _chain("bogus").waveform()
+
+
+def test_linear_and_guard_also_reach_the_op(tmp_path):
+    """BACKLOG #53: `_op_lossy` and `_op_resonant_reflect` whitelisted the keys they forwarded,
+    so a recipe could not ask for the pinned CIRCULAR convolution (`linear=False`) nor state an
+    impulse-response length it already knew (`guard=`) -- which made the linear-vs-circular
+    comparison impossible to run from a recipe at all."""
+    g = Grid(fs=FS, baud=BAUD, n=N)
+
+    def chain(**kw):
+        return (Signal(seed=1, grid=g)
+                .carrier("nrz", n_ui=N // 8, pattern="prbs13", tr_frac=0.4, causal=True)
+                .lossy(length_in=8.0, tand=0.02, causal=True, **kw))
+
+    assert not np.array_equal(chain().waveform(), chain(linear=False).waveform())
+    assert not np.array_equal(chain().waveform(), chain(guard=64).waveform())
+    sig = chain(linear=False)
+    assert sig.recipe()["ops"][-1]["linear"] is False
+    assert np.array_equal(sig.waveform(), Signal.from_recipe(sig.recipe()).waveform())

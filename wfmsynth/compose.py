@@ -335,9 +335,12 @@ def _op_modulate(x, p, streams, grid, idx):
 
 
 def _op_lossy(x, p, streams, grid, idx):
+    # `linear` and `guard` are forwarded too (BACKLOG #53): without them a recipe could
+    # not ask for the pinned CIRCULAR convolution, nor state an impulse-response length
+    # it already knows, so the two convolution forms could not be compared from a recipe.
     kw = {k: p[k] for k in ("length_in", "tand", "eps_r", "skin_k", "causal",
                             "loss_db", "loss_at_ghz", "trend", "trend_floor_db",
-                            "method") if k in p}
+                            "method", "linear", "guard") if k in p}
     if "trend" in kw and kw["trend"] is not None:
         kw["trend"] = tuple(float(t) for t in kw["trend"])   # JSON round-trips it as a list
     return P.lossy_channel(x, grid=grid, **kw)
@@ -428,7 +431,8 @@ def _op_nonlinearity(x, p, streams, grid, idx):
 
 
 def _op_resonant_reflect(x, p, streams, grid, idx):
-    kw = {k: p[k] for k in ("td_ps", "td_frac", "f0_ghz", "f0_frac", "q", "gamma0") if k in p}
+    kw = {k: p[k] for k in ("td_ps", "td_frac", "f0_ghz", "f0_frac", "q", "gamma0",
+                            "method", "linear", "guard") if k in p}
     return P.resonant_reflection(x, grid=grid, **kw)
 
 

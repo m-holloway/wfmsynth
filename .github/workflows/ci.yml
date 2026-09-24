@@ -34,6 +34,13 @@ jobs:
       - run: pip install -e . pytest
       - run: python -m pytest -q
       - run: python -m wfmsynth.validate
+      # Peak memory and COMPLEXITY, not wall time. The scaling ratio t(2n)/t(n) divides the
+      # runner's speed out, so it catches an O(n log n) stage turning O(n^2) without ever
+      # depending on how loaded the machine is. Peak memory is deterministic, but the committed
+      # baseline is captured on the maintainer's macOS box, so a Linux runner gets real slack
+      # (35 %) -- enough to absorb a different allocator, not enough to hide a doubling.
+      # ~0.4 s at the quick sizes, so it costs nothing against the metered minutes.
+      - run: python tools/benchmark.py --quick --check --mem-tol 0.35
 
   cross-platform:
     # Full matrix ONLY on the weekly schedule or a manual dispatch — never on every PR/push.
