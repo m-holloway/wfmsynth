@@ -1927,7 +1927,13 @@ class Signal:
         every echo pays whatever loss was applied before this op, once. Correct for a line
         mismatched at both ends and nowhere else; for a path with discontinuities at different
         distances use `cascade`. params: td_frac | td_samples | td_ps, gamma_s, gamma_l,
-        n_bounce, node."""
+        n_bounce, node.
+
+        READ `gamma_s` AS "SOURCE", NOT AS "SECONDS". It is the reflection coefficient at the
+        SOURCE (driver) end and `gamma_l` the one at the LOAD (receiver) end — both
+        dimensionless, between -1 and 1. Everywhere else in this library a `_s` suffix means
+        seconds (`tr_s`, `tau_s`, `width_s`), and these two are the exception, sitting next to
+        a `td_ps` that really is a time. A reflection coefficient has no units."""
         return self._add("reflect", **params)
 
     def resonant_reflect(self, **params):

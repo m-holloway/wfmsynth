@@ -107,7 +107,7 @@ signal = (
     ws.Signal(seed=7, grid=grid)
     .carrier("nrz", n_ui=4096, causal=True)             # transmitted data
     .lossy(loss_db=8.0, loss_at_ghz=12.5, causal=True) # PCB/cable bandwidth
-    .reflect(td_ps=80.0, gamma_s=0.15)                 # connector/discontinuity echo
+    .reflect(td_ps=80.0, gamma_s=0.15)                 # echo; gamma_s = SOURCE-end Γ, not seconds
     .scope(bw_hz=30e9)                                 # instrument front end
 )
 
