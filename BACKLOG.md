@@ -254,6 +254,34 @@ the same family as #54 (`brickwall` and the Gaussian mask, both still circular).
 as a measurement on the record's interior, and the move is quantified in LSB of an 11-bit
 export both with and without a lead-in — the way #54 quantified its own.
 
+**ATTEMPTED AND BACKED OUT, with the measurement, so it is not re-attempted blind.** The move
+to `apply_transfer` was made and reverted. It is not a free correctness win — it costs
+**0.051 dB and 1.42 degrees** across f/fc = 0.25..4, against the 5.3e-15 dB / 7.1e-15 deg the
+circular form delivers.
+
+The reason is structural rather than a matter of tuning, which is the part worth recording: an
+ANALOG pole does not vanish at Nyquist (|H| = 0.032 there at fs = 400 GSa/s, fc = 6.37 GHz), so
+the sampled impulse response carries a **1/k tail, not exp(-k/tau)** — MEASURED |h[k]|/peak =
+4.7e-3 at k=50, 2.0e-4 at k=500, 5.0e-6 at k=20000, still 1.4e-6 at k=60000. A linear
+convolution truncated to the record's own length must discard that tail, and the error it
+leaves does NOT fall with a bigger guard: identical at `guard=n` and `guard=4n`, because the
+truncation is at the OUTPUT length, not the guard. The circular form reproduces H exactly by
+construction and has no such term.
+
+So the trade is: a wrap that corrupts about five time constants at the record's HEAD (and which
+`Signal.lead_in` already renders and discards) against 0.05 dB and 1.4 deg across the WHOLE
+record. On any record long against the pole the circular form is the more faithful of the two,
+and that is why it stays. Anyone revisiting this should either keep the exact pole and attack
+the cost differently, or state plainly that 0.05 dB is acceptable for this stage.
+
+There is a performance motive that is now also answered. A raw-length transform is what an
+AWKWARD record length pays for here: MEASURED, a 2,097,143-sample record (prime) spent 278 ms
+in this stage against 24 ms at 2**21 — an **11.6x** penalty, and the whole of that chain's 3.3x.
+An exact DFT at a prime length cannot be made cheap (Bluestein already costs ~8x), so the only
+escape is to stop demanding one, which is the semantic change above. Record lengths with small
+prime factors (2**k, 10**k, and the 40 M = 2**9 * 5**7 a deep capture actually uses) are 5-smooth
+and pay none of it, so this is a tail risk rather than the common case.
+
 ### #27 Unify `Signal.digitize()` with `instrument.digitize()`
 
 **Status:** Open.
