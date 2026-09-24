@@ -967,7 +967,7 @@ def line(freqs, td_ps=None, length_in=None, eps_r=4.0, ps_per_in=None, causal=Tr
         if not _is_rfft_axis(freqs):
             raise ValueError("line(causal=True) needs a uniform DC..Nyquist axis; pass causal=False")
         n = 2 * (len(freqs) - 1)
-        H = P._min_phase_H(mag, n)[:len(freqs)]
+        H = P._min_phase_H(mag, n, half=True)      # n is even here, so this IS len(freqs)
     else:
         H = mag.astype(complex)
     H = H * np.exp(-1j * 2.0 * np.pi * freqs * (float(td_ps) * 1e-12))

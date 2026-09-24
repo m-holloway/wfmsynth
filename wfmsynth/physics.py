@@ -227,7 +227,7 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
 
 
 # ---------------------------------------------------------------- channel physics
-def _min_phase_H(Hmag, n=None):
+def _min_phase_H(Hmag, n=None, half=False):
     """Causal minimum-phase complex response from a real magnitude |H| (rfft bins),
     via the cepstral / Hilbert relation so loss and phase are physically LINKED
     (Kramers-Kronig; the Djordjevic-Sarkar-style causal channel). A real magnitude-
@@ -235,34 +235,47 @@ def _min_phase_H(Hmag, n=None):
     minimum-phase version concentrates the response AFTER t=0 (asymmetric post-cursor
     ISI), which is what a real dispersive interconnect does.
 
-    `n` is the full (two-sided) transform length; inferred from Hmag when omitted."""
+    `n` is the full (two-sided) transform length; inferred from Hmag when omitted.
+
+    `half=True` returns only the rfft half of the result (`n//2+1` bins for even `n`,
+    `(n+1)//2` for odd), which is all any FILTERING caller wants -- it is about to multiply the
+    record's own rfft by it. It is not a convenience: the full two-sided complex array is the
+    largest single allocation in a deep render, and not building it is most of why this function
+    is no longer the memory ceiling. The default stays two-sided so callers that want the whole
+    response (and the pinned references that check it) are unaffected.
+
+    THIS RUNS AT THE RECORD'S OWN LENGTH, so its temporaries are the ones that decide whether a
+    deep record renders at all. Three record-length arrays that used to be built here are gone:
+
+      * the symmetric MIRROR of the magnitude. `mag_full` is real and EVEN, so its inverse DFT
+        is real and even -- which is exactly what `irfft` computes from the half already in
+        hand. The mirror never needs to exist.
+      * the COMPLEX cepstrum whose real part was then copied out. `irfft` returns the real
+        sequence directly, so neither the complex array nor the copy is allocated.
+      * the causal-folding WEIGHT VECTOR. Its entries are exactly 1.0, 2.0 and 0.0, all exact in
+        binary floating point, so applying them by slice in place is the same arithmetic
+        without a record-length temporary.
+
+    The two real-input transforms also replace two complex ones of the same length, which is
+    where the time goes as well."""
     if n is None:
         n = 2 * (len(Hmag) - 1)
-    # Every step below is in place or explicitly freed. This runs at the FULL two-sided length
-    # of the record, so a deep record's cepstrum is the single largest allocation in a render;
-    # the arithmetic is untouched (elementwise ops in the same order), only the temporaries go.
+    logmag = np.asarray(Hmag, float) + 1e-12
+    np.log(logmag, out=logmag)
+    c = np.fft.irfft(logmag, n)                           # the real, even cepstrum
+    del logmag
     if n % 2 == 0:
-        # even length: rfft has a distinct Nyquist bin; drop DC+Nyquist from the mirror.
-        mag_full = np.concatenate([Hmag, Hmag[-2:0:-1]])  # symmetric, length n
+        # even length: DC and Nyquist stand alone, the bins between them double, the
+        # anti-causal half is discarded
+        c[1:n // 2] *= 2.0
+        c[n // 2 + 1:] = 0.0
     else:
-        # odd length: no Nyquist bin; mirror all bins except DC.
-        mag_full = np.concatenate([Hmag, Hmag[-1:0:-1]])  # symmetric, length n
-    mag_full += 1e-12
-    np.log(mag_full, out=mag_full)                        # logmag
-    spec = np.fft.ifft(mag_full)
-    del mag_full
-    c = spec.real.copy()                                  # a copy, not a view: frees the complex half
-    del spec
-    w = np.zeros(n)
-    if n % 2 == 0:
-        w[0] = 1.0; w[1:n // 2] = 2.0; w[n // 2] = 1.0    # causal folding
-    else:
-        w[0] = 1.0; w[1:(n + 1) // 2] = 2.0               # causal folding
-    c *= w                                                # exactly `c * w`, without its output array
-    del w
-    spec = np.fft.fft(c)
+        # odd length: no Nyquist bin
+        c[1:(n + 1) // 2] *= 2.0
+        c[(n + 1) // 2:] = 0.0
+    spec = np.fft.rfft(c) if half else np.fft.fft(c)
     del c
-    return np.exp(spec, out=spec)                         # complex min-phase, length n
+    return np.exp(spec, out=spec)                         # complex min-phase
 
 
 def insertion_loss_db(f_ghz, length_in=6.0, tand=0.02, eps_r=4.3, skin_k=0.0,
@@ -380,7 +393,7 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
             return Hmag
         # the minimum-phase fold is itself a transform of length `nfft`, so padding makes the
         # cepstrum resolve the response instead of time-aliasing it.
-        return _min_phase_H(Hmag, nfft)[:nfft // 2 + 1]
+        return _min_phase_H(Hmag, nfft, half=True)
 
     return apply_transfer(x, make_H, linear=linear, guard=guard)
 

@@ -158,7 +158,7 @@ def scope_bandwidth(x, grid, bw_hz, kind="bessel", order=4, causal=None):
         # with the least delay, and it is the same construction the causal channel uses
         # (`physics._min_phase_H`), applied as a LINEAR convolution so the tail does not wrap.
         return _P.apply_transfer(
-            x, lambda nfft: _P._min_phase_H(_gaussian_mag(nfft, wn), nfft)[:nfft // 2 + 1])
+            x, lambda nfft: _P._min_phase_H(_gaussian_mag(nfft, wn), nfft, half=True))
     if not causal:
         return _sig.sosfiltfilt(_sig.bessel(order, wn, output="sos"), x)
     sos = _sig.bessel(order, wn, output="sos", norm="mag")   # -3 dB AT wn, not at 0.68*wn
