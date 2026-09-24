@@ -40,7 +40,6 @@ def counts_for(volts, inc, offset=0.0):
 
 
 def main(argv=None):
-    import zarr
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("store", help="the seed archive, filled in place")
@@ -49,6 +48,15 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true",
                     help="render and compare, write nothing")
     a = ap.parse_args(argv)
+
+    # AFTER parsing, so `--help` works without the optional dependency, and with a message that
+    # says what to do rather than a ModuleNotFoundError traceback. zarr is not a dependency of
+    # wfmsynth; it is one of this example's.
+    try:
+        import zarr
+    except ImportError:                                    # pragma: no cover
+        raise SystemExit("this example needs zarr, which wfmsynth itself does not require:\n"
+                         "    python -m pip install zarr")
 
     doc = json.load(open(a.recipes))
     root = zarr.open_group(a.store, mode="r" if a.dry_run else "a")

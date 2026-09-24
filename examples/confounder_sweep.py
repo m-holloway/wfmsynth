@@ -34,8 +34,12 @@ for gm in (0.0, 0.15, 0.30, 0.40):
 # 2) hold the eye height fixed by solving insertion loss as reflection is swept
 target = ws.eye_height(build(0.05, 2.0).waveform(), g, levels=4)
 print(f"\nhold eye height = {target:.3f} while sweeping reflection (solve insertion loss):")
+# `hold_constant` calls `measure_fn(waveform, grid)`, and `eye_height` needs to be told how
+# many LEVELS the record has -- it is a property of the record, not a preference, so there is
+# nothing sensible for it to default to. This carrier is PAM4, hence 4.
 recs = ws.hold_constant(build, "gamma", [0.05, 0.15, 0.25, 0.35], "eye", target,
-                        "loss_db", (0.0, 4.0), g, ws.eye_height, tol=0.004)
+                        "loss_db", (0.0, 4.0), g,
+                        lambda x, grid: ws.eye_height(x, grid, levels=4), tol=0.004)
 for r in recs:
     print(f"  gamma={r['gamma']:.2f} -> loss_db={r['loss_db']:.2f}  "
           f"realized eye={r['realized_eye']:.3f}")
