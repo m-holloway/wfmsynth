@@ -47,7 +47,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from wfmsynth import Grid, Signal                                    # noqa: E402
+from wfmsynth import Grid, Signal, dataset                           # noqa: E402
 from wfmsynth import physics as P, instrument as INST, resample as RS  # noqa: E402
 from wfmsynth.acquire import AcquisitionProfile                      # noqa: E402
 
@@ -168,6 +168,29 @@ def chain_analog(n):
     return run
 
 
+def batch_dataset(n):
+    """Many records through ONE channel. Guards two things a single-record case cannot see:
+    `dataset` streaming each record into the output array instead of collecting them all first
+    (which held the whole set twice, at float64 and again at float32), and the minimum-phase
+    response being reused across the batch rather than rebuilt per record."""
+    # Enough records that the STACKED ARRAY dominates the peak rather than any one
+    # record's rendering temporaries -- otherwise this case would not actually be
+    # sensitive to how the set is assembled, which is the thing it is here to guard.
+    records = 32
+    per = max(n // records, 1 << 11)
+
+    def build(rng):
+        s = int(rng.integers(1 << 30))
+        return (Signal(seed=s, grid=_grid(per))
+                .carrier("nrz", n_ui=per // SPUI, pattern="prbs13", tr_frac=0.4,
+                         causal=True, seed=s)
+                .lossy(length_in=8.0, tand=0.02, causal=True))
+
+    def run():
+        return dataset(build, records)
+    return run
+
+
 CASES = {
     "op:carrier_nrz": op_carrier_nrz,
     "op:prbs": op_prbs,
@@ -183,6 +206,7 @@ CASES = {
     "chain:serial_link": chain_serial_link,
     "chain:instrument": chain_instrument,
     "chain:analog": chain_analog,
+    "batch:dataset": batch_dataset,
 }
 
 # The CI subset: everything that is cheap at the quick size. `resample_at` and the chains that
