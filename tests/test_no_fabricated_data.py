@@ -12,7 +12,7 @@ They are cheap, they need no reference output, and each one would have caught th
 import numpy as np
 import pytest
 
-from wfmsynth.compose import Signal, _EXEC
+from wfmsynth.compose import Signal, _EXEC, _LEAD_LTI
 from wfmsynth.grid import Grid
 from wfmsynth.streams import Streams
 
@@ -35,6 +35,17 @@ def _input(seed=3):
 # Ops under test: waveform -> waveform stages a chain can place after a channel. Sources
 # (`carrier`, `symbols`) and multi-signal/optical stages are excluded because they do not take a
 # meaningful electrical waveform in.
+# A synthetic measured response for the `sparam` stage: the same sqrt(f)+f loss law the
+# analytic channel uses, with a delay, so the op exercises its real interpolation path.
+#
+# It reaches the record's own NYQUIST, deliberately. The superposition probe below is white
+# noise, so a response that stopped short would leave most of the record's power out of band --
+# and `sparam` refuses that rather than silently zeroing it (measured: 69 % above a 40 GHz top).
+# The refusal is correct; a fixture that triggers it is testing the guard, not linearity.
+_SP_FREQS = np.linspace(0.0, FS / 2.0, 1025)
+_SP_S21 = (10 ** (-(0.02 * np.sqrt(_SP_FREQS / 1e9) + 0.01 * _SP_FREQS / 1e9) / 20)
+           * np.exp(-1j * 2 * np.pi * _SP_FREQS * 3e-10))
+
 STAGES = {
     "lossy": dict(loss_db=6.0, loss_at_ghz=8.0, causal=True),
     "reflect": dict(td_ps=40.0, gamma_s=0.06, gamma_l=0.06, n_bounce=3),
@@ -50,6 +61,11 @@ STAGES = {
     "nonlinearity": dict(compression=0.04),
     "drift": dict(kind="gain", amount=0.004, shape="linear"),
     "probe": dict(c_load_f=0.45e-12, r_source=50.0),
+    # Classified LTI in `compose._LEAD_LTI` and, until the gate below, never checked for it.
+    "cascade": dict(path=[{"line": {"length_in": 3.0}}, {"disc": {"gamma": 0.06}},
+                          {"line": {"length_in": 3.0}}]),
+    "sparam": dict(freqs=_SP_FREQS, s21=_SP_S21),
+    "intra_pair_skew": dict(skew_ps=3.0, gain_imbalance=0.02),
     # U-09/U-12/U-13. `sample_clock` is LINEAR (the sample positions are a function of k, not of
     # x) but not time-invariant, so it belongs in LTI below and not in CORNER_CASES. `agc` is
     # deliberately NOT in LTI: its gain is a functional of the input's own level, so
@@ -96,8 +112,43 @@ def test_every_input_sample_influences_the_output(op):
                          f"of its input.")
 
 
-LTI = ["lossy", "reflect", "resonant_reflect", "ctle", "rx_ffe", "tx_ffe", "de_emphasis",
-       "scope", "ac_couple", "probe", "sample_clock"]
+# DERIVED from the classification, not restated beside it. `compose._LEAD_LTI` is what the
+# lead-in machinery believes is linear, and it SIZES THE GUARD on that belief -- it builds a
+# combined impulse response by superposing the ops. So the list that gets superposition-tested
+# has to be that same list, or the belief goes unchecked exactly where it is load-bearing.
+#
+# It was restated, and it had drifted: `cascade`, `sparam` and `intra_pair_skew` were classified
+# LTI and never tested for it. All three measure ~4e-16, so this closed a coverage gap rather
+# than a defect -- but a regression in any of them would have corrupted guard sizing silently.
+LTI_EXTRA = {
+    # Linear, but NOT time-invariant (the sample positions are a function of k, not of x), so it
+    # is deliberately not in `_LEAD_LTI` -- and superposition still has to hold.
+    "sample_clock",
+}
+LTI_EXCUSED: dict = {}          # op -> why superposition cannot be asserted. Empty, and should
+                                # stay that way: an op in `_LEAD_LTI` that is not linear is a
+                                # misclassification, not an exception.
+LTI = sorted((set(_LEAD_LTI) | LTI_EXTRA) - set(LTI_EXCUSED))
+
+
+def test_every_op_classified_linear_can_be_exercised():
+    """Completeness is enforced by the DERIVATION above, not by this test: because `LTI` is
+    built from `_LEAD_LTI`, an op added there is automatically parametrized into
+    `test_an_op_that_claims_to_be_linear_obeys_superposition` and fails it if it is not linear.
+    Verified by adding a non-linear op to `_LEAD_LTI` and watching that test fail, rather than
+    assumed.
+
+    So asserting "every `_LEAD_LTI` op is in `LTI`" would be tautological -- it cannot fail, and
+    a test that cannot fail looks like protection while providing none.
+
+    What this DOES check is the one way the derivation can still be defeated: an op with no
+    `STAGES` entry cannot be exercised, so it would be silently skipped."""
+    cannot_run = sorted(op for op in LTI if op not in STAGES)
+    assert not cannot_run, (
+        f"classified LTI (or listed in LTI_EXTRA) with no STAGES entry to exercise it, so "
+        f"superposition is never actually asserted for it: {cannot_run}")
+    for op in LTI_EXCUSED:
+        assert op in _LEAD_LTI, f"{op!r} is excused from a list it is not on"
 
 
 @pytest.mark.parametrize("op", LTI)
