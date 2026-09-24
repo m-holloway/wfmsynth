@@ -1,5 +1,13 @@
 [build-system]
-requires = ["setuptools>=61"]
+# >=77 for PEP 639: `license` as an SPDX string and `license-files`. The older forms (a
+# `license = {text = ...}` table, and a `License ::` trove classifier) are both deprecated and
+# stop being supported on 2027-02-18, so this is migrated rather than left to expire.
+#
+# 77 is also the floor this project can ask for while supporting Python 3.9: setuptools 77.0.1
+# still declares `requires-python >=3.9`, but 84 has moved to >=3.10, so pip on a 3.9 runner
+# resolves to the newest 77..8x that still supports it. Raising this floor further would
+# silently drop 3.9 from the build matrix.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,27 +15,40 @@ name = "wfmsynth"
 version = "0.41.0"
 description = "Physics-informed synthetic waveform generation — channels, jitter, crosstalk, NRZ/PAM4/RF carriers, and realistic deep-memory scope captures."
 readme = "README.md"
-license = { text = "0BSD" }
+license = "0BSD"
+license-files = ["LICENSE"]
 authors = [{ name = "Michael Holloway" }]
 requires-python = ">=3.9"
 dependencies = ["numpy>=1.21", "scipy>=1.7"]
 keywords = ["signal-integrity", "waveform", "synthesis", "PAM4", "SerDes", "jitter", "oscilloscope", "physics", "simulation", "synthetic-data"]
+# No `License ::` classifier: PEP 639 replaced them with the SPDX `license` field above, and
+# setuptools warns on both the old table form and the classifier.
 classifiers = [
-  "License :: OSI Approved :: BSD License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering",
   "Topic :: Scientific/Engineering :: Physics",
   "Intended Audience :: Science/Research",
 ]
+
+[project.urls]
+Homepage = "https://github.com/m-holloway/wfmsynth"
+Repository = "https://github.com/m-holloway/wfmsynth"
+Issues = "https://github.com/m-holloway/wfmsynth/issues"
+Changelog = "https://github.com/m-holloway/wfmsynth/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 test = ["pytest>=7", "h5py>=3"]
 # Writing HDF5 needs h5py. Nothing else in the library does, so it stays optional and the
 # exporter reports the missing import rather than the package refusing to install without it.
 hdf5 = ["h5py>=3"]
+# `examples/fill_zarr.py` fills a seed archive. Same rule as hdf5: the library itself never
+# imports zarr, so it is an extra, and the example says what to install rather than tracebacking.
+zarr = ["zarr>=2.13"]
 
 [tool.setuptools.packages.find]
 include = ["wfmsynth*"]

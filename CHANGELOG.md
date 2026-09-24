@@ -1,0 +1,124 @@
+# Changelog
+
+Notable changes to `wfmsynth`, newest first.
+
+This file starts at 0.41.0 and reconstructs the earlier versions from git history, because
+nothing recorded them at the time — the first three entries are therefore summaries of a commit
+range rather than release notes anyone wrote. Tags were added retroactively at the last commit
+carrying each version, so `git diff v0.39.0..v0.40.0` is exact even though `v0.40.0` was never
+cut as a release.
+
+Dates are the last commit in each range. The project uses [semantic versioning](https://semver.org)
+loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
+samples is called out explicitly under **Changed output** below.
+
+## 0.41.0 — 2026-09-24
+
+The long-record performance pass, a batch of S-parameter capabilities, and eleven filed defects.
+
+### Performance
+
+End-to-end at 4.2 M samples, output bit-exact or within 1.4e-15 unless noted:
+
+| Workload | Before | After |
+|---|---|---|
+| Instrument chain | 0.449 s / 614 MB | **0.285 s / 382 MB** |
+| Jitter + supply chain | 2.626 s / 634 MB | **0.959 s / 445 MB** |
+| Dataset, 32 records | 0.439 s / 203 MB | **0.224 s / 165 MB** |
+
+- `physics.lfsr` computes a long sequence by jumping over GF(2) rather than stepping per bit:
+  738 ms → 18 ms at 4 M bits, uniform across PRBS7–31, **bit-exact**. `phase` is now a matrix
+  power, so a phase offset of 1e9 returns in under a millisecond instead of being untenable.
+- `resample.resample_at` factors its kernel weights into a polyphase table and takes its
+  normaliser from a phase table: ~3.4× faster, agreeing to ~1e-15. This is the hot path for
+  jitter, DCD, intra-pair skew, the sampling clock and acquisition.
+- `physics._min_phase_H` no longer builds three record-length temporaries, and can return just
+  the rfft half that every filtering caller wanted.
+- `compose.dataset()` streams each record into the output array instead of collecting them all
+  first, which held the whole set twice: peak 3.0× → 1.2× the array.
+- `tools/benchmark.py` plus a CI gate on peak memory and the **scaling ratio** `t(2n)/t(n)`,
+  which divides the runner's speed out and so catches a complexity regression without depending
+  on machine load.
+
+### Added
+
+- `Signal.stored_grid(x)` — the `Grid` describing the record `waveform()` returned, which is not
+  `Signal.grid` after an `acquire` or a `digitize(n_out=)`. Handing the synthesis grid to a
+  measurement was silently 4.9 % wrong on an 80 → 40 GSa/s acquisition; this removes the footgun
+  rather than warning about it, and raises if it cannot account for the chain's length.
+- `physics.response_cache()` — reuse a channel's minimum-phase response across a batch of
+  records. Bit-exact, opt-in (an entry costs about one record of storage), and `dataset()`
+  already wraps its own loop in one. 1.28× on a 12-record batch.
+- `physics.apply_transfer(method=)` — `"overlap"`/`"auto"` compute the same linear convolution in
+  blocks, holding ~1.1× the record instead of ~5.0×. **Not the default**: see *Changed output*.
+- `sparam.read_mdif` / `MdifSweep` — read an MDIF (`.mdf`) sweep of S-matrices over one or more
+  outer variables; `.select(**kwargs)` picks a point for `sparam_channel`. (#62)
+- `sparam.stub()` and `sparam.measured(left=, right=)` — an open/short transmission-line stub,
+  and a measured 4-port block taken as a differential cascade section via its mixed-mode SDD
+  block. (#59, #60)
+- `sparam.check_response()` — passivity and precursor-energy diagnostics for a measured
+  response, reported rather than enforced. (#61)
+- `sparam.renormalize_s()`, and Touchstone reference-impedance handling throughout. (#58)
+- `physics.warn_if_awkward_length()` — names a record length that costs a circular stage up to
+  12× (a large prime factor). Silent for every round length: `2**k`, `10**k`, and the
+  `40,000,000 = 2**9 * 5**7` of a deep capture.
+
+### Fixed
+
+- `measure.align_symbols` locked onto noise on an inverted record. (#52)
+- `physics.de_emphasis_taps`' sign was inverted from how every specification quotes it; negative
+  dB now means de-emphasis, e.g. PCIe's "−3.5 dB". (#53)
+- `__version__` is derived from `pyproject.toml` instead of a second literal that had already
+  drifted from it. (#54)
+- `crosstalk`/`drift` silently took a fallback branch on an unrecognised `kind`/`shape`; both
+  now raise. (#55)
+- `Signal.sparam` shredded a mixed-mode `ports` pairing given as a string, and dropped `z0`
+  entirely. (#57, #63)
+- `examples/confounder_sweep.py` crashed on the library's own documented gotcha (`eye_height`
+  requires `levels`). Every example now runs in CI, so this class of rot cannot return.
+- `stream.stream_blocks` mishandled a single-tap filter (`-(nh-1)` is `-0`, and `tail[-0:]` is
+  the whole array).
+
+### Changed output
+
+- Nothing by default. Every change above is bit-exact or within ~1e-15 of it, except:
+- `apply_transfer(method="overlap")`, which is **opt-in and recorded in the recipe**. It differs
+  from the transform by 7.7e-5 of peak-to-peak for a channel stage, 2.5e-4 through a full chain,
+  and a whole 8-bit code on 1.16 % of samples once a converter sees it. A recipe rendered on one
+  path replays on that path.
+
+### Known limitations
+
+- `instrument.probe_loading(causal=True)` still applies its pole circularly. Making it linear
+  was implemented, measured and reverted: it costs 0.05 dB and 1.4° across the whole record to
+  fix a wrap confined to ~5 time constants at its head, because an analog pole does not vanish
+  at Nyquist and its sampled impulse response has a 1/k tail. See `BACKLOG.md` #58.
+
+## 0.40.0 — 2026-09-22
+
+Seventy-six commits. The largest single release, spanning the analog/instrument extension and
+most of the acquisition path.
+
+- Analog, CMOS/PWM and captured-from-disk sources, so a chain is not only a serial link:
+  `step`/`pulse`/`exp`/`chirp_sweep`/`two_tone`/`analog_noise`, unipolar `cmos`, and
+  `Signal.capture()` reading `.npy`/`.npz`/`.csv` with a sha256 over sample values.
+- A fuller instrument pack: probe compensation, ground-lead inductance, termination, AC coupling
+  and overload recovery; `burst`, `pass_fet`, `modulate` (AM/ASK/OOK/FM/FSK/PM); an open-drain
+  wired-AND second sink.
+- Bandlimited sub-sample displacement (`resample`), so jitter, DCD, intra-pair skew and a
+  free-running sample clock stop being rounded to whole samples.
+- HDF5 export shaped for a bench instrument, a pattern registry, line/level coding ops, and an
+  installable agent skill under `.claude/skills/`.
+- `compose` refuses a parameter an op does not read, instead of silently recording it.
+
+## 0.39.0 — 2026-09-03
+
+- **Relicensed MIT → 0BSD** (Zero-Clause BSD).
+- Receiver-side equalisation as first-class chain ops: FFE and DFE.
+- PRBS31Q PAM4 pattern; causal (minimum-phase) lossy channel fixed on odd-length records.
+
+## 0.1.0 — 2026-08-25
+
+Initial public shape: the composable `Signal` op-chain, physics-grounded channel/reflection/
+crosstalk/jitter primitives, recipes with content digests, the `wfmsynth.validate` physics gate,
+and two-rate acquisition.
