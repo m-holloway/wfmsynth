@@ -1,0 +1,11 @@
+# Actions only. numpy and scipy are deliberately loose floors (>=1.21 / >=1.7) rather than
+# pins, so there is nothing for dependabot to bump there -- but a pinned action version does go
+# stale, and a stale one is how a supply-chain issue arrives in CI.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "ci"

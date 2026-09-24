@@ -1,0 +1,48 @@
+name: Bug report
+description: A wrong number, a crash, or behaviour that disagrees with the docs
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For this library the single most useful thing you can attach is the **recipe**
+        (`signal.recipe()`), because it reproduces the record exactly. If you have one, the
+        rest of this form is mostly optional.
+  - type: textarea
+    id: recipe
+    attributes:
+      label: Recipe or minimal reproduction
+      description: >
+        `json.dumps(signal.recipe())`, or the shortest chain that shows it. If the record came
+        from a file (a capture, a Touchstone/MDIF channel), say which format — not the file.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what you got
+      description: >
+        Numbers if you have them. "The eye is wrong" is hard to act on; "eye_height reads 0.61
+        where an explicitly-built Grid gives 0.59" is a bug report that can be reproduced.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: wfmsynth version
+      description: "`python -c \"import wfmsynth; print(wfmsynth.__version__)\"`"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python, numpy, scipy, OS
+      description: "`python -c \"import sys,numpy,scipy;print(sys.version,numpy.__version__,scipy.__version__)\"`"
+  - type: checkboxes
+    id: gates
+    attributes:
+      label: Gates
+      options:
+        - label: "`python -m wfmsynth.validate` passes on my install"
+        - label: "`python -m pytest -q` passes on my install"

@@ -31,6 +31,25 @@ def digest(values):
     return hashlib.sha256(v.tobytes()).hexdigest()
 
 
+_PICKLE_MSG = (
+    "capture: {path!r} holds a PICKLED object array, not plain samples. Loading one executes "
+    "code, so it is refused rather than read. If you produced this file, save the samples as a "
+    "numeric array (np.save(path, np.asarray(values, float))); if you did not, do not load it."
+)
+
+
+def _load_plain(p, path):
+    """`np.load` with pickling off, and a message that says what happened. numpy's own error
+    ("Object arrays cannot be loaded when allow_pickle=False") is accurate and tells a caller
+    of THIS library nothing about which file or what to do."""
+    try:
+        return np.load(p, allow_pickle=False)
+    except ValueError as e:
+        if "allow_pickle" in str(e):
+            raise ValueError(_PICKLE_MSG.format(path=path)) from e
+        raise
+
+
 def load_values(path):
     """Read a capture file's samples. Raises with the path named on any failure -- a missing or
     unreadable file is an error to fix, never a record of zeros."""
@@ -38,14 +57,23 @@ def load_values(path):
     if not p.exists():
         raise FileNotFoundError(f"capture: no such file {path!r}")
     suffix = p.suffix.lower()
+    # `allow_pickle=False` is numpy's own default since 1.16.3, and it is stated here anyway.
+    # A .npy/.npz can carry a PICKLED object array, and unpickling runs code -- so a capture
+    # file is an executable if it is loaded with pickling on. This library reads capture files
+    # a user did not necessarily write (that is the point of `Signal.capture()`), so the flag
+    # is written down rather than inherited: it survives a change of default, and it says to
+    # the next reader that the restriction is deliberate rather than accidental.
     if suffix == ".npy":
-        y = np.load(p)
+        y = _load_plain(p, path)
     elif suffix == ".npz":
-        z = np.load(p)
+        z = _load_plain(p, path)
         if "values" not in z.files:
             raise ValueError(f"capture: {path!r} is an .npz with no 'values' array "
                              f"(has: {list(z.files)})")
-        y = z["values"]
+        try:
+            y = z["values"]
+        except ValueError as e:                       # an object array inside the archive
+            raise ValueError(_PICKLE_MSG.format(path=path)) from e
     elif suffix == ".csv":
         raw = np.loadtxt(p, delimiter=",")
         raw = np.atleast_2d(raw)

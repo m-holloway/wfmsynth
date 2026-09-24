@@ -838,9 +838,18 @@ standards-fidelity gaps.
 ## Tests
 ```bash
 python -m pip install -e ".[test]"
-pytest
-python -m wfmsynth.validate
+pytest                                       # ~1250 tests
+python -m wfmsynth.validate                  # hard physics-property assertions
+python tools/benchmark.py --quick --check    # peak memory and complexity, not wall time
 ```
+
+## Contributing
+
+**[CONTRIBUTING.md](CONTRIBUTING.md)** has the gates, the definition of done, and the rules that
+are specific to a library whose output is training data — chiefly what to do when a change moves
+rendered samples. **[CHANGELOG.md](CHANGELOG.md)** records what moved between versions; releases
+are tagged `v*`. See also [SECURITY.md](SECURITY.md) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## License
 **0BSD** (Zero-Clause BSD) — see [LICENSE](LICENSE). Maximally permissive: use, copy, modify, and

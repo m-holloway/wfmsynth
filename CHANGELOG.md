@@ -12,6 +12,31 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## Unreleased
+
+### Security
+
+- `capture.load_values` states `allow_pickle=False` explicitly and reports a pickled `.npy`/
+  `.npz` as a named refusal. This was never open — numpy has defaulted to `False` since
+  1.16.3 — but a capture file is the one input this library reads that a user may not have
+  produced, so the restriction is now written down and tested with a real code-execution
+  payload rather than inherited from a default that could change.
+
+### Changed
+
+- Five error messages that stated a rule without the value that broke it now name the value,
+  and the two identical `node must be 'load' or 'source'` messages say which function raised.
+- `capture`, `hdf5` and `resample` are in `__all__`; they were importable as `ws.<name>` but
+  `from wfmsynth import *` missed them.
+- `Signal.reflect`'s docstring now says that `gamma_s` means **source**, not seconds — the
+  suffix means seconds everywhere else in the library, and it sits beside a `td_ps` that is
+  genuinely a time.
+
+### Added
+
+- `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue and PR templates, and a
+  dependabot config for GitHub Actions.
+
 ## 0.41.0 — 2026-09-24
 
 The long-record performance pass, a batch of S-parameter capabilities, and eleven filed defects.

@@ -1,0 +1,31 @@
+name: Feature request
+description: A mechanism, an op, or a capability the library should have
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Mechanisms live in the library; standards knowledge does not. A sequence defined by a
+        polynomial, a seed and a length is arithmetic and belongs here. *Which* sequence a given
+        standard names for a given test belongs in the caller's pattern registry — see
+        [CONTRIBUTING.md](../CONTRIBUTING.md#scope).
+  - type: textarea
+    id: what
+    attributes:
+      label: What should exist, and what physical effect does it represent
+    validations:
+      required: true
+  - type: textarea
+    id: ground_truth
+    attributes:
+      label: How would we know it is right?
+      description: >
+        Every physical claim here is checked by an assertion in `wfmsynth.validate`. What
+        measurable property should hold in the rendered samples — a closed form, a published
+        figure, a measurement from real hardware?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you are doing instead today
