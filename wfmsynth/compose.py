@@ -2152,6 +2152,55 @@ class Signal:
         while holding all others bit-identical — `contrast()` wraps the common case."""
         return self._run(streams)
 
+    def stored_grid(self, x):
+        """The `Grid` that describes what `waveform()` actually RETURNED, which is not always
+        `self.grid`.
+
+            x = sig.waveform()
+            ws.eye_height(x, sig.stored_grid(x), levels=2)       # not sig.grid
+
+        `self.grid` is the SYNTHESIS grid: the rate and length the chain was built on. An
+        `acquire` stores at its own rate, and `digitize(n_out=)` resamples, so after either of
+        those the synthesis grid no longer describes the record in your hand. Handing it to a
+        measurement is not an error anyone sees -- `measure` reads `samples_per_ui` off it, so
+        the fold happens at the wrong symbol period and returns a plausible number. MEASURED on
+        an 80 -> 40 GSa/s acquisition: `eye_height` reads 0.6184 against the true 0.5896, a
+        4.9 % error, silently. That is what this exists to remove, and why it takes the rendered
+        record rather than being a property: it CHECKS.
+
+        The length it derives from the ops must equal the length you hand it. If it does not,
+        this raises rather than returning a grid it cannot justify -- an op whose effect on the
+        rate is not modelled here must fail loudly, since the whole point is to stop a wrong
+        timebase from travelling silently into a measurement."""
+        n_have = len(x) if hasattr(x, "__len__") else int(x)
+        fs, n = float(self.grid.fs), int(self.grid.n)
+        for op in self.ops:
+            name = op["op"]
+            if name == "acquire":
+                prof = op.get("profile", {})
+                fs, n = float(prof["sample_rate_hz"]), int(prof["record_length"])
+                dec = prof.get("decimation") or {}
+                if dec.get("depth"):
+                    if dec.get("mode", "sample") == "peak_hold":
+                        raise ValueError(
+                            "stored_grid: acquire(decimation=peak_hold) returns a (2, depth) "
+                            "min/max record, not a waveform on a timebase, so there is no grid "
+                            "for it. Measure the two channels yourself.")
+                    depth = int(dec["depth"])
+                    fs, n = fs * depth / n, depth
+            elif name == "digitize" and op.get("n_out"):
+                n_out = int(op["n_out"])                  # a genuine resample_poly
+                fs, n = fs * n_out / n, n_out
+            elif name == "sample_clock" and op.get("n_out"):
+                n = int(op["n_out"])                      # a TRUNCATION, not a resample
+        if n != n_have:
+            raise ValueError(
+                f"stored_grid: derived {n} samples from this chain's ops but the record has "
+                f"{n_have}. An op here changes the record length in a way stored_grid does not "
+                f"model, so it cannot state the rate either. Build the grid explicitly: "
+                f"Grid(fs=<stored rate>, baud={self.grid.baud!r}, n={n_have}).")
+        return Grid(fs=fs, baud=self.grid.baud, n=n_have)
+
     def realize(self, streams=None):
         """One-pass ``(waveform, EventList)`` — use this when an external segmenter
         needs both the samples and the realized event times."""

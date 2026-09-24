@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus or an instrument, or reproduce a waveform from a recipe.
-version: 2
+version: 3
 ---
 
 # wfmsynth
@@ -141,10 +141,13 @@ was asked for.
     rise time read off it describes the simulation. Put the probe, the front end, the sample rate
     and the converter in the chain before writing the file, and pass the STORED rate to the
     exporter. `REFERENCE.md` has the parameters.
-17. **After `acquire()`, `Signal.grid` is the SYNTHESIS grid.** It reports the rate and length
-    the chain was built on rather than the record in your hand, so handing it to a measurement
-    measures the wrong thing. Build one for the stored record:
-    `Grid(fs=fs_store, baud=baud, n=len(x))`.
+17. **After `acquire()`, `Signal.grid` is the SYNTHESIS grid — use `Signal.stored_grid(x)`.**
+    `Signal.grid` reports the rate and length the chain was built on, not the record in your
+    hand, and handing it to a measurement raises nothing: `measure` reads `samples_per_ui` off
+    it, folds at the wrong symbol period, and returns a plausible number. MEASURED on an
+    80 → 40 GSa/s acquisition, `eye_height` reads 0.6184 against the true 0.5896 — 4.9 % out,
+    silently. `sig.stored_grid(x)` returns the grid that describes `x`, and RAISES rather than
+    guess if the chain changed the length in a way it cannot account for.
 18. **A unipolar source (`cmos`, and any future one) stays in real volts, not the ±1 the rest of
     `carrier` uses.** `x * 0.5 * v_full` is the wrong conversion once a chain contains one — the
     array already IS volts. `cmos`'s `tr_s` is also an absolute edge time in seconds, unlike
@@ -183,8 +186,10 @@ populates, and a recipe records both the name and the resolved parameters.
 
 ## Staying current
 
-This file is `version: 1`. The copy in the repository is the source of truth, so an installed copy
-can fall behind it. Run this with the same `HOME` the install used:
+The `version:` in this file's own front matter is the number to compare; the copy in the
+repository is the source of truth, so an installed copy can fall behind it. (Do not restate that
+number in this paragraph — it was written out here once and was two behind within a month.)
+Run this with the same `HOME` the install used:
 
 ```bash
 sed -n 's/^version: *//p' ~/.claude/skills/wfmsynth/SKILL.md | head -1
