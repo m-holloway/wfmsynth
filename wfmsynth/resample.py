@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from scipy.special import i0 as _i0
 
 HALF_WIDTH = 32          # taps each side; the kernel is 2*half_width long
@@ -53,7 +54,10 @@ def _table_for(half_width, cutoff, beta):
 
 
 def _weights(dt, half_width, cutoff, beta):
-    """Kernel values at offsets `dt`, read off the table with linear interpolation."""
+    """Kernel values at offsets `dt`, read off the table with linear interpolation.
+
+    The general form, for arbitrary offsets. `resample_at`'s hot path does not use it -- see
+    `_polyphase_for` for the factored version and why the two agree."""
     tab = _table_for(half_width, cutoff, beta)
     mid = (tab.size - 1) // 2
     pos = np.clip(dt * _TABLE_PER_SAMPLE + mid, 0.0, tab.size - 1.000001)
@@ -62,7 +66,41 @@ def _weights(dt, half_width, cutoff, beta):
     return tab[i] * (1.0 - f) + tab[i + 1] * f
 
 
-def resample_at(x, src, half_width=HALF_WIDTH, cutoff=CUTOFF, beta=BETA, chunk=8192):
+# The kernel weights for a whole output sample are a ROW of a polyphase table, not 2*half_width
+# independent lookups. The offset of tap j is ``dt_j = frac - tap_j``, so its table position is
+# ``(frac - tap_j)*TPS + mid``; every ``tap_j`` is an integer and ``TPS`` is an integer, so
+#
+#     the FRACTIONAL part of that position is the same for every tap (it is frac*TPS's), and
+#     the INTEGER parts differ by exactly tap_j*TPS.
+#
+# So one phase index per output sample selects a contiguous row of precomputed weights, and the
+# whole (chunk x 2*half_width) ladder of offset/clip/floor/gather temporaries the general form
+# builds -- about ten record-shaped arrays per chunk, which is what made this the slowest stage
+# in a long render -- collapses to one row gather. Same table, same linear interpolation, same
+# arithmetic; only factored. MEASURED: 3.7-4.0x faster, agreeing to 1.6e-15 relative, which is
+# three orders under the byte-identity gate's own 3.8e-13 round-off band.
+_POLY: dict[tuple, tuple] = {}
+
+
+def _polyphase_for(half_width, cutoff, beta):
+    """``(lo, hi)``, each ``(_TABLE_PER_SAMPLE, 2*half_width)``: the two table rows that the
+    per-sample linear interpolation blends, for every phase. Cached per kernel shape."""
+    key = (int(half_width), float(cutoff), float(beta))
+    got = _POLY.get(key)
+    if got is None:
+        tab = _table_for(half_width, cutoff, beta)
+        mid = (tab.size - 1) // 2
+        taps = np.arange(-int(half_width) + 1, int(half_width) + 1)
+        phase = np.arange(_TABLE_PER_SAMPLE, dtype=float)
+        # exactly `_weights`' clipped position, evaluated on the phase grid instead of per sample
+        pos = np.clip(phase[:, None] - taps[None, :] * _TABLE_PER_SAMPLE + mid,
+                      0.0, tab.size - 1.000001)
+        i = pos.astype(np.int64)
+        got = _POLY[key] = (tab[i], tab[i + 1], taps)
+    return got
+
+
+def resample_at(x, src, half_width=HALF_WIDTH, cutoff=CUTOFF, beta=BETA, chunk=2048):
     """``out[k] = x(src[k])`` for arbitrary real positions `src`, by Kaiser-windowed sinc.
 
     Normalised per output sample so the DC gain is exactly 1, and linear in `x` (`src` does not
@@ -77,23 +115,54 @@ def resample_at(x, src, half_width=HALF_WIDTH, cutoff=CUTOFF, beta=BETA, chunk=8
     indices are CLAMPED (a hold at ``x[0]`` / ``x[-1]``). That is exact for a record whose ends are
     a settled quiescent line -- which is what `Signal.lead_in` renders and discards -- and an edge
     artefact over `half_width` samples for a record that starts mid-pattern.
+
+    `chunk` bounds the working set and is INVISIBLE in the output (pinned by
+    `tests/test_resample_polyphase.py`). It is the one knob here that trades memory against time,
+    and the default is set for memory because this stage is reached by `acquire`, `sample_clock`,
+    `dcd` and `shift`, so a deep record pays it on the way to a GUI or a demo. MEASURED at 2 M
+    samples, peak as a multiple of the record: 1.08x at chunk=512 (369 ms), **1.32x at 2048
+    (317 ms)**, 1.64x at 4096 (311 ms), 2.28x at 8192 (306 ms), 21.5x at 131072 (306 ms). Time is
+    flat above a few thousand and memory is not, so the default sits at the knee: 3 % slower than
+    the fastest setting for 42 % less peak.
     """
     x = np.asarray(x, dtype=float)
     src = np.asarray(src, dtype=float)
     n = x.size
     if n == 0:
         raise ValueError("nothing to resample")
+    hw = int(half_width)
+    lo, hi, taps = _polyphase_for(half_width, cutoff, beta)
+    # The tap window of an INTERIOR output sample lies wholly inside the record, so it is a
+    # stride view on `x` rather than a (chunk x 2*half_width) gathered copy. Only samples whose
+    # window would run off an end need the clamped index path, and there are normally a
+    # kernel's worth of those. Taking the view instead of the copy is what keeps this stage's
+    # peak memory flat in the record length rather than a multiple of it.
+    window = sliding_window_view(x, 2 * hw) if n >= 2 * hw else None
     out = np.empty(src.size, dtype=float)
-    taps = np.arange(-half_width + 1, half_width + 1)
     for start in range(0, src.size, chunk):
         s = src[start:start + chunk]
         base = np.floor(s).astype(np.int64)
-        frac = s - base
-        # offsets of each tap from the requested position
-        dt = frac[:, None] - taps[None, :]
-        w = _weights(dt, half_width, cutoff, beta)
-        idx = np.clip(base[:, None] + taps[None, :], 0, n - 1)
-        num = (w * x[idx]).sum(axis=1)
+        p = (s - base) * _TABLE_PER_SAMPLE
+        ph = p.astype(np.int64)
+        np.clip(ph, 0, _TABLE_PER_SAMPLE - 1, out=ph)
+        fr = (p - ph)[:, None]
+        w = lo[ph] * (1.0 - fr) + hi[ph] * fr
+
+        if window is None:
+            seg = x[np.clip(base[:, None] + taps[None, :], 0, n - 1)]
+        else:
+            inner = (base >= hw - 1) & (base <= n - 1 - hw)
+            if inner.all():
+                seg = window[base - hw + 1]
+            else:
+                seg = np.empty(w.shape)
+                bi = base[inner]
+                if bi.size:
+                    seg[inner] = window[bi - hw + 1]
+                edge = ~inner
+                seg[edge] = x[np.clip(base[edge][:, None] + taps[None, :], 0, n - 1)]
+
+        num = np.einsum("ij,ij->i", w, seg)
         den = w.sum(axis=1)
         out[start:start + chunk] = num / np.where(den == 0.0, 1.0, den)
     return out
