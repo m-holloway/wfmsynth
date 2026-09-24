@@ -2303,11 +2303,15 @@ def dataset(build, n, seed=0):
     rng = np.random.default_rng(seed)
     sigs = [build(rng) for _ in range(n)]
     X = None
-    for i, s in enumerate(sigs):
-        w = s.waveform()
-        if X is None:
-            L = len(w)
-            X = np.empty((n, L), np.float32)
-        X[i] = w[:L] if len(w) >= L else np.pad(w, (0, L - len(w)))
-        del w
+    # A dataset is many records through (usually) the same channel, which is exactly the case
+    # `physics.response_cache` exists for -- bit-exact, and bounded to this loop so the storage
+    # it costs is released with it. See the comment above `_RESPONSE_CACHE`.
+    with P.response_cache():
+        for i, s in enumerate(sigs):
+            w = s.waveform()
+            if X is None:
+                L = len(w)
+                X = np.empty((n, L), np.float32)
+            X[i] = w[:L] if len(w) >= L else np.pad(w, (0, L - len(w)))
+            del w
     return X, [s.recipe() for s in sigs]
