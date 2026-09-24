@@ -2290,12 +2290,24 @@ def dataset(build, n, seed=0):
     """Ground-truth dataset builder. `build(rng)` returns a Signal (sample its knobs from
     `rng` however you like — the SAMPLED values are baked into the Signal's ops, hence
     recorded). Returns (X, recipes): X is (n, L) stacked waveforms, recipes is a list of n
-    per-sample recipes. Each waveform is exactly reproducible from its recipe."""
+    per-sample recipes. Each waveform is exactly reproducible from its recipe.
+
+    Each waveform is written into `X` as it is rendered rather than collected first. The
+    collected form held every record at float64 AND the float32 copy -- 12 bytes per sample at
+    peak where 4 will do -- so a dataset large enough to be worth building was the case it
+    handled worst. MEASURED at 64 records of 131072 samples: peak falls from 100 MB to 35 MB,
+    and the records themselves are identical (the rendering order, and therefore every RNG
+    draw, is unchanged)."""
+    if int(n) < 1:
+        raise ValueError(f"dataset: n must be at least 1, got {n}")
     rng = np.random.default_rng(seed)
     sigs = [build(rng) for _ in range(n)]
-    waves = [s.waveform() for s in sigs]
-    L = len(waves[0])
-    X = np.empty((n, L), np.float32)
-    for i, w in enumerate(waves):
+    X = None
+    for i, s in enumerate(sigs):
+        w = s.waveform()
+        if X is None:
+            L = len(w)
+            X = np.empty((n, L), np.float32)
         X[i] = w[:L] if len(w) >= L else np.pad(w, (0, L - len(w)))
+        del w
     return X, [s.recipe() for s in sigs]
