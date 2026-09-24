@@ -13,11 +13,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wfmsynth as ws
 
 
-# Grid gives the array real units. Here each symbol lasts 100 ps and is represented
-# by five simulation samples. Real sample and symbol clocks need not divide evenly.
-# The quickstart uses the legacy 4096-point size because domain_randomize currently
+# Grid gives the array real units. Here each symbol lasts 100 ps and is represented by
+# sixteen simulation samples. Real sample and symbol clocks need not divide evenly.
+#
+# The sample rate is chosen from the EDGE, not the symbol rate: tr_frac=0.5 of a 16-sample
+# UI puts k = 8 samples across the transition, which is this library's headline sizing rule.
+# Below k = 8 every rise-time, jitter and slew figure measured from the record is really
+# measuring the grid -- so the first example anyone runs should satisfy it, not skirt it.
+#
+# The quickstart keeps the legacy 4096-point size because domain_randomize currently
 # expects that default length (see BACKLOG #51).
-grid = ws.Grid(fs=50e9, baud=10e9, n=4096)
+grid = ws.Grid(fs=160e9, baud=10e9, n=4096)
 n_ui = int(grid.n / grid.samples_per_ui)
 
 # Build in physical order. causal=True prevents future samples from influencing an
@@ -25,7 +31,7 @@ n_ui = int(grid.n / grid.samples_per_ui)
 # a delayed connector/via echo.
 signal = (
     ws.Signal(seed=7, grid=grid)
-    .carrier("nrz", n_ui=n_ui, tr_frac=0.4, causal=True)
+    .carrier("nrz", n_ui=n_ui, tr_frac=0.5, causal=True)   # k = 8 samples/edge
     .nonlinearity(compression=0.03, rise_fall_ratio=1.1)
     .lossy(loss_db=6.0, loss_at_ghz=5.0, causal=True)
     .reflect(td_ps=120.0, gamma_s=0.12)

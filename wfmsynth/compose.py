@@ -2308,12 +2308,17 @@ class Signal:
 
     @classmethod
     def from_recipe(cls, r):
-        """Reconstruct a Signal from a recipe; `.waveform()` reproduces bit-for-bit."""
+        """Reconstruct a Signal from a recipe; `.waveform()` reproduces bit-for-bit.
+
+        WARNS if the recipe was written by a version whose numerics differ for an op it
+        contains. `recipe()` has always recorded `wfmsynth_version`, and this never read it,
+        which made the record write-only provenance -- see `NUMERIC_CHANGES`."""
         grid = Grid(**r["grid"]) if r.get("grid") else None
         s = cls(seed=r["seed"], grid=grid, lead_in=r.get("lead_in"), lead_out=r.get("lead_out"))
         ops = [dict(o) for o in r["ops"]]
         for o in ops:                       # the same gate the builders go through: a recipe
             OPKEYS.check(o.get("op"), o)    # carrying a dead parameter says what it is not
+        _warn_on_numeric_drift(r.get("wfmsynth_version"), ops)
         s.ops = ops
         return s
 
@@ -2339,6 +2344,73 @@ def rederive_anchor(anchor, grid):
             raise ValueError("a 'ui' anchor needs baud set on the grid")
         return int(round(anchor["ui"] * spu))
     raise ValueError(f"unknown anchor spec {anchor!r} (use sample/t/frac/ui)")
+
+
+# A recipe is this project's central claim: "a record's ground truth is not its samples, it is
+# the ordered list of ops that produced them." That claim is only as good as an op's numerics
+# staying put -- and once, they did not.
+#
+# 0.41.0 (#53) inverted `de_emphasis_taps`' sign convention, because every specification quotes
+# de-emphasis as a NEGATIVE dB and this library had it positive. That was the right fix for a
+# caller. It is silent for a stored recipe: `de_emphasis(db=3.5)` rendered as de-emphasis under
+# 0.40.0 and as PRE-emphasis under 0.41.0 -- the transmitter shaping of that record inverted,
+# and it replays without complaint.
+#
+# `recipe()` has recorded `wfmsynth_version` all along and nothing ever read it, which made the
+# field write-only provenance. This table is what reads it. Each entry is the version in which
+# an op's numerics CHANGED, so a recipe written before that version, containing that op, is
+# warned about by name.
+#
+# ADD AN ENTRY whenever a change moves an op's output beyond the byte-identity band. That is the
+# running cost of the guarantee, and it is small beside a record that silently means something
+# else than it says.
+NUMERIC_CHANGES = (
+    ("0.41.0", "de_emphasis",
+     "the sign convention was inverted so that NEGATIVE db means de-emphasis, matching how "
+     "every specification quotes it (#53). A recipe written before 0.41.0 with a positive `db` "
+     "asked for de-emphasis and now renders as PRE-emphasis; negate it to preserve the intent."),
+)
+
+
+def _version_tuple(v):
+    """``(major, minor, patch)`` from a version string, ignoring any suffix. ``None`` when it
+    cannot be parsed, which is treated as "cannot tell" rather than as "old"."""
+    if not v:
+        return None
+    parts = []
+    for chunk in str(v).split(".")[:3]:
+        # the LEADING run of digits, not every digit in the chunk: "0rc1" is release candidate 1
+        # of patch 0, and collecting all its digits would read it as patch 1 -- which would make
+        # a release candidate compare as NEWER than the release it precedes.
+        digits = ""
+        for c in chunk:
+            if not c.isdigit():
+                break
+            digits += c
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts) if parts else None
+
+
+def _warn_on_numeric_drift(recipe_version, ops):
+    """Warn when a recipe predates a change to the numerics of an op it contains.
+
+    Silent when the recipe records no version -- recipes predating the field are not evidence of
+    anything, and warning on every one of them would teach people to filter this out -- when the
+    version cannot be parsed, and when the recipe is already at or past the change."""
+    from wfmsynth import __version__
+    have = _version_tuple(recipe_version)
+    if have is None:
+        return
+    present = {o.get("op") for o in ops}
+    for changed_in, op, what in NUMERIC_CHANGES:
+        if op in present and have < _version_tuple(changed_in):
+            warnings.warn(
+                f"this recipe was written by wfmsynth {recipe_version} and contains {op!r}, "
+                f"whose numerics changed in {changed_in}: {what} Rendering it with "
+                f"{__version__} will not reproduce the original record.",
+                RuntimeWarning, stacklevel=3)
 
 
 def dataset(build, n, seed=0):

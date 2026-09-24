@@ -14,6 +14,19 @@ samples is called out explicitly under **Changed output** below.
 
 ## Unreleased
 
+### Fixed
+
+- **A recipe written before an op's numerics changed now says so on replay.** `recipe()` has
+  always recorded `wfmsynth_version`; `from_recipe()` never read it, making the field write-only
+  provenance. That was not theoretical: 0.41.0 (#53) inverted `de_emphasis_taps`' sign, so a
+  stored `de_emphasis(db=3.5)` rendered as de-emphasis under 0.40.0 and as PRE-emphasis
+  afterwards — inverted transmitter shaping, replayed without complaint. `compose.NUMERIC_CHANGES`
+  is the table that reads the version, with #53 as its first entry.
+- README.md's first example and `examples/quickstart.py` both broke the library's own headline
+  `k >= 8` sizing rule — the README warned when run verbatim, asking for 0.6 samples across an
+  edge. Both now satisfy it at k = 8 and say why. Eight further examples remain undersampled and
+  are listed with their measured `k` in `tests/test_examples_run.py::UNDERSAMPLED`; see BACKLOG.
+
 ### Security
 
 - `capture.load_values` states `allow_pickle=False` explicitly and reports a pickled `.npy`/

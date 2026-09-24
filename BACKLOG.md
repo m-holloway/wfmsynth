@@ -415,6 +415,31 @@ These improve production workflows but do not outrank demonstrated fidelity gaps
 - memory-mapped long-record output; and
 - optional accelerated backends after profiling.
 
+### Two thirds of the shipped examples break the library's own `k >= 8` rule
+
+**Status:** Open, measured, and gated. Owner: whoever next touches `examples/`.
+
+`tests/test_examples_run.py::UNDERSAMPLED` lists eight of the twelve demos with their measured
+`k` and the cost of fixing each. All of them take the default `tr_frac=0.15` on a grid of 2.3
+to 10 samples/UI, and those cannot both hold: resolving a 15 %-of-UI edge with 8 samples needs
+about 53 samples/UI. The rule and the default are not in conflict -- together they demand a high
+sample rate, and these examples chose runtime instead.
+
+This matters more than a warning in a console. SKILL.md's headline sizing rule says that below
+k = 8, "every rise time, jitter and slew measurement on that record is measuring the grid" --
+and `ground_truth.py` and `sim_to_real.py` both MEASURE. Their printed numbers are therefore
+part grid artefact, in files whose purpose is to teach what honest measurement looks like.
+
+The flagship two are fixed: README.md's first example and `examples/quickstart.py` now satisfy
+the rule at k = 8 and carry a comment saying why, so the first code anyone runs teaches the rule
+instead of tripping over it. A gate holds that, and a second gate keeps the debt list honest in
+the other direction -- an entry that has been fixed must be removed.
+
+**Done when:** `UNDERSAMPLED` is empty. Start with `events.py` (1.6x fs) and
+`two_rate_acquisition.py` (2.0x), which are cheap; `provenance.py` needs 7x and may want a lower
+baud rather than a higher rate. Raising `fs` changes what each demo shows, so each needs its
+output re-read rather than just its warning silenced.
+
 ## Known limitations and claim boundaries
 
 Keep these statements synchronized with user-facing documentation:

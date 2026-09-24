@@ -101,11 +101,14 @@ symbol-rate units; each chained operation represents one stage in the signal pat
 ```python
 import wfmsynth as ws
 
-grid = ws.Grid(fs=100e9, baud=25e9, n=16_384)
+# fs is chosen from the EDGE, not the symbol rate: 400 GSa/s is 16 samples/UI at 25 Gbaud,
+# so a tr_frac=0.5 edge gets 8 samples across the transition. Under k = 8 you are measuring
+# the grid rather than the signal, and the library says so -- see "Two numbers" below.
+grid = ws.Grid(fs=400e9, baud=25e9, n=16_384)          # 16 samples/UI
 
 signal = (
     ws.Signal(seed=7, grid=grid)
-    .carrier("nrz", n_ui=4096, causal=True)             # transmitted data
+    .carrier("nrz", n_ui=1024, tr_frac=0.5, causal=True)  # transmitted data; k = 8 samples/edge
     .lossy(loss_db=8.0, loss_at_ghz=12.5, causal=True) # PCB/cable bandwidth
     .reflect(td_ps=80.0, gamma_s=0.15)                 # echo; gamma_s = SOURCE-end Γ, not seconds
     .scope(bw_hz=30e9)                                 # instrument front end
