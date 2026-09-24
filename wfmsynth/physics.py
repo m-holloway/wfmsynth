@@ -328,23 +328,38 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
                    record (`OVERLAP_MAX_FRAC`) and the record is long enough to be worth
                    blocking (`OVERLAP_MIN_N`); "fft" otherwise.
 
-    WHY IT IS NOT THE DEFAULT, stated plainly because the number matters. The two paths do not
-    agree to round-off: MEASURED on an 8-inch causal channel over a 4 M-sample record, they
-    differ by 2.5e-5 of the record's peak-to-peak, and that floor does NOT fall as the
-    truncation threshold is tightened -- at `rel` from 1e-5 down to 1e-13 it stays at 2.5e-5
-    while the tap count grows from 0.2 % to 50 % of the record. The reason is that the
-    whole-record path's own answer is a function of the record LENGTH: it samples the response
-    on the padded transform's frequency grid, and a block path samples it on a shorter one.
-    Both are legitimate discretisations of the same continuous channel and they converge as the
-    record grows against the channel's memory, but at any finite length they are 1e-5 apart --
-    which `tests/test_byte_identity.py` classifies as a behaviour change (it starts catching at
-    1e-5) rather than as the 3.8e-13 round-off it deliberately absorbs. So a recipe rendered on
-    one path does not reproduce bit-for-bit on the other, and `method` is recorded in the recipe
-    so that it replays on the path it was rendered with.
+    WHY IT IS NOT THE DEFAULT, stated plainly because the number matters and is bigger than it
+    looks. The two paths do not agree to round-off. MEASURED on an 8-inch causal channel:
 
-    WHAT IT BUYS, measured at 2 M samples on the same channel: 4.7x the speed, and peak memory
-    falls from about 5x the record to about 1.2x -- which is the difference between a deep
-    record rendering inside a GUI or a demo and not rendering there at all."""
+        this stage alone           7.7e-5 of peak-to-peak (max), 3.5e-5 rms
+        through a full chain       2.5e-4 of peak-to-peak -- the probe and front end
+                                   downstream of it AMPLIFY the disagreement, they do not
+                                   average it away
+        stored as 8-bit codes      1.00 LSB max, and 1.16 % of the record's samples differ
+                                   by a whole code
+
+    That last line is the one to read. "A ten-thousandth of peak-to-peak" sounds like nothing
+    until a converter turns it into a different stored code on one sample in ninety.
+
+    The disagreement is REAL but it is not divergence: tightening the truncation threshold does
+    reduce it, from 7.7e-5 at `rel=1e-5` to 3.5e-5 at 1e-7 and 3.3e-5 at 1e-9, where it
+    plateaus. It plateaus because the residue is not truncation at all -- the whole-record
+    path's own answer is a function of the record LENGTH, since it samples the response on the
+    padded transform's frequency grid while a block path samples it on a shorter one. Both are
+    legitimate discretisations of the same continuous channel and they converge as the record
+    grows against the channel's memory, but at any finite length a gap remains. `rel` trades it
+    against the tap count if a caller wants to buy some of it back.
+
+    Either way it is far above the 3.8e-13 round-off `tests/test_byte_identity.py` deliberately
+    absorbs, so it is a behaviour change: a recipe rendered on one path does not reproduce on
+    the other, and `method` is recorded in the recipe so that it replays on the path it was
+    rendered with.
+
+    WHAT IT BUYS, measured at 2 M samples on the same channel: this stage's peak memory falls
+    from 5.0x the record to 1.1x and the chain's from 5.0x to 3.0x (bounded then by the probe),
+    at 1.5x the speed. That is the difference between a deep record rendering inside a GUI or a
+    demo and not rendering there at all -- which is the trade being offered, and why it is
+    offered rather than taken."""
     x = np.asarray(x, float)
     n = len(x)
     if method not in ("fft", "overlap", "auto"):

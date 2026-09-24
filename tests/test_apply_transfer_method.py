@@ -3,14 +3,17 @@
 The whole-record transform pays log(n) for a filter that may only reach a few thousand samples,
 and it allocates several record-length arrays to do it. Overlap-save computes the same linear
 convolution a block at a time, so the working set is the block. What it is NOT is bit-compatible:
-the two paths sample the response on different frequency grids, so they sit about 1e-5 apart --
-which `test_byte_identity.py` classifies as a behaviour change, not as round-off. Hence
+the two paths sample the response on different frequency grids, so they sit 7.7e-5 of peak-to-peak
+apart for this stage alone -- and a whole 8-bit code on 1.16 % of samples once a converter sees
+it -- which `test_byte_identity.py` classifies as a behaviour change, not as round-off. Hence
 `method="fft"` stays the default and the choice is recorded in the recipe.
 
 These tests pin the equivalence (to a MEASURED tolerance), the cases the circular-to-linear tap
 extraction can get wrong (a two-sided response, a pure delay), the auto rule, and the refusals.
 """
 from __future__ import annotations
+
+import warnings
 
 import numpy as np
 import pytest
@@ -20,9 +23,11 @@ from wfmsynth import physics as P
 FS = 80e9
 N = 1 << 17
 
-# MEASURED. The two paths differ by 2.5e-5 of peak-to-peak on a long record and that floor does
-# not fall as `rel` is tightened -- see `apply_transfer`'s docstring for why. Tests here run at
-# a shorter record where the fraction is larger, so the bar is set from the measurement below.
+# MEASURED. The two paths differ by 7.7e-5 of peak-to-peak for this stage alone on a long
+# record, 2.5e-4 through a full chain, and a whole 8-bit code on 1.16 % of samples once a
+# converter sees it -- see `apply_transfer`'s docstring. Tests here run at a shorter record
+# where the fraction is larger, so the bar is loose; `test_the_disagreement_stays_the_size_it_
+# is_documented_as` below is what actually pins the number.
 EQUIV_TOL = 2e-3
 
 
@@ -195,3 +200,52 @@ def test_a_short_response_at_a_long_delay_does_not_wrap_on_the_block_path():
     # the response to that content arrives 20000 samples later, i.e. past the record: nothing
     # it produces may appear before the tail content itself could have reached the output
     assert np.abs(y[:n - 200]).max() < 1e-6, "the delayed tail wrapped onto the head"
+
+
+def test_the_disagreement_stays_the_size_it_is_documented_as():
+    """The block path's docstring quotes a number to justify not being the default, so that
+    number needs a gate: it was found once to be understated by 3x, which is how a reasonable
+    trade turns into a surprise.
+
+    Pins the disagreement on THIS stage from both sides. A lower bound matters as much as an
+    upper one -- if it silently fell to round-off, the honest move would be to make the block
+    path the default, and nobody would notice it had become free."""
+    n = 1 << 19
+    fs = 80e9
+    x = np.asarray(P.nrz(n_ui=n >> 3, seed=1, n=n, causal=True), float)
+
+    def mk(nfft):
+        il = P.insertion_loss_db(np.fft.rfftfreq(nfft) * fs / 1e9, length_in=8.0, tand=0.02)
+        return P._min_phase_H(10.0 ** (-il / 20.0), nfft, half=True)
+
+    a = P.apply_transfer(x, mk, method="fft")
+    b = P.apply_transfer(x, mk, method="overlap")
+    rel = np.abs(a - b).max() / np.ptp(a)
+    assert 2e-5 < rel < 3e-4, f"documented as ~7.7e-5 of peak-to-peak, measured {rel:.2e}"
+
+
+def test_tightening_the_truncation_threshold_reduces_the_disagreement():
+    """The docstring used to claim this floor does NOT fall as `rel` tightens. It does -- by
+    about 2.3x before it plateaus -- and the claim is load-bearing, because it is the reason a
+    caller is told whether buying accuracy back is possible at all."""
+    n = 1 << 19
+    fs = 80e9
+    x = np.asarray(P.nrz(n_ui=n >> 3, seed=1, n=n, causal=True), float)
+
+    def mk(nfft):
+        il = P.insertion_loss_db(np.fft.rfftfreq(nfft) * fs / 1e9, length_in=8.0, tand=0.02)
+        return P._min_phase_H(10.0 ** (-il / 20.0), nfft, half=True)
+
+    a = P.apply_transfer(x, mk, method="fft")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        loose = np.abs(a - P.apply_transfer(x, mk, method="overlap", rel=1e-5)).max()
+        tight = np.abs(a - P.apply_transfer(x, mk, method="overlap", rel=1e-7)).max()
+    # Both must genuinely take the block path. Past about rel=1e-9 the taps stop being
+    # resolvable within the probe cap and `apply_transfer` falls back to the transform with a
+    # guard of its own -- which would make this comparison fft-against-fft and pass for the
+    # wrong reason.
+    assert not any("falling back" in str(c.message) for c in caught), \
+        "this test must compare two BLOCK-path results, not a fallback"
+    assert tight < loose, f"tightening rel did not help: {loose:.2e} -> {tight:.2e}"
+    assert tight > 0.3 * loose, "it should plateau, not vanish -- the residue is not truncation"
