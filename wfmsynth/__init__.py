@@ -66,7 +66,7 @@ __version__ = _read_version()
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture)
-from .physics import (N, T, Jitter, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
+from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
                       differential_mode, common_mode, supply_coupling)
@@ -150,7 +150,7 @@ __all__ = [
     "timing_source", "apply_phase", "phase_noise", "recover_and_fold",
     "read_touchstone", "write_touchstone", "sparam_channel", "touchstone_channel",
     "renormalize_s", "check_response", "read_mdif", "MdifSweep",
-    "N", "T", "Grid", "Jitter", "Streams", "tx_ffe", "carrier_symbols", "from_symbols", "resonant_reflection", "de_emphasis_taps",
+    "N", "T", "Grid", "Jitter", "Streams", "response_cache", "tx_ffe", "carrier_symbols", "from_symbols", "resonant_reflection", "de_emphasis_taps",
     "nominal_nonlinearity", "crosstalk_matrix", "crosstalk_sum", "hybrid_echo",
     "single_pair_observation", "db_to_coupling",
     "differential_pair", "differential_mode", "common_mode", "supply_coupling",

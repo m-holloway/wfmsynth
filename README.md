@@ -222,6 +222,7 @@ legacy array-warp workflows but should not be the default for a new physical cha
 | Links and systems | `rx`, `cdr`, `sparam`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |
 | Dataset quality | `measure`, `sweep`, `simreal` | Measured labels, confounder control, synthetic-vs-real separability |
 | Scale and trust | `stream`, `validate` | Bounded-memory channel processing and physical-property assertions |
+| Long-record performance | `tools/benchmark.py`, `response_cache` | A benchmark suite gated in CI on peak memory and the scaling ratio `t(2n)/t(n)`; `apply_transfer(method="overlap")` for a block path that holds ~1.1x the record instead of ~5x; `response_cache()` to reuse a channel's minimum-phase response across a batch (`dataset()` already does) |
 
 ## Design principles
 - **Physics-grounded, not hand-drawn.** Real formulas (skin+dielectric insertion loss,
