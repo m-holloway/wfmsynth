@@ -43,7 +43,12 @@ def stream_blocks(x, h, chunk=1 << 16):
         y = np.fft.irfft(np.fft.rfft(block) * H, nfft)
         yield y[nh - 1:nh - 1 + m]
         tail = block[nh - 1:nh - 1 + m]           # this block's input samples
-        prev = tail[-(nh - 1):] if m >= nh - 1 else np.concatenate([prev, tail])[-(nh - 1):]
+        if nh > 1:
+            # `-(nh - 1)` is `-0` for a ONE-TAP filter, and `tail[-0:]` is the whole array
+            # rather than an empty one -- so without this guard a single-tap FIR (a pure gain,
+            # a pure delay) grows `prev` to a whole block and the next iteration fails trying
+            # to write it into a zero-length overlap. A one-tap filter needs no overlap at all.
+            prev = tail[-(nh - 1):] if m >= nh - 1 else np.concatenate([prev, tail])[-(nh - 1):]
         pos += m
 
 

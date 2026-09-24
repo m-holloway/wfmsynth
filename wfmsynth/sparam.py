@@ -638,7 +638,7 @@ def _interp_response(fg, freqs, z, band="zero", dc="zero"):
 
 
 def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None,
-                   band="refuse", dc="extend", band_tol=1e-3):
+                   band="refuse", dc="extend", band_tol=1e-3, method="fft"):
     """Apply a measured transfer ``s21`` (complex, sampled at ``freqs`` in Hz) to ``x`` as a
     frequency-domain channel. Provide the sample spacing via ``grid=Grid(...)`` or ``dt``.
     Unlike the analytic model this reproduces resonances and structure.
@@ -705,7 +705,7 @@ def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None,
     def make_H(nfft):
         return _interp_response(np.fft.rfftfreq(nfft, d=dt), freqs, s21, band=band, dc=dc)
 
-    return P.apply_transfer(x, make_H, linear=linear, guard=guard)
+    return P.apply_transfer(x, make_H, linear=linear, guard=guard, method=method)
 
 
 def check_response(freqs, S, tol=1e-6, n=None):
@@ -761,7 +761,8 @@ def check_response(freqs, S, tol=1e-6, n=None):
 
 def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
                        linear=True, guard=None, mode=None, term="SDD21",
-                       band="refuse", dc="extend", band_tol=1e-3, check=True, z0=None):
+                       band="refuse", dc="extend", band_tol=1e-3, check=True, z0=None,
+                       method="fft"):
     """Read a Touchstone file and apply one of its transfers to ``x``.
 
     ``ports`` says WHICH transfer, and its form says which kind:
@@ -832,6 +833,7 @@ def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
             raise ValueError(f"{path}: ports={ports!r} outside 1..{n}")
         h = S[:, i, j]
     return sparam_channel(x, freqs, h, grid=grid, dt=dt, linear=linear, guard=guard,
+                          method=method,
                           band=band, dc=dc, band_tol=band_tol)
 # =====================================================================================
 # CASCADED CHANNELS — topology, not one lumped block
@@ -1189,7 +1191,7 @@ def first_order_echoes(path, eps_r_default=4.0):
 
 
 def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0,
-                    linear=True, guard=None):
+                    linear=True, guard=None, method="fft"):
     """Apply a CASCADED channel to `x`: sections of line with their own loss, separated by
     discontinuities with their own reflection coefficients.
 
@@ -1228,4 +1230,4 @@ def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0,
         del tp                     # only H is needed past here; the other three ports are not
         return H
 
-    return P.apply_transfer(x, make_H, linear=linear, guard=guard)
+    return P.apply_transfer(x, make_H, linear=linear, guard=guard, method=method)

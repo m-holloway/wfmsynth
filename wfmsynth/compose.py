@@ -336,7 +336,8 @@ def _op_modulate(x, p, streams, grid, idx):
 
 def _op_lossy(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("length_in", "tand", "eps_r", "skin_k", "causal",
-                            "loss_db", "loss_at_ghz", "trend", "trend_floor_db") if k in p}
+                            "loss_db", "loss_at_ghz", "trend", "trend_floor_db",
+                            "method") if k in p}
     if "trend" in kw and kw["trend"] is not None:
         kw["trend"] = tuple(float(t) for t in kw["trend"])   # JSON round-trips it as a list
     return P.lossy_channel(x, grid=grid, **kw)
@@ -910,7 +911,7 @@ def _op_sample_clock(x, p, streams, grid, idx):
 
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
-    common = {k: p[k] for k in ("band", "dc", "band_tol", "linear", "guard") if k in p}
+    common = {k: p[k] for k in ("band", "dc", "band_tol", "linear", "guard", "method") if k in p}
     if "path" in p:
         # `ports` is passed THROUGH, not coerced: a mixed-mode pairing can be a STRING
         # ("13_24") or a tuple of pairs, and `tuple(...)`-wrapping a string shreds it into
@@ -926,7 +927,8 @@ def _op_sparam(x, p, streams, grid, idx):
 
 def _op_cascade(x, p, streams, grid, idx):
     from . import sparam as SP
-    return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"))
+    kw = {k: p[k] for k in ("method",) if k in p}
+    return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"), **kw)
 
 
 def _op_digitize(x, p, streams, grid, idx, win=None):
@@ -1883,7 +1885,14 @@ class Signal:
     def lossy(self, **params):
         """Lossy channel. params: length_in, tand, causal, loss_db+loss_at_ghz (real units), or
         trend=(a,b,c) -- the whole fitted |S21| curve rather than one anchor point, which is what
-        a real board's loss SHAPE needs (see `physics.lossy_channel`)."""
+        a real board's loss SHAPE needs (see `physics.lossy_channel`).
+
+        `method="auto"|"overlap"` applies the channel in BLOCKS instead of one whole-record
+        transform: measured at 1 M samples, peak memory falls from about 4.6x the record to
+        1.2x, which is what decides whether a deep record renders in a GUI at all. It is not the
+        default because the two paths differ by about 1e-5 of peak-to-peak -- a behaviour change
+        by this repo's own gate, not round-off -- so it is recorded in the recipe and replays on
+        the path it was rendered with. See `physics.apply_transfer`."""
         return self._add("lossy", **params)
 
     def sparam(self, **params):
@@ -1893,7 +1902,10 @@ class Signal:
         z0 -- renormalize the file's own reference impedance to a stated system impedance
         first, if they differ; default None is the file's own, unchanged), or
         freqs=[Hz] + s21=[complex]. band/dc/band_tol/linear/guard forward to either form.
-        Reproduces resonances/structure the analytic model can't."""
+        Reproduces resonances/structure the analytic model can't.
+
+        `method="auto"|"overlap"` trades a ~1e-5 behaviour change for a large cut in peak
+        memory -- see `Signal.lossy` and `physics.apply_transfer`."""
         return self._add("sparam", **params)
 
     def cascade(self, path, **params):
@@ -1901,7 +1913,8 @@ class Signal:
         `{"file": {"path": "x.s2p"}}` sections in physical order from driver to receiver, so each
         reflection is generated where it sits and its echo is attenuated by the segment it
         actually traverses. Replaces `lossy` + `reflect` for a path with structure — do not stack
-        it on them. params: node ('load' far-end, 'source' driver-plane reverse wave).
+        it on them. params: node ('load' far-end, 'source' driver-plane reverse wave), and
+        method ('auto'/'overlap' for the block path -- see `physics.apply_transfer`).
         See `wfmsynth.sparam.cascade_channel`."""
         return self._add("cascade", path=path, **params)
 

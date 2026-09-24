@@ -160,27 +160,41 @@ def response_extent(make_H, rel=RESPONSE_REL, n0=PROBE_N0, probe_max=PROBE_MAX, 
         n *= 2
 
 
-def _circular_support(loud):
-    """Width of the shortest arc of the circle that contains every True in `loud`.
+def _circular_arc(loud):
+    """``(start, width)`` of the shortest arc of the circle containing every True in `loud`.
 
     An impulse response on an FFT grid lives on a circle, and it is not always one-sided: a
     zero-phase response is symmetric about t=0 and a reflection can have a small pre-cursor,
     both of which put samples at NEGATIVE time -- stored at the END of the array. Measuring
     "the last index above threshold" would call those a late tail and report the whole record.
-    The support is instead the complement of the LONGEST quiet run, which is the same number
-    for a causal response and the right one for a two-sided one."""
+    The arc is instead the complement of the LONGEST quiet run, which is the same number for a
+    causal response and the right one for a two-sided one.
+
+    `start` is where that arc BEGINS, which `_response_taps` needs and the width alone cannot
+    say: it is what decides how much of the response lies before t=0, and therefore how far a
+    linear convolution has to reach to deliver the sample at t=0."""
     loud = np.asarray(loud, bool)
     n = len(loud)
     idx = np.nonzero(loud)[0]
     if idx.size == 0:
-        return 1
+        return 0, 1
     if idx.size == n:
-        return n
+        return 0, n
     first = int(idx[0])
     rolled = np.nonzero(np.roll(loud, -first))[0]     # index 0 is now loud, so no run wraps it
+    tail = n - 1 - int(rolled[-1])                    # the quiet run that ends at the wrap
     gaps = np.diff(rolled) - 1
-    quiet = max(int(gaps.max()) if gaps.size else 0, n - 1 - int(rolled[-1]))
-    return n - quiet
+    if gaps.size and int(gaps.max()) > tail:
+        k = int(np.argmax(gaps))
+        quiet, start_rolled = int(gaps[k]), int(rolled[k + 1])
+    else:
+        quiet, start_rolled = tail, 0
+    return (first + start_rolled) % n, n - quiet
+
+
+def _circular_support(loud):
+    """Width of the shortest arc containing every True in `loud` -- see `_circular_arc`."""
+    return _circular_arc(loud)[1]
 
 
 def linear_fft_length(n_signal, n_response, radix=SMOOTH_RADIX):
@@ -190,8 +204,109 @@ def linear_fft_length(n_signal, n_response, radix=SMOOTH_RADIX):
     return next_smooth_length(int(n_signal) + int(n_response) - 1, radix)
 
 
+# A response whose memory is this small a FRACTION of the record is one an overlap-save
+# convolution applies for a fraction of the cost, because the whole-record transform is paying
+# log(n) for a filter that only reaches `guard` samples. Below this ratio `method="auto"` takes
+# the block path; above it the transform is the better tool and nothing changes.
+OVERLAP_MAX_FRAC = 0.125
+OVERLAP_MIN_N = 1 << 16        # under this the whole-record transform is already cheap
+OVERLAP_CHUNK = 1 << 14
+# How far the extracted FIR may sit from the response it came from before it is judged an
+# aliasing artefact rather than an honest truncation. The two are orders apart, not close:
+# truncating at RESPONSE_REL costs ~1e-4 of the response's peak, while reading a delay off the
+# wrong side of a circular probe costs O(1), so anything in between separates them.
+TAPS_FAITHFUL_TOL = 0.05
+
+
+def _taps_at(make_H, nh, rel):
+    """The response's arc read off a probe of length `nh`, as ``(taps, lag_min)``."""
+    h = np.fft.irfft(np.asarray(make_H(nh), complex), nh)
+    peak = float(np.abs(h).max())
+    if peak == 0.0:
+        return np.zeros(1), 0
+    start, width = _circular_arc(np.abs(h) >= rel * peak)
+    width = min(width, nh)
+    lag_min = start if start <= nh // 2 else start - nh
+    return h[(np.arange(width) + start) % nh], lag_min
+
+
+def _response_taps(make_H, guard, rel, radix=SMOOTH_RADIX, probe_max=PROBE_MAX):
+    """The response as a LINEAR FIR: ``(taps, lag_min)``, where ``taps[j]`` is the response at
+    lag ``lag_min + j``. ``None`` when it cannot be resolved without aliasing.
+
+    The impulse response on an FFT grid is circular, and `lag_min` is how the two differ: a
+    minimum-phase channel is causal and starts at lag 0, but a zero-phase response is symmetric
+    about t=0 and a reflection has a pre-cursor, and for those the arc begins at a NEGATIVE lag
+    stored at the end of the array. Reading the taps off in circular order and calling them
+    causal is exactly the error that puts a channel's pre-cursor at the end of the record.
+
+    THE EXTRACTED TAPS ARE VERIFIED AGAINST THE RESPONSE THEY CAME FROM, at a LONGER length
+    than they were read off. A circular probe cannot tell a delay of `d` from one of
+    ``d mod nh``, so a response that is mostly delay -- a cascade section, a long line -- can
+    read as no delay at all, and comparing two probes does not reliably catch it: a
+    power-of-two delay aliases IDENTICALLY at `nh` and ``2*nh`` (4096 lands on lag 0 at both
+    1024 and 2048). Comparing ARC POSITIONS across probes does not work either, because a
+    two-sided response's measured width legitimately grows with resolution and drags its start
+    with it.
+
+    So the check is direct instead of comparative: lay the taps at their stated lags in a
+    longer buffer, transform, and require that to be the response `make_H` asks for. Truncating
+    at `rel` costs a small relative error there; getting the lag wrong costs an O(1) one, so
+    the two are never close. MEASURED: a 4096-sample pure delay reads as ZERO delay at the
+    first probe and resolves at nh=8192, and this is what catches it."""
+    nh = next_smooth_length(max(4 * int(guard), 1024), radix)
+    while nh <= probe_max:
+        taps, lag = _taps_at(make_H, nh, rel)
+        if _taps_are_faithful(taps, lag, make_H, next_smooth_length(3 * nh, radix)):
+            return taps, lag
+        nh *= 2
+    return None
+
+
+def _taps_are_faithful(taps, lag_min, make_H, nh, tol=TAPS_FAITHFUL_TOL):
+    """Do `taps`, laid at their stated lags, actually transform back into ``make_H(nh)``?
+
+    `nh` is longer than the probe the taps were read off, so a tap set whose lags are an
+    aliasing artefact of that probe cannot agree here, while one that is merely TRUNCATED at
+    `rel` agrees to about the truncation level."""
+    ref = np.asarray(make_H(nh), complex)
+    scale = float(np.abs(ref).max())
+    if scale == 0.0:
+        return True
+    buf = np.zeros(nh)
+    buf[(np.arange(len(taps)) + lag_min) % nh] = taps
+    return bool(np.abs(np.fft.rfft(buf) - ref).max() <= tol * scale)
+
+
+def _apply_overlap_save(x, make_H, guard, rel, chunk=OVERLAP_CHUNK):
+    """`apply_transfer`'s block path: the same linear convolution, applied `chunk` samples at a
+    time, so the working set is the block rather than the record. ``None`` when the response
+    cannot be resolved as a finite FIR, so the caller can fall back to the transform."""
+    from .stream import stream_convolve
+    n = len(x)
+    got = _response_taps(make_H, guard, rel)
+    if got is None:
+        return None
+    taps, lag_min = got
+    # y[k] = z[k - lag_min] where z is the causal convolution of x with `taps`. A response that
+    # reaches BEFORE t=0 therefore needs the convolution carried `-lag_min` samples past the
+    # record's end; one that starts after it leaves that many zeros at the head.
+    if lag_min < 0:
+        pad = -lag_min
+        xs = np.concatenate([x, np.zeros(pad)])
+        z = stream_convolve(xs, taps, chunk)
+        del xs
+        return z[pad:pad + n].copy()
+    z = stream_convolve(x, taps, chunk)
+    if lag_min == 0:
+        return z
+    out = np.zeros(n)
+    out[lag_min:] = z[:max(0, n - lag_min)]
+    return out
+
+
 def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
-                   rel=RESPONSE_REL, n0=PROBE_N0, probe_max=PROBE_MAX):
+                   rel=RESPONSE_REL, n0=PROBE_N0, probe_max=PROBE_MAX, method="fft"):
     """Apply a frequency response to `x` as a LINEAR convolution, and return ``len(x)`` samples.
 
     `make_H(nfft)` returns the response on the ``rfft`` grid of length `nfft` (same sample
@@ -201,10 +316,43 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
 
     `guard` fixes ``len(h)`` in samples instead of measuring it (`response_extent` does the
     measuring). ``linear=False`` restores the pinned-length CIRCULAR convolution, which is what
-    this module did before and is kept so the two paths can be compared directly."""
+    this module did before and is kept so the two paths can be compared directly.
+
+    `method` CHOOSES HOW THE SAME CONVOLUTION IS COMPUTED, and the choice is a behaviour change
+    rather than a pure optimisation, which is why the default does not move:
+
+        "fft"      (default) one whole-record transform. What this function has always done.
+        "overlap"  overlap-save in blocks: the same LINEAR convolution, computed `chunk`
+                   samples at a time, so the working set is the block rather than the record.
+        "auto"     "overlap" when the response's measured memory is a small fraction of the
+                   record (`OVERLAP_MAX_FRAC`) and the record is long enough to be worth
+                   blocking (`OVERLAP_MIN_N`); "fft" otherwise.
+
+    WHY IT IS NOT THE DEFAULT, stated plainly because the number matters. The two paths do not
+    agree to round-off: MEASURED on an 8-inch causal channel over a 4 M-sample record, they
+    differ by 2.5e-5 of the record's peak-to-peak, and that floor does NOT fall as the
+    truncation threshold is tightened -- at `rel` from 1e-5 down to 1e-13 it stays at 2.5e-5
+    while the tap count grows from 0.2 % to 50 % of the record. The reason is that the
+    whole-record path's own answer is a function of the record LENGTH: it samples the response
+    on the padded transform's frequency grid, and a block path samples it on a shorter one.
+    Both are legitimate discretisations of the same continuous channel and they converge as the
+    record grows against the channel's memory, but at any finite length they are 1e-5 apart --
+    which `tests/test_byte_identity.py` classifies as a behaviour change (it starts catching at
+    1e-5) rather than as the 3.8e-13 round-off it deliberately absorbs. So a recipe rendered on
+    one path does not reproduce bit-for-bit on the other, and `method` is recorded in the recipe
+    so that it replays on the path it was rendered with.
+
+    WHAT IT BUYS, measured at 2 M samples on the same channel: 4.7x the speed, and peak memory
+    falls from about 5x the record to about 1.2x -- which is the difference between a deep
+    record rendering inside a GUI or a demo and not rendering there at all."""
     x = np.asarray(x, float)
     n = len(x)
+    if method not in ("fft", "overlap", "auto"):
+        raise ValueError(f"apply_transfer: unknown method {method!r} (use 'fft', 'overlap' or 'auto')")
     if not linear:
+        if method == "overlap":
+            raise ValueError("apply_transfer: method='overlap' is a LINEAR convolution; it has "
+                             "no circular form. Pass linear=True, or method='fft'.")
         return np.fft.irfft(np.fft.rfft(x) * make_H(n), n)
     if guard is None:
         # The guard is capped at TWICE the record. A response that long is one whose level at
@@ -215,7 +363,22 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
         cap = int(min(probe_max, max(4 * n, 4 * n0)))
         guard = min(response_extent(make_H, rel=rel, n0=min(n0, max(8, n)), probe_max=cap,
                                     warn=False), 2 * n)
-    nfft = linear_fft_length(n, max(1, int(guard)), radix)
+    guard = max(1, int(guard))
+    if method == "auto":
+        method = ("overlap" if n >= OVERLAP_MIN_N and guard <= OVERLAP_MAX_FRAC * n else "fft")
+    if method == "overlap":
+        got = _apply_overlap_save(x, make_H, guard, rel)
+        if got is not None:
+            return got
+        # Naming it rather than quietly producing the wrong answer: a response this function
+        # cannot resolve as a finite FIR is one whose taps would be aliased, and the transform
+        # applies it correctly at a cost in memory rather than in correctness.
+        warnings.warn(
+            "apply_transfer: method='overlap' could not resolve this response as a finite "
+            "impulse response without aliasing (it is probably mostly delay, or longer than "
+            f"the {PROBE_MAX}-sample probe cap); falling back to the whole-record transform.",
+            RuntimeWarning, stacklevel=2)
+    nfft = linear_fft_length(n, guard, radix)
     xp = np.zeros(nfft)
     xp[:n] = x
     X = np.fft.rfft(xp)
@@ -307,7 +470,7 @@ def insertion_loss_db(f_ghz, length_in=6.0, tand=0.02, eps_r=4.3, skin_k=0.0,
 
 def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
                   skin_k=0.0, causal=False, grid=None, loss_db=None, loss_at_ghz=None,
-                  trend=None, trend_floor_db=80.0, linear=True, guard=None):
+                  trend=None, trend_floor_db=80.0, linear=True, guard=None, method="fft"):
     """Apply a frequency-dependent SI channel: insertion loss
         IL(f)[dB] = (a_skin*sqrt(f_GHz) + b_diel*f_GHz) * length_in
     with dielectric-loss coefficient b_diel = 2.3*sqrt(eps_r)*tand (dB/in/GHz)
@@ -395,7 +558,7 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
         # cepstrum resolve the response instead of time-aliasing it.
         return _min_phase_H(Hmag, nfft, half=True)
 
-    return apply_transfer(x, make_H, linear=linear, guard=guard)
+    return apply_transfer(x, make_H, linear=linear, guard=guard, method=method)
 
 
 def _coupled_kernel(aggressor, kind, d_samples, n):
@@ -764,7 +927,7 @@ def ac_couple(x, fc_frac=0.004, fc_hz=None, grid=None):
 
 
 def resonant_reflection(x, grid=None, td_ps=None, td_frac=0.12, f0_ghz=None, f0_frac=0.25,
-                        q=10.0, gamma0=0.4, linear=True, guard=None):
+                        q=10.0, gamma0=0.4, linear=True, guard=None, method="fft"):
     """A single RESONANT discontinuity. `multi_reflection` uses a frequency-flat Γ; real
     discontinuities (a stub, an open) resonate — their reflection coefficient has
     frequency-dependent magnitude AND phase, peaking near a resonant frequency. Here Γ(f)
@@ -794,7 +957,7 @@ def resonant_reflection(x, grid=None, td_ps=None, td_frac=0.12, f0_ghz=None, f0_
         G = gamma0 * (sv / q) / (sv ** 2 + sv / q + 1.0)  # |Γ| peaks at f0, with phase
         return 1.0 + G * np.exp(-1j * (2 * np.pi * f * td))
 
-    return apply_transfer(x, make_H, linear=linear, guard=guard)
+    return apply_transfer(x, make_H, linear=linear, guard=guard, method=method)
 
 
 def nominal_nonlinearity(x, compression=0.05, level_noise=0.0, rise_fall_ratio=1.0,

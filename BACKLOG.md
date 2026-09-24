@@ -413,6 +413,20 @@ Keep these statements synchronized with user-facing documentation:
 - A record's PSD must be measured through a window. A window on a running link is not periodic, so
   a rectangular whole-record periodogram reads its own edge step, not the record's floor: +7.4 dB
   above `q**2/12` at n = 1 M, against +0.01 dB Hann-windowed (#52).
+- **The linear-convolution guard is the response's WIDTH, not its REACH.** `response_extent`
+  measures the shortest ARC holding the impulse response, and `linear_fft_length` pads by that
+  width -- but a response that is a short arc sitting at a long DELAY (a cascade section with a
+  real line length; anything carrying `exp(-j*2*pi*f*td)`) reaches `lag + width`, not `width`.
+  The transform is then too short by the lag and the record's tail wraps onto its head, which is
+  exactly what `linear=True` exists to prevent. MEASURED, on a 65536-sample record with a
+  3107-sample loss arc at a 20000-sample delay: `linear_fft_length` returns 69120 where
+  `n + lag + width` is 88643, and content from the record's end reappears at index 16415 at
+  **0.95 of peak**. `apply_transfer(method="overlap")` is immune (it carries `lag_min`
+  explicitly, and `tests/test_apply_transfer_method.py` pins that), so the block path is
+  currently the correct one here. NOT fixed in the performance pass that found it: widening the
+  guard to the reach changes the rendered output of every chain with a delayed response,
+  including the shipped PCIe cascade lineages, so it needs its own change with a dataset-impact
+  assessment rather than being folded into an optimisation.
 
 ## Delivered milestones
 
