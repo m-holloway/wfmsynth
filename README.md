@@ -17,6 +17,60 @@ problem you are testing. It helps you:
 Only NumPy and SciPy are required. Each physical primitive has a validation assertion that
 checks the behavior it claims to model.
 
+## Install and verify
+
+```bash
+git clone https://github.com/m-holloway/wfmsynth.git
+cd wfmsynth
+python -m pip install -e ".[test]"
+python -m wfmsynth.validate
+```
+
+The final command is a physics sanity gate: it checks properties such as channel loss,
+reflection delay, jitter transfer, ADC artifacts, and recipe round trips. It validates the
+synthesizer, not an ML model trained from its output.
+
+## Your first realistic waveform
+
+Start with the composable `Signal` API. A `Grid` gives the waveform real sample-rate and
+symbol-rate units; each chained operation represents one stage in the signal path.
+
+```python
+import wfmsynth as ws
+
+# fs is chosen from the EDGE, not the symbol rate: 400 GSa/s is 16 samples/UI at 25 Gbaud,
+# so a tr_frac=0.5 edge gets 8 samples across the transition. Under k = 8 you are measuring
+# the grid rather than the signal, and the library says so -- see "Two numbers" below.
+grid = ws.Grid(fs=400e9, baud=25e9, n=16_384)          # 16 samples/UI
+
+signal = (
+    ws.Signal(seed=7, grid=grid)
+    .carrier("nrz", n_ui=1024, tr_frac=0.5, causal=True)  # transmitted data; k = 8 samples/edge
+    .lossy(loss_db=8.0, loss_at_ghz=12.5, causal=True) # PCB/cable bandwidth
+    .reflect(td_ps=80.0, gamma_s=0.15)                 # echo; gamma_s = SOURCE-end Γ, not seconds
+    .scope(bw_hz=30e9)                                 # instrument front end
+)
+
+waveform = signal.waveform()
+recipe = signal.recipe()  # JSON-serializable, reproducible ground truth
+```
+
+For the complete path from a fine simulation grid to a stored acquisition record, use an
+`AcquisitionProfile`:
+
+```python
+profile = ws.AcquisitionProfile(
+    sample_rate_hz=25e9,
+    record_length=4096,
+    input_bandwidth_hz=10e9,
+    enob=7,
+)
+stored = signal.acquire(profile).waveform()
+```
+
+Run [`examples/quickstart.py`](examples/quickstart.py) for a guided first example, then see
+[`examples/README.md`](examples/README.md) for the full learning path.
+
 ## Working with an agent
 
 `.claude/skills/wfmsynth/SKILL.md` is an installable skill for Claude Code and other agent CLIs.
@@ -79,60 +133,6 @@ Then ask for the work in your own words.
 
 See `skills/README.md`. Point an agent at this repository and ask it to install the skill and it
 has what it needs to do so.
-
-## Install and verify
-
-```bash
-git clone https://github.com/m-holloway/wfmsynth.git
-cd wfmsynth
-python -m pip install -e ".[test]"
-python -m wfmsynth.validate
-```
-
-The final command is a physics sanity gate: it checks properties such as channel loss,
-reflection delay, jitter transfer, ADC artifacts, and recipe round trips. It validates the
-synthesizer, not an ML model trained from its output.
-
-## Your first realistic waveform
-
-Start with the composable `Signal` API. A `Grid` gives the waveform real sample-rate and
-symbol-rate units; each chained operation represents one stage in the signal path.
-
-```python
-import wfmsynth as ws
-
-# fs is chosen from the EDGE, not the symbol rate: 400 GSa/s is 16 samples/UI at 25 Gbaud,
-# so a tr_frac=0.5 edge gets 8 samples across the transition. Under k = 8 you are measuring
-# the grid rather than the signal, and the library says so -- see "Two numbers" below.
-grid = ws.Grid(fs=400e9, baud=25e9, n=16_384)          # 16 samples/UI
-
-signal = (
-    ws.Signal(seed=7, grid=grid)
-    .carrier("nrz", n_ui=1024, tr_frac=0.5, causal=True)  # transmitted data; k = 8 samples/edge
-    .lossy(loss_db=8.0, loss_at_ghz=12.5, causal=True) # PCB/cable bandwidth
-    .reflect(td_ps=80.0, gamma_s=0.15)                 # echo; gamma_s = SOURCE-end Γ, not seconds
-    .scope(bw_hz=30e9)                                 # instrument front end
-)
-
-waveform = signal.waveform()
-recipe = signal.recipe()  # JSON-serializable, reproducible ground truth
-```
-
-For the complete path from a fine simulation grid to a stored acquisition record, use an
-`AcquisitionProfile`:
-
-```python
-profile = ws.AcquisitionProfile(
-    sample_rate_hz=25e9,
-    record_length=4096,
-    input_bandwidth_hz=10e9,
-    enob=7,
-)
-stored = signal.acquire(profile).waveform()
-```
-
-Run [`examples/quickstart.py`](examples/quickstart.py) for a guided first example, then see
-[`examples/README.md`](examples/README.md) for the full learning path.
 
 ## Which API should I use?
 

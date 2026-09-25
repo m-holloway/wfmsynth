@@ -449,20 +449,21 @@ the documented idiom first — it needs no API and teaches the right mental mode
 **Do NOT** add `make_dataset(n=1000, defect="glitch")`. Choosing physical parameters on the
 user's behalf crosses the boundary `CONTRIBUTING.md` and `DATASET-METHODOLOGY.md` both draw.
 
-### The README's first 80 lines are about installing an agent skill
+### The README is a reference manual wearing a README
 
-**Status:** Open, cosmetic but first-impression. Owner: whoever next edits `README.md`.
+**Status:** Half done. Owner: whoever next edits `README.md`.
 
-Section order is: the pitch, then **"Working with an agent" (~60 lines of skill installation)**,
-then "Install and verify" (line ~83), then the first waveform (~96). Someone who wants
-`pip install` scrolls past a page about agent tooling. Both an ergonomics review and a
-target-user review flagged this independently, which is the signal worth trusting.
+**Done:** the ordering. It used to be pitch → "Working with an agent" (~60 lines of skill
+installation) → "Install and verify" → first waveform, so someone who wanted `pip install`
+scrolled past a page about agent tooling. An ergonomics review and a target-user review flagged
+it independently, which is the signal worth trusting. It is now install → first waveform →
+agent, verified to have moved every line rather than rewritten any.
 
-The file is also 856 lines with 47 `##` sections — a reference manual wearing a README.
-
-**Done when:** the order is install → first waveform → capability map → links, with the agent
-section below the first waveform, and the per-feature cookbook (roughly everything after line
-260) split into `docs/COOKBOOK.md`.
+**Still open:** the file is 863 lines with 47 `##` sections. Roughly everything after the
+capability map is a per-feature cookbook that would serve people better as `docs/COOKBOOK.md`,
+leaving the README as pitch → install → first waveform → capability map → links. Deliberately
+not rushed: it is a 600-line move, and the value is navigability for someone already committed,
+not first impression — which the reordering already fixed.
 
 ### Two smaller quality gates worth having
 
