@@ -13,11 +13,17 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wfmsynth as ws
 
-g = ws.Grid(fs=256e9, baud=112e9, n=1 << 14)             # 256 GSa/s, 112 GBd
+# 1.792 TSa/s is a large simulation rate, and it is what 112 GBd actually costs if the edge is
+# to be resolved: 16 samples/UI, so a tr_frac=0.5 edge gets k = 8 across the transition. This
+# grid used to say 256 GSa/s / 112 GBd -- 2.3 samples/UI -- while the carrier was handed
+# `n_ui = g.n // 8` and quietly rendered at 8 instead, so the stated baud was decorative.
+g = ws.Grid(fs=1792e9, baud=112e9, n=1 << 14)            # 1.792 TSa/s, 112 GBd, 16 samples/UI
+n_ui = int(g.n // g.samples_per_ui)                      # derived, not a hardcoded divisor
 
 # compose a real link in real units, as an explicit component graph
 sig = (ws.Signal(seed=42, grid=g)
-       .carrier("pam4", n_ui=g.n // 8, pattern="prbs13q", causal=True, jitter=dict(rj=0.4, pj=0.2))
+       .carrier("pam4", n_ui=n_ui, pattern="prbs13q", tr_frac=0.5, causal=True,
+                jitter=dict(rj=0.4, pj=0.2))
        .lossy(loss_db=15.0, loss_at_ghz=26.0, causal=True)     # 15 dB @ 26 GHz
        .reflect(td_ps=55.0, gamma_s=0.4, gamma_l=0.4)          # echo at 55 ps
        .digitize(snr_db=32.0, enob=5.5, interleave=dict(m_cores=4, offset_mm=0.01)))
@@ -35,7 +41,7 @@ print("reproduced bit-for-bit from the recipe:", np.array_equal(x2, x))
 # a ground-truth dataset: sample knobs however you like; the sampled values are recorded
 def build(rng):
     return (ws.Signal(seed=int(rng.integers(1e9)), grid=g)
-            .carrier("pam4", n_ui=g.n // 8, seed=int(rng.integers(1e6)))
+            .carrier("pam4", n_ui=n_ui, tr_frac=0.5, seed=int(rng.integers(1e6)))
             .lossy(loss_db=float(rng.uniform(8, 22)), loss_at_ghz=26.0, causal=True)
             .reflect(td_ps=float(rng.uniform(20, 80)), gamma_s=float(rng.uniform(0.2, 0.5))))
 

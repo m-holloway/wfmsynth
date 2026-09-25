@@ -481,49 +481,33 @@ not first impression — which the reordering already fixed.
   actually has — and therefore no way to see a claim drifting toward its bound before it breaks.
   Emitting the margins as machine-readable output would make that visible.
 
-### Two thirds of the shipped examples break the library's own `k >= 8` rule
+### ~~Two thirds of the shipped examples break the library's own `k >= 8` rule~~
 
-**Status:** Open, measured, and gated. Owner: whoever next touches `examples/`.
+**Status: DONE.** All twelve demos satisfy the rule; `tests/test_examples_run.py` now gates it
+plainly ("no demo may warn") instead of carrying a debt list.
 
-`tests/test_examples_run.py::UNDERSAMPLED` lists eight of the twelve demos with their measured
-`k` and the cost of fixing each. All of them take the default `tr_frac=0.15` on a grid of 2.3
-to 10 samples/UI, and those cannot both hold: resolving a 15 %-of-UI edge with 8 samples needs
-about 53 samples/UI. The rule and the default are not in conflict -- together they demand a high
-sample rate, and these examples chose runtime instead.
+Kept because what it cost is worth knowing. Eight of twelve took the default `tr_frac=0.15` on
+2.3–10 samples/UI, and those cannot both hold: a 15 %-of-UI edge needs ~53 samples/UI to resolve
+at k = 8. Every fix therefore had to choose a slower edge (`tr_frac=0.5`) at a higher rate, and
+that changes what a demo shows — which is why it was ranked by cost and done in three passes
+rather than silenced in one.
 
-This matters more than a warning in a console. SKILL.md's headline sizing rule says that below
-k = 8, "every rise time, jitter and slew measurement on that record is measuring the grid" --
-and `ground_truth.py` and `sim_to_real.py` both MEASURE. Their printed numbers are therefore
-part grid artefact, in files whose purpose is to teach what honest measurement looks like.
+Three findings came out of it that the warning had been hiding:
 
-The flagship two are fixed: README.md's first example and `examples/quickstart.py` now satisfy
-the rule at k = 8 and carry a comment saying why, so the first code anyone runs teaches the rule
-instead of tripping over it. A gate holds that, and a second gate keeps the debt list honest in
-the other direction -- an entry that has been fixed must be removed.
+- **`ground_truth.py` was understating the effect it exists to teach, by 3x.** The
+  contour-vs-sigma eye divergence read **0.034** at 4 samples/UI and reads **0.103** at 16. It
+  also printed a flat `0.00 samples` sampling phase, because there was no sub-sample resolution
+  for `best_phase` to find — a number that looked like a result and was an artifact.
+- **Three examples hardcoded a samples-per-UI divisor** (`g.n // 4`, `g.n // 8`) rather than
+  deriving `n_ui` from `grid.samples_per_ui`. Those silently contradicted their own grid the
+  moment the rate changed — in `provenance.py` the stated `baud=112e9` was decorative, since the
+  carrier rendered at 8 samples/UI regardless. All now derive it.
+- **Raising `fs` costs no runtime**, because `n` is fixed: it trades UI count for edge
+  resolution. The "4x fs" cost in the old debt list described needing 4x the samples to hold the
+  UI count, which none of these demos needed.
 
-**Progress: 8 -> 4.** `events.py` (1.6x) and `two_rate_acquisition.py` (2.0x) are fixed. Worth
-noting what the fix was like, since six remain: raising the rate made the acquisition example
-*sharper*, not merely quieter — a simulation grid is supposed to out-resolve the acquisition it
-is decimated to, and at 8 samples/UI it barely did; it now shows 16x oversample. `events.py`
-went from 1638 UI to 1024 and placed 8 events instead of 9, which is correct rather than a loss.
-
-The two that MEASURE are also done, and they are the reason this item was worth ranking above
-cosmetic debt. `ground_truth.py` exists to demonstrate the contour-vs-sigma eye divergence under
-deterministic ISI: at 4 samples/UI it measured **0.034**, and at 16 it measures **0.103**. It was
-understating the very effect it teaches, by 3x, and printing a flat `0.00 samples` sampling phase
-because there was no sub-sample resolution for `best_phase` to find. `sim_to_real.py` scores nine
-features, several of which (`spectral_centroid`, `hf_fraction`, `crest`) read the edge directly —
-an unresolved edge would have it name the GRID as "the physics to fix next", which is the one
-thing a sim-to-real diagnostic must never do.
-
-Fixing `sim_to_real.py` also turned up `nui = g.n // 4`, a hardcoded 4-samples/UI assumption that
-silently contradicted the grid once the rate changed. Every example now derives `n_ui` from
-`grid.samples_per_ui`; a grep gate for that would be reasonable if it recurs.
-
-**Done when:** `UNDERSAMPLED` is empty. The remaining four are cosmetic by comparison — they
-demonstrate APIs rather than print measurements — and each still needs 4x fs. `provenance.py` is
-worst at 7x and may want a lower baud rather than a higher rate. Raising `fs` changes what each
-demo shows, so each needs its output re-read rather than just its warning silenced.
+`touchstone_channel.py` additionally needed its synthetic response widened to span DC..Nyquist,
+since a measured response must cover the band it is applied to at BOTH ends or `sparam` refuses.
 
 ## Known limitations and claim boundaries
 

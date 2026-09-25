@@ -75,45 +75,7 @@ def test_the_demo_runs_clean(name):
     assert r.stdout.strip(), f"{name} ran but printed nothing -- a demo should show its result"
 
 
-# Examples that still trip the library's own `k >= 8` sizing rule, with the MEASURED debt.
-#
-# All of them take the default `tr_frac=0.15` -- a fast, realistic transmitter edge -- on a grid
-# of 2.3 to 10 samples/UI. Those two facts cannot both hold: resolving a 15 %-of-UI edge with 8
-# samples needs ~53 samples/UI. So the rule and the default are not in tension with each other,
-# they jointly demand a high sample rate, and these examples chose runtime instead.
-#
-# That is real debt and it is written down rather than filtered away, because the library tells
-# users that below k = 8 a measurement is measuring the grid -- and `ground_truth.py` and
-# `sim_to_real.py` measure things. The cost column is what fixing each one would take at
-# tr_frac=0.5; the two cheap ones are the place to start.
-#
-# NOTHING MAY BE ADDED HERE without a measured k and a cost. A new example must satisfy the
-# rule; this list is for the ones that predate the gate.
-#
-# Was eight. `events.py` and `two_rate_acquisition.py` are fixed -- they were the cheap two
-# (1.6x and 2.0x fs), and raising the rate made the acquisition example sharper rather than just
-# quieter: a simulation grid is SUPPOSED to out-resolve the acquisition it is decimated to, and
-# at 8 samples/UI it barely did.
-#
-# Then the two that MEASURE, which is where the debt actually caused wrongness rather than
-# noise. ground_truth.py exists to show the contour-vs-sigma eye divergence under ISI, and at
-# 4 samples/UI it read 0.034 where the resolved grid reads 0.103 -- it was understating the very
-# effect it teaches, by 3x, and reported a flat 0.00-sample sampling phase because there was no
-# sub-sample resolution to find. sim_to_real.py scores nine features, several of which read the
-# edge directly, so an unresolved edge would have it name the GRID as "the physics to fix next".
-#
-# The remaining four are cosmetic by comparison: they demonstrate APIs rather than print
-# measurements. Each still needs 4x fs, which changes what it shows, so each wants its output
-# re-read rather than its warning silenced.
-UNDERSAMPLED = {
-    "confounder_sweep.py":     "k=0.60 at 4.0 samples/UI; 4.0x fs to fix",
-    "provenance.py":           "k=0.34 at 2.3 samples/UI; 7.0x fs to fix -- worst",
-    "realistic_scenario.py":   "k=0.60 at 4.0 samples/UI; 4.0x fs to fix",
-    "touchstone_channel.py":   "k=0.60 at 4.0 samples/UI; 4.0x fs to fix",
-}
-
-
-@pytest.mark.parametrize("name", [d for d in DEMOS if d not in UNDERSAMPLED])
+@pytest.mark.parametrize("name", DEMOS)
 def test_the_demo_does_not_warn(name):
     """Exiting 0 is not the bar. An example that WARNS is telling a newcomer, in the project's
     own voice, that the project's own code is set up wrong -- and it is the first code they run.
@@ -123,6 +85,12 @@ def test_the_demo_does_not_warn(name):
     2.0, and quickstart sat at exactly 2.0, silent only because it landed precisely on the
     floor. Both now satisfy the rule and say why, so the first example anyone reads TEACHES it.
 
+    It began as a gate on two files with the other ten listed as measured debt, and the list is
+    now empty: every demo satisfies the rule. Getting there changed what three of them show --
+    ground_truth.py was understating the eye divergence it exists to demonstrate by 3x -- and
+    turned up three hardcoded samples-per-UI divisors (`g.n // 4`, `// 8`) that silently
+    contradicted their own grid the moment the rate moved.
+
     pyproject's `filterwarnings` silences the clamp warning under pytest, deliberately, because
     many fast tests use a coarse grid on purpose. It does not reach these subprocesses -- which
     is right, since a reader running the example gets the unfiltered output."""
@@ -131,16 +99,6 @@ def test_the_demo_does_not_warn(name):
              if "Warning:" in ln and "DeprecationWarning" not in ln]
     assert not noisy, (
         f"{name} warns when a reader runs it:\n  " + "\n  ".join(noisy[:5]))
-
-
-@pytest.mark.parametrize("name", sorted(UNDERSAMPLED))
-def test_the_undersampled_list_is_still_accurate(name):
-    """The debt list has to stay honest in BOTH directions. An entry that has since been fixed
-    must be removed, or the list becomes a place where resolved problems go to look unresolved
-    -- and then nobody trusts it enough to work through it."""
-    r = _run(name)
-    assert any("clamped" in ln for ln in r.stderr.splitlines()), (
-        f"{name} no longer warns -- remove it from UNDERSAMPLED ({UNDERSAMPLED[name]})")
 
 
 @pytest.mark.parametrize("name", CLI_TOOLS)

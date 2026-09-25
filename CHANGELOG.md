@@ -33,10 +33,12 @@ de_emphasis chain) at `v0.41.0` and at HEAD and comparing sha256 digests — all
   stored `de_emphasis(db=3.5)` rendered as de-emphasis under 0.40.0 and as PRE-emphasis
   afterwards — inverted transmitter shaping, replayed without complaint. `compose.NUMERIC_CHANGES`
   is the table that reads the version, with #53 as its first entry.
-- README.md's first example and `examples/quickstart.py` both broke the library's own headline
-  `k >= 8` sizing rule — the README warned when run verbatim, asking for 0.6 samples across an
-  edge. Both now satisfy it at k = 8 and say why. Eight further examples remain undersampled and
-  are listed with their measured `k` in `tests/test_examples_run.py::UNDERSAMPLED`; see BACKLOG.
+- **All twelve examples now satisfy the library's own `k >= 8` sizing rule.** README.md's first
+  example warned when run verbatim (0.6 samples across an edge), and eight demos were
+  undersampled at 2.3–10 samples/UI. `ground_truth.py` was understating the eye divergence it
+  exists to demonstrate by 3x (0.034 → 0.103) and printing a sampling phase of 0.00 that was a
+  resolution artifact. Three examples also hardcoded a samples-per-UI divisor that silently
+  contradicted their own grid; all now derive it. A gate keeps it that way.
 
 ### Security
 

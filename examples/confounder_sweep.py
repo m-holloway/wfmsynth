@@ -15,13 +15,13 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wfmsynth as ws
 
-g = ws.Grid(fs=200e9, baud=50e9, n=1 << 13)          # 4 samples/UI
+g = ws.Grid(fs=800e9, baud=50e9, n=1 << 13)         # 16 samples/UI; tr_frac=0.5 -> k = 8
 n_ui = int(g.n // g.samples_per_ui)
 
 
 def build(gamma=0.05, loss_db=2.0):
     return (ws.Signal(seed=1, grid=g)
-            .carrier("pam4", n_ui=n_ui, pattern="prbs13q", causal=True)
+            .carrier("pam4", n_ui=n_ui, pattern="prbs13q", tr_frac=0.5, causal=True)
             .lossy(loss_db=loss_db, loss_at_ghz=25.0, causal=True)
             .reflect(td_ps=30.0, gamma_s=gamma, gamma_l=gamma))
 
