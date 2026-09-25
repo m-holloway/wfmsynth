@@ -501,10 +501,15 @@ the rule at k = 8 and carry a comment saying why, so the first code anyone runs 
 instead of tripping over it. A gate holds that, and a second gate keeps the debt list honest in
 the other direction -- an entry that has been fixed must be removed.
 
-**Done when:** `UNDERSAMPLED` is empty. Start with `events.py` (1.6x fs) and
-`two_rate_acquisition.py` (2.0x), which are cheap; `provenance.py` needs 7x and may want a lower
-baud rather than a higher rate. Raising `fs` changes what each demo shows, so each needs its
-output re-read rather than just its warning silenced.
+**Progress: 8 -> 6.** `events.py` (1.6x) and `two_rate_acquisition.py` (2.0x) are fixed. Worth
+noting what the fix was like, since six remain: raising the rate made the acquisition example
+*sharper*, not merely quieter — a simulation grid is supposed to out-resolve the acquisition it
+is decimated to, and at 8 samples/UI it barely did; it now shows 16x oversample. `events.py`
+went from 1638 UI to 1024 and placed 8 events instead of 9, which is correct rather than a loss.
+
+**Done when:** `UNDERSAMPLED` is empty. The remaining six need 4x-7x; `provenance.py` is worst
+at 7x and may want a lower baud rather than a higher rate. Raising `fs` changes what each demo
+shows, so each needs its output re-read rather than just its warning silenced.
 
 ## Known limitations and claim boundaries
 

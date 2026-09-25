@@ -16,11 +16,15 @@ import wfmsynth as ws
 
 # Simulate the source and interconnect on a fine grid so fast edge/channel effects
 # exist before the instrument removes information.
-sim_grid = ws.Grid(fs=200e9, baud=25e9, n=32_768)
+# 16 samples/UI, so a tr_frac=0.5 edge gets k = 8 across the transition -- the library's
+# headline rule. It also makes the point of this example sharper: the SIMULATION grid should
+# out-resolve the acquisition (16x oversample here), because what the instrument stores is
+# supposed to be a decimation of something finer, not a re-labelling of something equally coarse.
+sim_grid = ws.Grid(fs=400e9, baud=25e9, n=32_768)
 n_ui = int(sim_grid.n / sim_grid.samples_per_ui)
 signal = (
     ws.Signal(seed=3, grid=sim_grid)
-    .carrier("nrz", n_ui=n_ui, causal=True)
+    .carrier("nrz", n_ui=n_ui, tr_frac=0.5, causal=True)
     .lossy(loss_db=8.0, loss_at_ghz=12.5, causal=True)
     .reflect(td_ps=60.0, gamma_s=0.16)
 )

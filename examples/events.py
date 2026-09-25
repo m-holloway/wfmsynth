@@ -18,11 +18,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import wfmsynth as ws
 
-g = ws.Grid(fs=10e9, baud=1e9, n=1 << 14)
+# 16 samples/UI, so a tr_frac=0.5 edge gets k = 8 samples across the transition -- the
+# library's headline sizing rule. An event is measured FROM the record, so a grid that cannot
+# resolve the edge would make these labels partly the grid's rather than the signal's.
+g = ws.Grid(fs=16e9, baud=1e9, n=1 << 14)
 n_ui = int(g.n // g.samples_per_ui)
 
 sig = (ws.Signal(seed=11, grid=g)
-       .carrier("nrz", n_ui=n_ui, causal=True)
+       .carrier("nrz", n_ui=n_ui, tr_frac=0.5, causal=True)
        .events("runt", on="symbols", count=4, severity=0.65, floor=0.28)
        .events("droop", on="pattern", min_run=6, count=1, severity=0.55, depth=0.35)
        .events("ring", on="edges", which="rising", count=2, severity=0.4,
