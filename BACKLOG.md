@@ -449,21 +449,24 @@ the documented idiom first — it needs no API and teaches the right mental mode
 **Do NOT** add `make_dataset(n=1000, defect="glitch")`. Choosing physical parameters on the
 user's behalf crosses the boundary `CONTRIBUTING.md` and `DATASET-METHODOLOGY.md` both draw.
 
-### The README is a reference manual wearing a README
+### ~~The README is a reference manual wearing a README~~
 
-**Status:** Half done. Owner: whoever next edits `README.md`.
+**Status: DONE.** 867 lines and 47 sections -> 442 lines and 21, with the 31 per-feature recipes
+in [`docs/COOKBOOK.md`](docs/COOKBOOK.md).
 
-**Done:** the ordering. It used to be pitch → "Working with an agent" (~60 lines of skill
-installation) → "Install and verify" → first waveform, so someone who wanted `pip install`
+Two passes. First the ORDER: it used to be pitch -> "Working with an agent" (~60 lines of skill
+installation) -> "Install and verify" -> first waveform, so someone who wanted `pip install`
 scrolled past a page about agent tooling. An ergonomics review and a target-user review flagged
-it independently, which is the signal worth trusting. It is now install → first waveform →
-agent, verified to have moved every line rather than rewritten any.
+that independently, which is the signal worth trusting.
 
-**Still open:** the file is 863 lines with 47 `##` sections. Roughly everything after the
-capability map is a per-feature cookbook that would serve people better as `docs/COOKBOOK.md`,
-leaving the README as pitch → install → first waveform → capability map → links. Deliberately
-not rushed: it is a 600-line move, and the value is navigability for someone already committed,
-not first impression — which the reordering already fixed.
+Then the SPLIT, cut at "Instrument / ADC model". Everything before it is orientation — the two
+numbers that decide whether a record means anything, the pattern-vs-registry scope boundary,
+absolute units, provenance, ground-truth-as-measured — and everything after it is "how do I do
+X". The README is now the thing someone reads once; the cookbook is the thing they come back to.
+
+Both moves were verified as MOVES: the multiset of lines is unchanged across the two files, so
+nothing was rewritten under cover of shuffling, and a link checker confirms every relative path
+still resolves (the split broke one, `examples/events.py`, which needed `../` from `docs/`).
 
 ### Two smaller quality gates worth having
 

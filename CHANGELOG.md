@@ -20,6 +20,9 @@ de_emphasis chain) at `v0.41.0` and at HEAD and comparing sha256 digests — all
 
 ### Added
 
+- [`docs/COOKBOOK.md`](docs/COOKBOOK.md) — the 31 per-feature recipes that were making the
+  README a reference manual (867 lines, 47 sections). The README is now 442 lines of
+  orientation; the cookbook is what you come back to.
 - [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — what the library promises not to break,
   across its three surfaces: the API, rendered output, and stored recipes. Written because the
   project broke the third one deliberately in 0.41.0 (#53) and had no vocabulary for what it had
