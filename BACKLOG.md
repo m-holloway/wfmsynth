@@ -469,12 +469,12 @@ not first impression — which the reordering already fixed.
 
 **Status:** Open, both cheap.
 
-- **A suffix→dimension gate over `OP_KEYS`.** The unit convention is carried in parameter
-  suffixes (`_s`, `_ps`, `_hz`, `_ghz`, `_frac`, `_db`, `_ohm`, `_in`), and it is near-clean:
-  measured, `_s` has 12 members and exactly one is not seconds (`reflect(gamma_s=)`, which means
-  SOURCE and is now documented as such). A gate asserting the mapping, with `gamma_s` as a named
-  allowlist entry, makes a *second* impostor impossible for about 30 lines. Do NOT build a unit
-  type system: 68 % of parameters are genuinely dimensionless, and `Grid` already owns the
+- ~~A suffix→dimension gate over `OP_KEYS`.~~ **DONE** —
+  `tests/test_unit_suffix_convention.py` freezes the 86 unit-suffixed parameter names, so a new
+  one fails until it is declared, which is the moment to check its suffix is honest. `gamma_s`
+  is the single declared exception, and a tripwire fails if a second is ever added — one is a
+  quirk, two means the convention has stopped carrying its weight. A unit type system was
+  considered and rejected: 171 of 257 parameters are dimensionless, and `Grid` already owns the
   conversions.
 - **`validate.py` prints margins but never collects them.** Each of its 310 checks hardcodes its
   own threshold inline, so there is no inventory of how much headroom each physical claim
