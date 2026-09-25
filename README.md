@@ -832,6 +832,10 @@ Carrier-agnostic (NRZ/PAM4/clocks/buses/optical). `peak_hold` decimation keeps a
 
 ## Roadmap and backlog
 
+**[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)** states what will not break, and what a
+change that moves rendered samples has to do before it ships. Read it before upgrading a
+pipeline that has already generated data.
+
 **[docs/FIDELITY.md](docs/FIDELITY.md)** says which of this library's numbers are calibrated
 against real captured hardware, which are closed form, and which are fitted shapes — using the
 evidence markers `DATASET-METHODOLOGY.md` defines. Read it before trusting a figure.

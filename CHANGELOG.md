@@ -14,6 +14,17 @@ samples is called out explicitly under **Changed output** below.
 
 ## Unreleased
 
+Nothing here changes rendered output: every entry is additive, documentation, a test, or a new
+warning. Verified by rendering three chains (a full instrument chain, an acquisition, and a
+de_emphasis chain) at `v0.41.0` and at HEAD and comparing sha256 digests — all three identical.
+
+### Added
+
+- [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) — what the library promises not to break,
+  across its three surfaces: the API, rendered output, and stored recipes. Written because the
+  project broke the third one deliberately in 0.41.0 (#53) and had no vocabulary for what it had
+  done.
+
 ### Fixed
 
 - **A recipe written before an op's numerics changed now says so on replay.** `recipe()` has
@@ -124,7 +135,16 @@ End-to-end at 4.2 M samples, output bit-exact or within 1.4e-15 unless noted:
 
 ### Changed output
 
-- Nothing by default. Every change above is bit-exact or within ~1e-15 of it, except:
+Read this section before upgrading a pipeline that has already generated data. See
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for what each tier of change requires.
+
+- **BREAKING, by default: `de_emphasis` changed sign (#53).** A stored recipe with a POSITIVE
+  `db` asked for de-emphasis under 0.40.0 and renders as PRE-emphasis from 0.41.0 — inverted
+  transmitter shaping on an existing record. Negate the `db` to preserve the original intent.
+  This is the one change in the release that alters a default render, and it is why
+  `compose.NUMERIC_CHANGES` and the version check on `from_recipe` now exist: replaying such a
+  recipe warns and names the fix instead of quietly producing a different record.
+- Everything else is bit-exact or within ~1.4e-15 — inside the byte-identity band — except:
 - `apply_transfer(method="overlap")`, which is **opt-in and recorded in the recipe**. It differs
   from the transform by 7.7e-5 of peak-to-peak for a channel stage, 2.5e-4 through a full chain,
   and a whole 8-bit code on 1.16 % of samples once a converter sees it. A recipe rendered on one

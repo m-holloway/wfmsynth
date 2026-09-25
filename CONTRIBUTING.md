@@ -61,6 +61,12 @@ were generated, so output is a compatibility surface.
 
 Never re-pin a reference to make a red test green without understanding why it moved.
 
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) is the full policy: what the three surfaces are
+(API, rendered output, stored recipes), and what each tier of change has to do before it ships.
+The short version of the part people miss — a change that moves output beyond the band and
+cannot be made opt-in must add an entry to `compose.NUMERIC_CHANGES`, so that a *stored recipe*
+predating it warns on replay instead of quietly rendering something else.
+
 ## Adding or changing an op
 
 - Every op must appear in `_EXEC`, in `OP_KIND`, and in **exactly one** lead-in bucket
