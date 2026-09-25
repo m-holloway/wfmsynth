@@ -12,11 +12,19 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
-## Unreleased
+## 0.42.0 — 2026-09-25
 
 Nothing here changes rendered output: every entry is additive, documentation, a test, or a new
 warning. Verified by rendering three chains (a full instrument chain, an acquisition, and a
 de_emphasis chain) at `v0.41.0` and at HEAD and comparing sha256 digests — all three identical.
+
+**Cut because 0.41.0 had become two different things.** The version was bumped to `0.41.0` on
+2026-09-22, *before* the performance work began, so everything from the benchmark suite through
+`op_params` also reported `0.41.0`. A checkout taken from `main` on 22–23 September and the
+`v0.41.0` tag are materially different code under one label — which is exactly the
+one-label-two-meanings defect this release's own `NUMERIC_CHANGES` work exists to prevent, and
+it was introduced by not bumping the version once the work landed. See
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) for how to tell which one you have.
 
 ### Added
 

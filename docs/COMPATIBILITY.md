@@ -111,6 +111,41 @@ Being honest about the edges is what makes the rest credible.
   probably not what you meant", and adding one is not a breaking change. Run with
   `-W error` in CI if you want them to be.
 
+## Telling which build you actually have
+
+`wfmsynth.__version__` alone is not always enough, and once it was actively misleading.
+
+**What happened, recorded so it is not repeated.** The version was bumped to `0.41.0` on
+2026-09-22, *before* a large performance pass began. Every commit of that pass also reported
+`0.41.0`. A checkout taken from `main` on 22–23 September and the `v0.41.0` tag were therefore
+materially different code — an LFSR that took 740 ms versus 18 ms for the same call — under one
+label. A user who checked `__version__`, saw `0.41.0`, and concluded nothing had shipped was
+reading the evidence correctly.
+
+That is the same one-label-two-meanings defect `NUMERIC_CHANGES` exists to prevent for recipes,
+and the cause was procedural: **the version was bumped when work started rather than when it
+shipped.** Bump at release.
+
+Two ways to check what you have:
+
+```bash
+git describe --tags          # e.g. v0.42.0, or v0.42.0-7-gabc1234 for 7 commits past it
+```
+
+```python
+# or test the CODE rather than the label
+import time, wfmsynth as ws
+from wfmsynth import physics as P
+t = time.perf_counter(); P.lfsr(P.PRBS_TAPS[13], 1 << 21); dt = time.perf_counter() - t
+print(ws.__version__, f"{dt * 1000:.0f} ms")     # ~18 ms with 0.41.0's perf work, ~740 without
+```
+
+One more trap, for contributors rather than users: `__version__` reads the **installed
+distribution's** metadata first, and an editable install freezes that at install time. After
+changing `pyproject.toml`, run `python -m pip install -e .` or `__version__` stays stale.
+`tests/test_version_single_source.py` catches it and says so. The precedence is deliberate — a
+vendored copy must not pick up the host project's `pyproject.toml` two directories up.
+
 ## Versioning
 
 Pre-1.0 and honest about it: `0.MINOR.PATCH`, where a minor bump may include a Tier 2(c) output
