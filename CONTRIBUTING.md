@@ -15,7 +15,7 @@ Run all four before you open a PR. CI runs them too, but locally they take under
 ```bash
 python -m pip install -e ".[test]"
 
-python -m pytest -q                                   # ~1250 tests
+python -m pytest -q                                   # the whole directory
 python -m wfmsynth.validate                           # hard physics-property assertions
 python tools/benchmark.py --quick --check             # peak memory and complexity
 python examples/quickstart.py                         # the five-minute path still works

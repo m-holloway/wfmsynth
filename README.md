@@ -400,9 +400,7 @@ Everything above is orientation. The per-feature recipes — the instrument and 
 equalisation, optical, events, crosstalk, coding, buses, acquisition, and the rest — live in
 **[docs/COOKBOOK.md](docs/COOKBOOK.md)**, one short section each with runnable code.
 
-They were in this file, which had grown to 867 lines and 47 sections: a reference manual wearing
-a README. Splitting them leaves this page as the thing someone reads once, and the cookbook as
-the thing they come back to.
+This page is the part you read once; the cookbook is the part you come back to.
 
 ## Roadmap and backlog
 
@@ -423,7 +421,7 @@ standards-fidelity gaps.
 ## Tests
 ```bash
 python -m pip install -e ".[test]"
-pytest                                       # ~1250 tests
+pytest                                       # the whole suite
 python -m wfmsynth.validate                  # hard physics-property assertions
 python tools/benchmark.py --quick --check    # peak memory and complexity, not wall time
 ```
