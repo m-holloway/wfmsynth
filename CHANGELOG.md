@@ -47,6 +47,11 @@ samples is called out explicitly under **Changed output** below.
 
 ### Added
 
+- `op_params(recipe, op)` — read a knob back out of a recipe, which is where a `dataset()`
+  label comes from. `dataset()` deliberately returns no `y`: the sampled values are already
+  baked into the ops, so a label read from the recipe cannot drift out of alignment with the
+  record the recipe reproduces. Raises when an op appears more than once, because `[...][0]`
+  would silently label every record from the wrong stage.
 - `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue and PR templates, and a
   dependabot config for GitHub Actions.
 

@@ -2413,11 +2413,62 @@ def _warn_on_numeric_drift(recipe_version, ops):
                 RuntimeWarning, stacklevel=3)
 
 
+def op_params(recipe, op, which=None):
+    """The parameters of one op in a recipe -- the labelling route for `dataset()`.
+
+        y = np.array([op_params(r, "lossy")["loss_db"] for r in recipes])
+
+    This is a one-liner by hand (`[o for o in r["ops"] if o["op"] == "lossy"][0]`) and it is
+    worth a function for one reason: that `[0]` silently takes the FIRST match. A chain with two
+    `lossy` stages -- a package and a board, which is an ordinary thing to model -- would label
+    every record from whichever happened to come first, and the labels would look fine. Here
+    that is an error naming the count, and `which=` resolves it deliberately.
+
+    Raises `KeyError` when the op is absent, rather than returning None for a caller to index
+    into: a missing label should stop a dataset build, not become a null in a training set."""
+    ops = [o for o in recipe.get("ops", []) if o.get("op") == op]
+    if not ops:
+        present = sorted({o.get("op") for o in recipe.get("ops", [])})
+        raise KeyError(f"no {op!r} op in this recipe; it has: {present}")
+    if which is None:
+        if len(ops) > 1:
+            raise ValueError(
+                f"this recipe has {len(ops)} {op!r} ops, so {op!r} does not name one set of "
+                f"parameters. Pass which=0..{len(ops) - 1} to say which.")
+        which = 0
+    return dict(ops[which])
+
+
 def dataset(build, n, seed=0):
     """Ground-truth dataset builder. `build(rng)` returns a Signal (sample its knobs from
     `rng` however you like — the SAMPLED values are baked into the Signal's ops, hence
     recorded). Returns (X, recipes): X is (n, L) stacked waveforms, recipes is a list of n
     per-sample recipes. Each waveform is exactly reproducible from its recipe.
+
+    WHERE `y` COMES FROM: the recipe, not a list you keep alongside. There is deliberately no
+    label argument, because the sampled knob values are already baked into the ops — so the
+    label is READ BACK from the same artifact that reproduces the record, and cannot drift out
+    of alignment with it:
+
+        def build(rng):
+            loss = float(rng.uniform(4.0, 16.0))            # the knob IS the label
+            return (Signal(seed=int(rng.integers(1 << 30)), grid=g)
+                    .carrier("nrz", n_ui=n_ui, pattern="prbs13", causal=True,
+                             seed=int(rng.integers(1 << 30)))
+                    .lossy(loss_db=loss, loss_at_ghz=12.5, causal=True))
+
+        X, recipes = dataset(build, 200, seed=0)
+        y = np.array([op_params(r, "lossy")["loss_db"] for r in recipes])
+
+    The tempting alternative — appending to a list inside `build` — is order-dependent and
+    silently misaligns the day anything filters, reshards or reorders the set. `X[i]` and
+    `recipes[i]` are the same record by construction; a side list is only the same record by
+    habit. See `op_params`.
+
+    For a label that is a MEASURED property rather than a requested one (a realised eye height,
+    a realised rise time), measure it from `X[i]` — `measure.attributes` — rather than reading
+    the knob. The two differ, and that difference is exactly where silent label noise comes
+    from; `examples/ground_truth.py` is about that distinction.
 
     Each waveform is written into `X` as it is rendered rather than collected first. The
     collected form held every record at float64 AND the float32 copy -- 12 bytes per sample at

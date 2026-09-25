@@ -415,6 +415,71 @@ These improve production workflows but do not outrank demonstrated fidelity gaps
 - memory-mapped long-record output; and
 - optional accelerated backends after profiling.
 
+### `dataset()` returns no labels, and the label path is undocumented
+
+**Status:** Open. Found by reviewing the library as an ML engineer would use it — the primary
+audience named in `README.md`'s own opening.
+
+`ws.dataset(build, n, seed)` returns `(X, recipes)`. There is no `y`. Someone building a
+classifier — the README's own first example prompt is "200 records, half with excess loss,
+labelled" — has no documented route, and the obvious one is wrong:
+
+```python
+LABELS = []
+def build(rng): LABELS.append(int(bad)); ...      # order-dependent, silently misaligns
+X, recipes = ws.dataset(build, 40, seed=0)
+```
+
+The GOOD path already exists and is written down nowhere: the label is recoverable from the
+recipe, because the sampled knob values are baked into the ops.
+
+```python
+loss = [o for o in r["ops"] if o["op"] == "lossy"][0]["loss_db"]
+```
+
+That is exactly the property `dataset()`'s docstring already claims ("the SAMPLED values are
+baked into the Signal's ops, hence recorded"), and it is the honest labelling route: the label
+is read from the same artifact that reproduces the record, so it cannot drift out of alignment
+with it.
+
+**Done when:** the recipe→label idiom is documented with a worked example, and/or `dataset()`
+takes an optional `label=` callable receiving the Signal and returning a dict per record. Prefer
+the documented idiom first — it needs no API and teaches the right mental model.
+
+**Do NOT** add `make_dataset(n=1000, defect="glitch")`. Choosing physical parameters on the
+user's behalf crosses the boundary `CONTRIBUTING.md` and `DATASET-METHODOLOGY.md` both draw.
+
+### The README's first 80 lines are about installing an agent skill
+
+**Status:** Open, cosmetic but first-impression. Owner: whoever next edits `README.md`.
+
+Section order is: the pitch, then **"Working with an agent" (~60 lines of skill installation)**,
+then "Install and verify" (line ~83), then the first waveform (~96). Someone who wants
+`pip install` scrolls past a page about agent tooling. Both an ergonomics review and a
+target-user review flagged this independently, which is the signal worth trusting.
+
+The file is also 856 lines with 47 `##` sections — a reference manual wearing a README.
+
+**Done when:** the order is install → first waveform → capability map → links, with the agent
+section below the first waveform, and the per-feature cookbook (roughly everything after line
+260) split into `docs/COOKBOOK.md`.
+
+### Two smaller quality gates worth having
+
+**Status:** Open, both cheap.
+
+- **A suffix→dimension gate over `OP_KEYS`.** The unit convention is carried in parameter
+  suffixes (`_s`, `_ps`, `_hz`, `_ghz`, `_frac`, `_db`, `_ohm`, `_in`), and it is near-clean:
+  measured, `_s` has 12 members and exactly one is not seconds (`reflect(gamma_s=)`, which means
+  SOURCE and is now documented as such). A gate asserting the mapping, with `gamma_s` as a named
+  allowlist entry, makes a *second* impostor impossible for about 30 lines. Do NOT build a unit
+  type system: 68 % of parameters are genuinely dimensionless, and `Grid` already owns the
+  conversions.
+- **`validate.py` prints margins but never collects them.** Each of its 310 checks hardcodes its
+  own threshold inline, so there is no inventory of how much headroom each physical claim
+  actually has — and therefore no way to see a claim drifting toward its bound before it breaks.
+  Emitting the margins as machine-readable output would make that visible.
+
 ### Two thirds of the shipped examples break the library's own `k >= 8` rule
 
 **Status:** Open, measured, and gated. Owner: whoever next touches `examples/`.

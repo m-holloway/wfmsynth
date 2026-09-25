@@ -86,7 +86,7 @@ from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_
                          digitize as digitize_adc, scope_bandwidth, probe_loading, timebase_jitter,
                          store_record, quantisation_floor_db_per_hz,
                          sinad_noise_rms, converter_noise_rms)
-from .compose import Signal, dataset, rederive_anchor, canonicalize, op_kind
+from .compose import Signal, dataset, op_params, rederive_anchor, canonicalize, op_kind
 from .measure import (eye_height, best_phase, attributes, align_symbols, ground_truth,
                       pattern_period)
 from .sweep import hold_constant, realized_table, solve_monotonic
@@ -171,7 +171,7 @@ __all__ = [
     "scope_bandwidth", "probe_loading", "timebase_jitter", "store_record",
     "sinad_noise_rms", "converter_noise_rms",
     "quantisation_floor_db_per_hz",
-    "Signal", "dataset", "rederive_anchor", "canonicalize", "op_kind",
+    "Signal", "dataset", "op_params", "rederive_anchor", "canonicalize", "op_kind",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",
 ]
