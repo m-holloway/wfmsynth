@@ -13,12 +13,17 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wfmsynth as ws
 
-g = ws.Grid(fs=200e9, baud=50e9, n=1 << 12)
-nui = g.n // 4
+# 16 samples/UI, so a tr_frac=0.5 edge gets k = 8 across the transition. This file MEASURES
+# nine spectral and statistical features and asks a classifier to separate on them -- several of
+# which (spectral_centroid, hf_fraction, crest) read the edge directly. At the 4 samples/UI this
+# used, those features were partly describing the grid, which is the one thing a sim-to-real
+# diagnostic must not do: it would name the grid as "the physics to fix next".
+g = ws.Grid(fs=800e9, baud=50e9, n=1 << 12)
+nui = int(g.n // g.samples_per_ui)      # derived, not a hardcoded 4 samples/UI
 
 
 def mk(seed, noise_rms=0.0):
-    s = (ws.Signal(seed=seed, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q",
+    s = (ws.Signal(seed=seed, grid=g).carrier("pam4", n_ui=nui, pattern="prbs13q", tr_frac=0.5,
                                               causal=True, seed=seed)
          .lossy(loss_db=6.0, loss_at_ghz=25.0, causal=True))
     return (s.digitize(noise_rms=noise_rms) if noise_rms else s).waveform()

@@ -93,14 +93,22 @@ def test_the_demo_runs_clean(name):
 # Was eight. `events.py` and `two_rate_acquisition.py` are fixed -- they were the cheap two
 # (1.6x and 2.0x fs), and raising the rate made the acquisition example sharper rather than just
 # quieter: a simulation grid is SUPPOSED to out-resolve the acquisition it is decimated to, and
-# at 8 samples/UI it barely did. The remaining six need 4x-7x, which changes what each one
-# shows, so each wants its output re-read rather than its warning silenced.
+# at 8 samples/UI it barely did.
+#
+# Then the two that MEASURE, which is where the debt actually caused wrongness rather than
+# noise. ground_truth.py exists to show the contour-vs-sigma eye divergence under ISI, and at
+# 4 samples/UI it read 0.034 where the resolved grid reads 0.103 -- it was understating the very
+# effect it teaches, by 3x, and reported a flat 0.00-sample sampling phase because there was no
+# sub-sample resolution to find. sim_to_real.py scores nine features, several of which read the
+# edge directly, so an unresolved edge would have it name the GRID as "the physics to fix next".
+#
+# The remaining four are cosmetic by comparison: they demonstrate APIs rather than print
+# measurements. Each still needs 4x fs, which changes what it shows, so each wants its output
+# re-read rather than its warning silenced.
 UNDERSAMPLED = {
     "confounder_sweep.py":     "k=0.60 at 4.0 samples/UI; 4.0x fs to fix",
-    "ground_truth.py":         "k=0.60 at 4.0 samples/UI; 4.0x fs to fix (and it MEASURES)",
     "provenance.py":           "k=0.34 at 2.3 samples/UI; 7.0x fs to fix -- worst",
     "realistic_scenario.py":   "k=0.60 at 4.0 samples/UI; 4.0x fs to fix",
-    "sim_to_real.py":          "k=0.60 at 4.0 samples/UI; 4.0x fs to fix (and it MEASURES)",
     "touchstone_channel.py":   "k=0.60 at 4.0 samples/UI; 4.0x fs to fix",
 }
 
