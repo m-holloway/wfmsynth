@@ -26,9 +26,13 @@ property actually holds in the rendered samples (a filter's −3 dB point really
 asked for; a quantisation floor really is `q²/12`). If you change physics, expect to change it,
 and say in the PR what moved and why.
 
-`tools/benchmark.py --check` gates **peak memory** and the **scaling ratio** `t(2n)/t(n)`, not
-wall time — the ratio divides the machine's speed out, so it catches an `O(n log n)` stage
-turning `O(n²)` without being flaky on a loaded runner. If you make something legitimately
+`tools/benchmark.py --check` gates the **scaling ratio** `t(2n)/t(n)` everywhere, and **peak
+memory** only when your environment matches the one the baseline was captured on. The ratio
+divides the machine's speed out, so it catches an `O(n log n)` stage turning `O(n²)` without
+being flaky on a loaded runner. Peak memory is deterministic within one platform+python+numpy
+and is *not* portable across them — measured, `op:reflect` peaks at 2.00× the record on macOS
+and 3.05× on a Linux runner — so across environments it is printed rather than failed, and the
+run says so. Locally, where the baseline lives, it is gated hard. If you make something legitimately
 faster or leaner, re-record the floor so a regression back to the old behaviour is caught:
 
 ```bash

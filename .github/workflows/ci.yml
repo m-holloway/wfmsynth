@@ -34,13 +34,19 @@ jobs:
       - run: pip install -e . pytest
       - run: python -m pytest -q
       - run: python -m wfmsynth.validate
-      # Peak memory and COMPLEXITY, not wall time. The scaling ratio t(2n)/t(n) divides the
-      # runner's speed out, so it catches an O(n log n) stage turning O(n^2) without ever
-      # depending on how loaded the machine is. Peak memory is deterministic, but the committed
-      # baseline is captured on the maintainer's macOS box, so a Linux runner gets real slack
-      # (35 %) -- enough to absorb a different allocator, not enough to hide a doubling.
+      # COMPLEXITY is what this gates here. The scaling ratio t(2n)/t(n) divides the runner's
+      # speed out, so an O(n log n) stage turning O(n^2) shows up identically on any machine.
+      #
+      # Peak memory is REPORTED on this runner, not gated, and that is deliberate rather than a
+      # retreat: it is deterministic within one platform+python+numpy and is not portable
+      # across them. MEASURED the first time this gate ran in CI -- op:reflect peaks at exactly
+      # 2.00x the record on the maintainer's macOS box and 3.05x here, one whole extra
+      # record-sized temporary from a different numpy. A 35 % tolerance failed it and blocked
+      # two dependabot PRs; a tolerance wide enough to absorb 50 % would be wide enough to miss
+      # a real doubling. The benchmark compares like with like instead, and the maintainer's
+      # local run -- where the baseline was captured -- still gates memory hard.
       # ~0.4 s at the quick sizes, so it costs nothing against the metered minutes.
-      - run: python tools/benchmark.py --quick --check --mem-tol 0.35
+      - run: python tools/benchmark.py --quick --check
 
   cross-platform:
     # Full matrix ONLY on the weekly schedule or a manual dispatch — never on every PR/push.

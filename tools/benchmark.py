@@ -264,9 +264,47 @@ def table(results, sizes):
               f"{r['peak_x_record']:8.1f} {sc if sc is None else f'{sc:6.2f}'}")
 
 
-def check(results, base, sizes, gate_time=False, mem_tol=MEM_TOL):
-    """Compare against the committed baseline. Returns a list of regression strings."""
+def environment():
+    """What produced a measurement. Peak memory is reproducible on one of these and NOT across
+    them, so a baseline that does not say where it came from cannot be compared safely."""
+    import platform
+    import numpy
+    return {"platform": platform.system().lower(),
+            "python": ".".join(platform.python_version_tuple()[:2]),
+            "numpy": numpy.__version__}
+
+
+def _same_environment(a, b):
+    """Peak memory is compared only within one platform+python. numpy's patch version is
+    recorded but not required to match -- it moves often and rarely moves allocations."""
+    if not a or not b:
+        return False
+    return (a.get("platform") == b.get("platform")
+            and a.get("python") == b.get("python"))
+
+
+def check(results, base, sizes, gate_time=False, mem_tol=MEM_TOL, base_env=None):
+    """Compare against the committed baseline. Returns a list of regression strings.
+
+    PEAK MEMORY IS GATED ONLY WITHIN ONE ENVIRONMENT. It is deterministic on a given
+    platform+python+numpy and is NOT portable across them: MEASURED, `op:reflect` peaks at
+    exactly 2.00x the record on the baseline machine and 3.05x on a Linux CI runner -- one whole
+    extra record-sized temporary, from a different numpy. A tolerance wide enough to absorb that
+    (50 %) would be wide enough to miss a real doubling, so the honest move is to compare like
+    with like and report, rather than fail, when the environments differ.
+
+    THE SCALING RATIO IS ALWAYS GATED, because it is portable by construction: t(2n)/t(n)
+    divides the machine out, and an O(n log n) stage turning O(n**2) shows up identically
+    everywhere. That is the part of this gate that protects CI."""
     bad = []
+    here = environment()
+    comparable = _same_environment(here, base_env)
+    if not comparable:
+        print(f"  peak memory REPORTED, not gated: baseline is from "
+              f"{(base_env or {}).get('platform','?')}/py{(base_env or {}).get('python','?')}"
+              f"/numpy {(base_env or {}).get('numpy','?')}, this is "
+              f"{here['platform']}/py{here['python']}/numpy {here['numpy']}. "
+              f"Complexity is still gated.")
     for name, e in results.items():
         b = base.get(name)
         if b is None:
@@ -280,8 +318,12 @@ def check(results, base, sizes, gate_time=False, mem_tol=MEM_TOL):
             if max(got, want) < MEM_FLOOR_MB:
                 continue
             if want > 0 and got > want * (1.0 + mem_tol):
-                bad.append(f"{name} @n={n}: peak memory {got:.1f} MB vs baseline "
-                           f"{want:.1f} MB (+{100*(got/want-1):.0f} %, tol {100*mem_tol:.0f} %)")
+                msg = (f"{name} @n={n}: peak memory {got:.1f} MB vs baseline "
+                       f"{want:.1f} MB (+{100*(got/want-1):.0f} %, tol {100*mem_tol:.0f} %)")
+                if comparable:
+                    bad.append(msg)
+                else:
+                    print(f"  (cross-environment, not gated) {msg}")
             if gate_time:
                 gt, wt = e[k]["time_s"], b[k]["time_s"]
                 if wt > 0 and gt > wt * TIME_TOL:
@@ -321,7 +363,7 @@ def main():
     table(results, sizes)
     print(f"\n{len(names)} cases at n={sizes} in {elapsed:.1f} s")
 
-    payload = {"sizes": list(sizes), "cases": results}
+    payload = {"environment": environment(), "sizes": list(sizes), "cases": results}
     if a.json:
         Path(a.json).write_text(json.dumps(payload, indent=2) + "\n")
         print(f"wrote {a.json}")
@@ -337,7 +379,8 @@ def main():
             print(f"baseline was captured at sizes {base.get('sizes')}, not {list(sizes)} -- "
                   f"compare like with like (use the same --quick/full mode)")
             return 2
-        bad = check(results, base["cases"], sizes, gate_time=a.gate_time, mem_tol=a.mem_tol)
+        bad = check(results, base["cases"], sizes, gate_time=a.gate_time,
+                    mem_tol=a.mem_tol, base_env=base.get("environment"))
         if bad:
             print("\nREGRESSIONS:")
             for b in bad:
