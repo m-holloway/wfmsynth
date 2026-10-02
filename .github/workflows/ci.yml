@@ -40,8 +40,9 @@ jobs:
       # Peak memory is REPORTED on this runner, not gated, and that is deliberate rather than a
       # retreat: it is deterministic within one platform+python+numpy and is not portable
       # across them. MEASURED the first time this gate ran in CI -- op:reflect peaks at exactly
-      # 2.00x the record on the maintainer's macOS box and 3.05x here, one whole extra
-      # record-sized temporary from a different numpy. A 35 % tolerance failed it and blocked
+      # 2.00x the record on the maintainer's macOS box and 3.05x here. That gap is the size
+      # of one record-sized temporary; WHICH of platform, numpy or allocator produces it was
+      # not established -- only that it is not a regression. A 35 % tolerance failed it, blocked
       # two dependabot PRs; a tolerance wide enough to absorb 50 % would be wide enough to miss
       # a real doubling. The benchmark compares like with like instead, and the maintainer's
       # local run -- where the baseline was captured -- still gates memory hard.
