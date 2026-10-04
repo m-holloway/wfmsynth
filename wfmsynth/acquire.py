@@ -37,7 +37,8 @@ class AcquisitionProfile:
     record_length: int
     input_bandwidth_hz: Optional[float] = None          # analog front-end -3 dB
     sample_clock_jitter_rms_s: float = 0.0              # timebase jitter
-    enob: Optional[float] = None                        # finite-ENOB quantization
+    bits: Optional[int] = None                              # native converter depth; with enob => SINAD noise
+    enob: Optional[float] = None                            # if bits set: published ENOB; else legacy lattice
     clip_full_scale: Optional[float] = None             # ADC saturation level
     interleave: Optional[dict] = None                   # dict(m_cores, offset_v, ...)
     noise_floor: Optional[dict] = None                  # dict(rms, shape)
@@ -97,13 +98,26 @@ def acquire_record(x_sim, grid_sim, profile, rng=None):
     y = INST.resample_at(np.asarray(conditioned, float), src)
 
     g_acq = profile.grid
-    if profile.noise_floor:
-        y = y + INST.shaped_noise_floor(len(y), rng=rng, **profile.noise_floor)
+    noise = dict(profile.noise_floor) if profile.noise_floor else {}
+    use_bits = profile.bits is not None
+    if use_bits and profile.enob is not None and profile.clip_full_scale is not None:
+        nyquist = profile.sample_rate_hz / 2.0
+        bw = float(profile.input_bandwidth_hz or nyquist)
+        conv = INST.converter_noise_rms(
+            profile.enob, profile.clip_full_scale, bw, nyquist, bits=profile.bits,
+        )
+        extra = float(noise.get("rms") or 0.0)
+        noise["rms"] = float(np.sqrt(extra * extra + conv * conv)) if extra else conv
+        noise.setdefault("shape", "white")
+    if noise:
+        y = y + INST.shaped_noise_floor(len(y), rng=rng, **noise)
     if profile.interleave:
         y = INST.interleave_adc(y, rng=rng, **profile.interleave)
     if profile.clip_full_scale is not None:
         y, _ = INST.clip_adc(y, profile.clip_full_scale)
-    if profile.enob is not None:
+    if use_bits:
+        y = INST.quantize_adc(y, bits=profile.bits, full_scale=profile.clip_full_scale)
+    elif profile.enob is not None:
         y = INST.quantize_adc(y, enob=profile.enob, full_scale=profile.clip_full_scale)
     digitized = y
 
