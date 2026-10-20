@@ -480,7 +480,13 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
     # exclusion `events` already gets.
     excused = {"carrier", "symbols", "coded", "capture", "events", "store", "acquire", "cascade",
                "sparam", "crosstalk_matrix", "dfe", "optical", "dispersion", "eo", "fiber",
-               "optical_mpi", "edfa", "photodetect", "tia", "burst", "pass_fet", "modulate"}
+               "optical_mpi", "edfa", "photodetect", "tia", "burst", "pass_fet", "modulate",
+               # `net` takes a whole network -- nodes, elements, drivers, a schedule -- as
+               # nested dicts, so there is no scalar knob to swap the way this sweep requires,
+               # exactly as for `cascade` and `sparam` above. Its own sweep is in
+               # tests/test_net.py, which moves a resistance, a capacitance and a schedule time
+               # and checks each one moves the solved waveform.
+               "net"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

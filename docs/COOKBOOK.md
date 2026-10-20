@@ -449,3 +449,51 @@ taps   = sig.acquire_taps(prof)                   # simulated / conditioned / di
 ```
 Carrier-agnostic (NRZ/PAM4/clocks/buses/optical). `peak_hold` decimation keeps a 2-channel
 (min,max) record so narrow transients survive time compression.
+
+
+## Shared nets (several drivers, switched terminations)
+
+A `cascade` is a series 2-port chain: one source, one probe. A shared net is not that. Several
+agents drive it at different times through hi-Z, terminations switch in and out, and a weaker
+driver can hold a level against a stronger one.
+
+```python
+bus = dict(
+    nodes=["bus"], rails={"vdd": 3.3},
+    elements=[{"id": "rp", "kind": "r", "a": "bus", "b": "vdd", "ohm": 885.0},
+              {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": 400e-12}],
+    drivers=[{"id": "d0", "node": "bus", "volts": 0.0, "ohm": 20.0, "state": "hiz"},
+             {"id": "d1", "node": "bus", "volts": 0.0, "ohm": 47.0, "state": "hiz"}],
+)
+
+x = (ws.Signal(seed=1, grid=g)
+     .carrier("nrz", n_ui=n_ui, pattern="prbs13", tr_frac=0.5, causal=True)
+     .net(**bus, follow="d0",                       # the carrier drives d0's state
+          schedule=[{"t_s": 2e-6, "id": "d1", "state": "driving"},   # a second agent joins
+                    {"t_s": 5e-6, "id": "d1", "state": "hiz"}])
+     ).waveform()
+```
+
+`follow` names the driver whose **state** the incoming waveform sets, thresholded at the
+midpoint of its own excursion — the rule `open_drain_line` uses, which that function's one-node
+case reproduces to 2.2e-15.
+
+A `schedule` is a plain list of `{"t_s", "id", "state"}` in **absolute seconds** against stable
+ids, so a protocol, traffic or fault generator can emit one without this op knowing anything
+about it. Times are absolute deliberately: a fraction would silently rescale if the record
+changed length, and for the same reason `net` refuses a lead-in.
+
+For several probes off one solve — related channels that must share one truth — call the
+function directly:
+
+```python
+v = ws.net.solve(spec, fs=g.fs, n=g.n, schedule=sched, probes=["bus", "stub"])
+```
+
+**It is exact, not integrated.** Between events the network is constant and is solved in closed
+form, so there is no step size to choose and no accuracy that decays over a long record. What
+the grid still decides is *visibility*: a transient faster than a sample completes inside one,
+and the solver says so rather than letting you measure the grid.
+
+**This tier is lumped R and C.** Transmission lines, S-parameter blocks inside a net, sub-nets,
+voltage-dependent laws and event emission are deferred — see `BACKLOG.md` for the order.

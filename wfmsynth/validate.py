@@ -2135,6 +2135,48 @@ _lg = _LGrid(fs=100e6, baud=400e3, n=1 << 14, v_full=3.3)
 def _lstated(r, c):
     return _LEAD_ANALYTIC["open_drain"]({"r_pullup_ohm": r, "c_bus_f": c}, _lg)
 _l1 = _lstated(885.0, 400e-12)
+# ---- a shared net: several drivers, switched terminations, one solve (GitHub #72) ----
+# The claim is EXACTNESS, so these are equalities against closed forms and against the op this
+# generalises -- not agreement to a tolerance someone picked.
+from wfmsynth import net as _NET
+
+_nrp, _ncb, _nvdd, _nrs, _nfs = 885.0, 400e-12, 3.3, 20.0, 1e9
+_nspec = {"nodes": ["bus"], "rails": {"vdd": _nvdd},
+          "elements": [{"id": "rp", "kind": "r", "a": "bus", "b": "vdd", "ohm": _nrp},
+                       {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": _ncb}],
+          "drivers": [{"id": "d0", "node": "bus", "volts": 0.0, "ohm": _nrs, "state": "hiz"}]}
+
+_nn = 4000
+_nt = np.arange(1, _nn + 1) / _nfs
+_nrc = _NET.solve(_nspec, fs=_nfs, n=_nn, probes="bus", v0={"bus": 0.0})
+_nwant = _nvdd * (1.0 - np.exp(-_nt / (_nrp * _ncb)))
+check("a net's RC charge IS V(1 - exp(-t/RC)), not an integration of it",
+      float(np.abs(_nrc - _nwant).max()) < 1e-12,
+      f"max |solved - closed form| = {float(np.abs(_nrc - _nwant).max()):.2e} V over "
+      f"{_nn} samples; tau = {_nrp * _ncb:.4g} s")
+
+_nx = np.asarray(P.nrz(n_ui=_nn // 50, n=_nn, seed=3, causal=True), float)
+_nsink = _nx >= 0.5 * (_nx.min() + _nx.max())
+_nref = P.open_drain_line(_nsink, _nfs, _nrp, _ncb, v_dd=_nvdd, r_sink_ohm=_nrs)
+_ngot = _NET.solve(_nspec, fs=_nfs, n=_nn, probes="bus",
+                   schedule=_NET.schedule_from_waveform(_nx, "d0"))
+check("the one-node net IS open_drain_line -- the general solver reproduces the special case",
+      float(np.abs(_ngot - _nref).max()) < 1e-13,
+      f"max |net - open_drain_line| = {float(np.abs(_ngot - _nref).max()):.2e} V across "
+      f"{int(np.count_nonzero(np.diff(_nsink.astype(int)))) + 1} driver state intervals")
+
+# a weaker driver holding a level against a stronger one -- the thing a 2-port chain cannot say
+_nspec2 = {"nodes": ["bus"], "rails": {"vdd": _nvdd},
+           "elements": [{"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": _ncb}],
+           "drivers": [{"id": "strong", "node": "bus", "volts": 0.0, "ohm": 20.0},
+                       {"id": "weak", "node": "bus", "volts": _nvdd, "ohm": 200.0}]}
+_ncont = _NET.solve(_nspec2, fs=_nfs, n=2000, probes="bus")
+_nwant2 = _nvdd * (1.0 / 200.0) / (1.0 / 20.0 + 1.0 / 200.0)
+check("two drivers contending settle to the conductance-weighted average, not to either one",
+      abs(float(_ncont[-1]) - _nwant2) < 1e-12,
+      f"strong 20 ohm at 0 V against weak 200 ohm at {_nvdd} V -> {float(_ncont[-1]):.6f} V, "
+      f"closed form {_nwant2:.6f} V (the strong driver wins but does not win outright)")
+
 check("a lead-in extent STATED in closed form scales with the physics it came from (open_drain: "
       "5 tau is proportional to Rp and to Cb)",
       _l1 > 0 and abs(_lstated(1770.0, 400e-12) / _l1 - 2.0) < 0.02

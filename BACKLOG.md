@@ -512,6 +512,45 @@ Three findings came out of it that the warning had been hiding:
 `touchstone_channel.py` additionally needed its synthetic response widened to span DC..Nyquist,
 since a measured response must cover the band it is applied to at BOTH ends or `sparam` refuses.
 
+### #72 Shared nets: the tiers not yet built
+
+**Status:** Tier 1 DELIVERED (`wfmsynth/net.py`, `Signal.net`). This is what remains.
+
+Delivered: nodes, rails, lumped R and C, Thevenin drivers with a scheduled output conductance,
+a schedule of absolute-time events against stable ids, several probes off one solve, and an
+exact closed-form solution per configuration. `open_drain_line` is reproduced to 2.2e-15.
+
+**Deferred, in the order they are likely worth having:**
+
+1. **Transmission lines and `sparam` blocks inside a net.** This is the case the lumped tier
+   cannot represent AT ALL, rather than represent slowly, so it is the one that earns the
+   frequency-domain solve the issue originally proposed first. The tier order was inverted
+   deliberately — see the note below.
+2. **Voltage-dependent (nonlinear) laws**, named with parameters rather than callables so a
+   recipe stays JSON-able. Needs the time-stepped tier the issue describes.
+3. **Sub-nets** — a block with ports instantiated several times, for several identical devices
+   on one net.
+4. **Driver and element state intervals emitted as events**, in the existing events vocabulary,
+   so a labelled defect can have a physical origin.
+5. **A driver whose VOLTAGE follows the incoming waveform.** Tier 1 follows a driver's STATE
+   (thresholded, so the net stays piecewise-constant and keeps its closed form). A
+   voltage-following driver is a time-varying source: tractable as a zero-order-hold recurrence
+   `v[k+1] = P v[k] + q0 + q1 x[k]`, but per-sample rather than per-interval.
+6. Inductors.
+
+**Why the tier order was inverted, since the issue proposed the frequency-domain solve first.**
+For a LUMPED switched net the closed form is exact: between events the network is constant, the
+symmetric generalised eigenproblem decouples it, and continuity across a switch is the capacitor
+voltages carried forward. There is no step size, no guard time and no periodicity assumption —
+the three things a frequency-domain solve of a switched network needs, and the reason the
+issue's own prototype quotes 0.2 % of swing rather than an equality. The frequency-domain tier's
+real advantage is distributed elements, which tier 1 does not have; it should arrive with them.
+
+**Also unresolved, from the issue's own Open Questions:** stage rank. `net` is registered as
+`channel`. It does contain sources, but every alternative read worse: it sits where a channel
+sits, it is refused a lead-in like `events`, and a new rank would have to be ordered against the
+existing five for no behaviour that depends on it.
+
 ## Known limitations and claim boundaries
 
 Keep these statements synchronized with user-facing documentation:
@@ -581,6 +620,7 @@ branches.
 | #58–61 | `read_touchstone` records a file's own reference impedance (`# ... R <z0>`, or a Touchstone 2.0 `[Reference]` block); `write_touchstone`/`touchstone_channel` can state or renormalize to a system impedance via the standard closed-form transform; `sparam.check_response(freqs, S)` reports passivity (max singular value) and a precursor-energy fraction as a causality diagnostic, leaving samples alone; `sparam.measured(..., left=, right=)` takes a 4-port (or wider) measured file as a differential cascade SECTION via its mixed-mode SDD block, so a chain of these composes exactly like a chain of 2-port sections; `sparam.stub(...)` adds an open/short transmission-line stub as its own lossless, reciprocal cascade section (`"stub"` in a declarative `Signal.cascade(path=[...])`) |
 | #62 | `read_mdif` reads one well-documented MDIF (`.mdf`) dialect -- `BEGIN`/`END` blocks, each a full S-matrix sweep at one point of an outer VAR sweep (a stub length, a Z0) -- into an `MdifSweep` (`.freqs`, `.S`, `.axes`); `.select(**kwargs)` names one sweep point and returns `(freqs, S)`, ready for `sparam_channel`'s own slicing. An unrecognised column layout (MA/dB pairs, an unstated dialect) or a mismatch between blocks (VAR names, frequency axis, port count) raises rather than guessing |
 | performance | A benchmark suite (`tools/benchmark.py`) gated on peak memory and on SCALING rather than wall time, wired into per-PR CI. `resample_at` -- reached by `acquire`, `sample_clock`, `dcd` and `shift`, so most instrument chains pay it -- rewritten as a polyphase table gather with a sliding-window view: 2.7x faster and 3.3x -> 1.3x the record in peak memory, agreeing to 1.6e-15. `_min_phase_H` no longer builds the magnitude mirror, the complex cepstrum or the folding weight vector: every chain 8.5x -> 6.0x the record. An opt-in `method="auto"/"overlap"` block path for `lossy`/`sparam`/`cascade` takes a channel to 1.2x the record, recorded in the recipe because the two paths differ by 1e-5 (a behaviour change by the byte-identity gate's own band, not round-off). Net on a full instrument chain: 603 -> 303 ms and 8.5x -> 6.0x memory by default, 1.2x with the block path |
+| #72 (tier 1) | A shared net as one channel stage: several drivers, switched terminations and one solve, where a `cascade` is a series 2-port chain with one source and one probe. Nodes, rails, lumped R/C, Thevenin drivers with a scheduled output conductance, and a schedule of absolute-time events against stable ids, all plain JSON so a protocol or fault generator can produce one. EXACT rather than integrated: between events the network is constant and the symmetric generalised eigenproblem gives it in closed form, so there is no step size, no guard time and no accuracy that decays over a long record. `physics.open_drain_line` is reproduced to 2.2e-15 and a two-node coupled net with a switched termination agrees with an independently-written RK45 integrator to 5.9e-12 |
 | #63 | `Signal.sparam(..., z0=...)` now forwards the reference-impedance renormalization `touchstone_channel` already offered directly -- it was being silently dropped on the composable path, the same class of bug #57 fixed for `ports`. Recorded in the recipe; omitting it is unchanged |
 | long-record performance | MEASURED end to end at 4.2 M samples, output bit-exact or within 1.4e-15: an instrument chain 0.400 -> 0.250 s and 614 -> 381 MB, a jitter/supply chain 2.278 -> 0.879 s and 682 -> 389 MB. `lfsr` jumps over GF(2) instead of stepping per bit (738 -> 18 ms at 4 M, uniform across PRBS7..31, bit-exact, and `phase` becomes log(phase)); `resample_at` factors its kernel weights into a polyphase table and takes its normaliser from a phase table (~3.4x, ~1e-15); `_min_phase_H` stops building three record-length temporaries and can return the rfft half; `apply_transfer(method=)` offers an overlap-save block path (1.5x, 5.0x -> 1.1x peak) as a RECORDED choice rather than a default, because it differs by 7.7e-5 of peak-to-peak; `dataset()` streams records into the output array instead of collecting them (3.0x -> 1.2x the array) and reuses minimum-phase responses across the batch (`physics.response_cache`, 1.28x, bit-exact). `tools/benchmark.py` + a CI gate on peak memory and the SCALING RATIO t(2n)/t(n), which divides the runner's speed out. Two things measured and NOT taken: `probe_loading`'s circular pole (linear costs 0.05 dB and 1.4 deg across the whole record to fix a wrap confined to ~5 time constants at its head -- see #58) and reduced-rate processing after band-limiting |
 

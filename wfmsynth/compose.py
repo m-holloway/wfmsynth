@@ -935,6 +935,35 @@ def _op_cascade(x, p, streams, grid, idx):
     return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"), **kw)
 
 
+def _op_net(x, p, streams, grid, idx):
+    """A shared net as one channel stage: several drivers, switched terminations, one solve.
+
+    The incoming waveform drives the STATE of the driver named by `follow`, thresholded at the
+    midpoint of its own excursion -- the rule `open_drain_line` already uses -- so the net stays
+    piecewise-constant between events and keeps its closed-form solution. A driver whose VOLTAGE
+    follows the waveform is a time-varying source and is deferred with the rest of the
+    nonlinear tier; see `wfmsynth/net.py`."""
+    from . import net as NET
+    spec = {k: p[k] for k in ("nodes", "rails", "elements", "drivers") if k in p}
+    sched = list(p.get("schedule", []) or [])
+    follow = p.get("follow")
+    if follow is not None:
+        sched = NET.schedule_from_waveform(x, follow, on_when=p.get("on_when", "high")) + sched
+    probe = p.get("probe")
+    if probe is None:
+        nodes = list(spec.get("nodes", []))
+        if len(nodes) != 1:
+            raise ValueError(
+                f"net: this chain carries ONE waveform, so `probe=` must name which node it is. "
+                f"The net has {nodes}. For several probes off one solve -- related channels that "
+                f"must share one truth -- call `wfmsynth.net.solve` directly.")
+        probe = nodes[0]
+    if not isinstance(probe, str):
+        raise ValueError(f"net: probe must be one node name, got {probe!r}; a Signal chain "
+                         f"carries one waveform. Use `wfmsynth.net.solve` for several.")
+    return NET.solve(spec, fs=grid.fs, n=len(x), schedule=sched, probes=probe)
+
+
 def _op_digitize(x, p, streams, grid, idx, win=None):
     # `win` is the delivered window of a lead-in render (see `Signal.lead_in`): the vertical
     # this stage sets must be ranged to the samples the CALLER receives, not to the discarded
@@ -975,7 +1004,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "hybrid_echo": _op_hybrid_echo, "multipair": _op_multipair, "ctle": _op_ctle, "rx_ffe": _op_rx_ffe, "dfe": _op_dfe,
          "ssc": _op_ssc,
          "intra_pair_skew": _op_intra_pair_skew, "supply_coupling": _op_supply_coupling,
-         "open_drain": _op_open_drain,
+         "open_drain": _op_open_drain, "net": _op_net,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
          "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
          "photodetect": _op_photodetect, "tia": _op_tia,
@@ -1001,7 +1030,7 @@ OP_KIND = {
     "carrier": "source", "symbols": "source", "coded": "source", "capture": "source",
     "tx_ffe": "shape", "de_emphasis": "shape", "events": "shape", "nonlinearity": "shape",
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
-    "dcd": "shape", "open_drain": "shape", "burst": "shape", "pass_fet": "shape",
+    "dcd": "shape", "open_drain": "shape", "net": "channel", "burst": "shape", "pass_fet": "shape",
     "modulate": "shape",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
@@ -1183,6 +1212,11 @@ def _lead_analytic_reach(ops, grid):
 # to silently move where these land, and a fault placed at sample 5000 of the record is not the same
 # fault at sample 5000 of the record-plus-guard.
 _LEAD_REJECT = {
+    "net": "its schedule places driver and termination changes at ABSOLUTE times in the record, "
+           "and a lead-in moves the record's origin -- a termination that switches at 2 us is "
+           "not the same termination switching 2 us into the guard. This is the same reason "
+           "`events` is refused, and it is why the schedule is in seconds rather than a "
+           "fraction: a fraction would silently rescale with the lengthened record instead",
     "modulate": "AM is memoryless but FM/PM integrate the message across the WHOLE record "
                "(a cumulative phase), and the classification is per OP NAME, not per call -- "
                "extending the message backward for a lead-in would change that integral, so "
@@ -1921,6 +1955,31 @@ class Signal:
         method ('auto'/'overlap' for the block path -- see `physics.apply_transfer`).
         See `wfmsynth.sparam.cascade_channel`."""
         return self._add("cascade", path=path, **params)
+
+    def net(self, **params):
+        """A SHARED NET as one channel stage -- several drivers, switched terminations, one
+        solve. A `cascade` is a series 2-port chain with one source and one probe; a real shared
+        net is not that, and turnaround, contention and a weaker driver holding a level against
+        a stronger one have no expression as a chain.
+
+            .net(nodes=["bus"], rails={"vdd": 3.3},
+                 elements=[{"id": "rp", "kind": "r", "a": "bus", "b": "vdd", "ohm": 885.0},
+                           {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": 400e-12}],
+                 drivers=[{"id": "d0", "node": "bus", "volts": 0.0, "ohm": 20.0, "state": "hiz"}],
+                 follow="d0")                       # the carrier drives d0's state
+
+        params: nodes, rails, elements, drivers, schedule, probe, follow, on_when.
+
+        `follow` names the driver whose STATE the incoming waveform sets, thresholded at the
+        midpoint of its own excursion -- `open_drain_line`'s rule, and with one node and one
+        driver this op reproduces that function to 2.2e-15 (pinned in `tests/test_net.py`).
+        `schedule` is a plain list of `{"t_s", "id", "state"}` events in ABSOLUTE seconds, so a
+        protocol, traffic or fault generator can produce one without this op knowing about it.
+
+        Exact, not integrated: between events the network is constant and is solved in closed
+        form, so there is no step size and no accuracy that decays over a long record. Lumped R
+        and C only in this tier -- see `wfmsynth/net.py` for what is deferred and why."""
+        return self._add("net", **params)
 
     def reflect(self, **params):
         """Multi-reflection, LUMPED: one round-trip delay, one Gamma, no positional structure —

@@ -12,6 +12,28 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## Unreleased
+
+### Added
+
+- **`Signal.net(...)` and `wfmsynth.net` — a shared net as one channel stage** (#72, tier 1).
+  Several drivers hand over through hi-Z, terminations and pull-ups switch on a schedule, and a
+  weaker driver can hold a level against a stronger one. None of that is expressible as the
+  series 2-port cascade every other channel op is. Nodes, rails, lumped R and C, Thevenin
+  drivers with a scheduled output conductance, a schedule of absolute-time events against stable
+  ids, and several probes off one solve — all plain JSON, so a protocol, traffic or fault
+  generator can produce a schedule without the op knowing about it.
+
+  Exact rather than integrated: between events the network is constant, so a symmetric
+  generalised eigendecomposition gives the interval in closed form. No step size, no guard time,
+  no periodicity assumption, and continuity across a switch is the capacitor voltages carried
+  forward. `physics.open_drain_line` is reproduced to **2.2e-15** (it is the one-node case of the
+  same recurrence), and a two-node coupled net with a switched termination agrees with an
+  independently-written RK45 integrator to **5.9e-12**.
+
+  Lumped R and C only in this tier; transmission lines, S-parameter blocks, sub-nets, nonlinear
+  laws and event emission are deferred, with the order and reasoning in `BACKLOG.md`.
+
 ## 0.42.0 — 2026-09-25
 
 Nothing here changes rendered output: every entry is additive, documentation, a test, or a new
