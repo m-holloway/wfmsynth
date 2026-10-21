@@ -31,6 +31,7 @@ DEMOS = [
     "confounder_sweep.py",
     "events.py",
     "ground_truth.py",
+    "i2c_bus.py",
     "non_integer_sps.py",
     "provenance.py",
     "quickstart.py",

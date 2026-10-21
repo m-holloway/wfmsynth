@@ -551,6 +551,47 @@ real advantage is distributed elements, which tier 1 does not have; it should ar
 sits, it is refused a lead-in like `events`, and a new rank would have to be ordered against the
 existing five for no behaviour that depends on it.
 
+### #73 Scenario layer: what the tier-1 answers were, and what is deferred
+
+**Status:** DELIVERED (`wfmsynth/scenario.py`, `Signal.net(holds=, agents=)`,
+`examples/i2c_bus.py`). `Hold`, `Agent`, `schedule`, `merge_holds`, `hold_windows`, and the
+`g` / `src` event vocabulary in the solver.
+
+**The issue's three open questions, answered:**
+
+1. *Module placement — with the net op, or a small module returning an event list?* A separate
+   module. `net` is a solver and this is pure data to data with no numerics: keeping them apart
+   means the layer is testable and usable without a solve, and `net` keeps its plain-list
+   interface for anyone generating a schedule some other way. The one import it does take from
+   `net` is `sample_at`, so the boundary rule is written once.
+2. *Should the shelf-like `then` be a named driver behaviour instead of timed events?* Timed
+   events. A named behaviour would hide a time-varying element behind a stage that guarantees
+   a closed-form solve, and the whole value of `net` is that the exactness claim is checkable.
+   Timed rows are inspectable, JSON-able and land in the recipe.
+3. *Emit holds into the existing events/labels vocabulary directly?* No — into **windows**, not
+   events. An `Event` is a point defect with a mechanism `kind`; a hold is an interval with an
+   owner. `hold_windows` emits the `{i, start, stop, center}` dicts `events.label_windows`
+   already consumes, so holds join measured attributes without either vocabulary bending.
+
+**Deferred, in the order they are likely worth having:**
+
+1. **`gate` and `relax`** — a turn-on slew and a settle toward another strength. Both are
+   elements that vary *during* an interval, which is the one assumption the closed form rests
+   on, so they belong with the time-stepped tier (#72 item 2). Refused by name today, with the
+   staircase-of-`g`-events workaround in the message.
+2. **`src` as a named shape or a caller-supplied waveform** rather than a level. Same reason:
+   a time-varying source is #72 item 5's ZOH recurrence.
+3. **A driver state emitted back out as an event/label**, so a contention or a hand-over the
+   solve found shows up in the label table without the caller having inferred it from the
+   holds. Related to #72 item 4.
+4. **Per-agent `rest` rows.** Today `schedule(rest=True)` seeds every agent's settled state at
+   t=0 and `rest=False` seeds none. An agent that wants a different initial row than its
+   settled one has to say so in the net description instead.
+
+**Not planned, deliberately:** protocol encoders, traffic and gap generators, fault injection
+and parameter priors. Caller code — `examples/i2c_bus.py` is the worked pattern, and the
+boundary is the one `CONTRIBUTING.md` already draws for patterns.
+
 ## Known limitations and claim boundaries
 
 Keep these statements synchronized with user-facing documentation:
@@ -620,6 +661,7 @@ branches.
 | #58–61 | `read_touchstone` records a file's own reference impedance (`# ... R <z0>`, or a Touchstone 2.0 `[Reference]` block); `write_touchstone`/`touchstone_channel` can state or renormalize to a system impedance via the standard closed-form transform; `sparam.check_response(freqs, S)` reports passivity (max singular value) and a precursor-energy fraction as a causality diagnostic, leaving samples alone; `sparam.measured(..., left=, right=)` takes a 4-port (or wider) measured file as a differential cascade SECTION via its mixed-mode SDD block, so a chain of these composes exactly like a chain of 2-port sections; `sparam.stub(...)` adds an open/short transmission-line stub as its own lossless, reciprocal cascade section (`"stub"` in a declarative `Signal.cascade(path=[...])`) |
 | #62 | `read_mdif` reads one well-documented MDIF (`.mdf`) dialect -- `BEGIN`/`END` blocks, each a full S-matrix sweep at one point of an outer VAR sweep (a stub length, a Z0) -- into an `MdifSweep` (`.freqs`, `.S`, `.axes`); `.select(**kwargs)` names one sweep point and returns `(freqs, S)`, ready for `sparam_channel`'s own slicing. An unrecognised column layout (MA/dB pairs, an unstated dialect) or a mismatch between blocks (VAR names, frequency axis, port count) raises rather than guessing |
 | performance | A benchmark suite (`tools/benchmark.py`) gated on peak memory and on SCALING rather than wall time, wired into per-PR CI. `resample_at` -- reached by `acquire`, `sample_clock`, `dcd` and `shift`, so most instrument chains pay it -- rewritten as a polyphase table gather with a sliding-window view: 2.7x faster and 3.3x -> 1.3x the record in peak memory, agreeing to 1.6e-15. `_min_phase_H` no longer builds the magnitude mirror, the complex cepstrum or the folding weight vector: every chain 8.5x -> 6.0x the record. An opt-in `method="auto"/"overlap"` block path for `lossy`/`sparam`/`cascade` takes a channel to 1.2x the record, recorded in the recipe because the two paths differ by 1e-5 (a behaviour change by the byte-identity gate's own band, not round-off). Net on a full instrument chain: 603 -> 303 ms and 8.5x -> 6.0x memory by default, 1.2x with the block path |
+| #73 | A scenario layer over the shared net: `Hold(who, t0, t1, **tag)` says who was on the net and when, `Agent(during, after, lead, lag, then, unless)` says what being on it does, and `scenario.schedule` compiles the two into the net's event list -- pure, deterministic and JSON-able, adding no physics. `merge_holds` unions an agent's touching holds (consecutive identical bits are one hold, tolerating the float-noise case where `t0 + i*dt + dt` and `t0 + (i+1)*dt` differ in the last bit), and `hold_windows` turns the same list into `events.label_windows` input, so the thing that produced the waveform is the thing that labels it. A release reaction is all-or-nothing over its whole window, because half a settling sequence parks the thing it was settling in its intermediate state permanently; the t=0 rest row is the agent SETTLED (`after` with the reaction applied), which for a switch that stays closed then opens is the opposite of `after`. Solver events gained `g` (siemens; zero IS an open) and `src` (a driver's level), while `gate`/`relax` are refused by name as time-varying elements. `examples/i2c_bus.py` is the worked caller layer: an I2C write across a 3.3 V/1.8 V MOSFET translator, ~40 lines of protocol, finding t_r = 1209 ns against the 300 ns Fast-mode limit and R_ds(on) eating 90 % of the high side's V_OL budget |
 | #72 (tier 1) | A shared net as one channel stage: several drivers, switched terminations and one solve, where a `cascade` is a series 2-port chain with one source and one probe. Nodes, rails, lumped R/C, Thevenin drivers with a scheduled output conductance, and a schedule of absolute-time events against stable ids, all plain JSON so a protocol or fault generator can produce one. EXACT rather than integrated: between events the network is constant and the symmetric generalised eigenproblem gives it in closed form, so there is no step size, no guard time and no accuracy that decays over a long record. `physics.open_drain_line` is reproduced to 2.2e-15 and a two-node coupled net with a switched termination agrees with an independently-written RK45 integrator to 5.9e-12 |
 | #63 | `Signal.sparam(..., z0=...)` now forwards the reference-impedance renormalization `touchstone_channel` already offered directly -- it was being silently dropped on the composable path, the same class of bug #57 fixed for `ports`. Recorded in the recipe; omitting it is unchanged |
 | long-record performance | MEASURED end to end at 4.2 M samples, output bit-exact or within 1.4e-15: an instrument chain 0.400 -> 0.250 s and 614 -> 381 MB, a jitter/supply chain 2.278 -> 0.879 s and 682 -> 389 MB. `lfsr` jumps over GF(2) instead of stepping per bit (738 -> 18 ms at 4 M, uniform across PRBS7..31, bit-exact, and `phase` becomes log(phase)); `resample_at` factors its kernel weights into a polyphase table and takes its normaliser from a phase table (~3.4x, ~1e-15); `_min_phase_H` stops building three record-length temporaries and can return the rfft half; `apply_transfer(method=)` offers an overlap-save block path (1.5x, 5.0x -> 1.1x peak) as a RECORDED choice rather than a default, because it differs by 7.7e-5 of peak-to-peak; `dataset()` streams records into the output array instead of collecting them (3.0x -> 1.2x the array) and reuses minimum-phase responses across the batch (`physics.response_cache`, 1.28x, bit-exact). `tools/benchmark.py` + a CI gate on peak memory and the SCALING RATIO t(2n)/t(n), which divides the runner's speed out. Two things measured and NOT taken: `probe_loading`'s circular pole (linear costs 0.05 dB and 1.4 deg across the whole record to fix a wrap confined to ~5 time constants at its head -- see #58) and reduced-rate processing after band-limiting |

@@ -2177,6 +2177,52 @@ check("two drivers contending settle to the conductance-weighted average, not to
       f"strong 20 ohm at 0 V against weak 200 ohm at {_nvdd} V -> {float(_ncont[-1]):.6f} V, "
       f"closed form {_nwant2:.6f} V (the strong driver wins but does not win outright)")
 
+# ---- the scenario layer on top of it: holds + agents -> that schedule (GitHub #73) ----
+# This layer adds no physics, so the claim is that it is a faithful TRANSCRIPTION: the same
+# events a careful person would have written, and therefore the same samples.
+from wfmsynth import scenario as _SC
+
+_sh = [_SC.Hold("a", 1.0e-6, 2.0e-6, bit=0), _SC.Hold("a", 2.0e-6, 3.0e-6, bit=1)]
+_sa = {"a": _SC.Agent(during={"d0": "driving"}, after={"d0": "hiz"}, lead=5e-8, lag=1e-7)}
+_sev = _SC.schedule(_sh, _sa)
+_sgot = _NET.solve(_nspec, fs=_nfs, n=_nn, probes="bus", schedule=_sev)
+_shand = _NET.solve(_nspec, fs=_nfs, n=_nn, probes="bus", schedule=[
+    {"t_s": 0.0, "id": "d0", "state": "hiz"},
+    {"t_s": 0.95e-6, "id": "d0", "state": "driving"},
+    {"t_s": 3.1e-6, "id": "d0", "state": "hiz"}])
+check("a compiled scenario IS the hand-written schedule -- bit for bit, not to a tolerance",
+      np.array_equal(_sgot, _shand) and len(_sev) == 3,
+      f"two abutting holds merged to one interval, widened by lead 50 ns and lag 100 ns -> "
+      f"{len(_sev)} events; max |compiled - hand-written| = "
+      f"{float(np.abs(_sgot - _shand).max()):.2e} V")
+
+# Two events at one instant are ONE configuration change. Applied in sequence instead, a
+# hand-over passes through a moment with nobody driving, and that is worth real volts.
+_shandover = {"nodes": ["bus"], "rails": {"vdd": _nvdd},
+              "elements": [{"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": _ncb}],
+              "drivers": [{"id": "p", "node": "bus", "volts": 0.0, "ohm": _nrs},
+                          {"id": "q", "node": "bus", "volts": 0.0, "ohm": _nrs,
+                           "state": "hiz"}]}
+_soff = {"t_s": 1e-6, "id": "p", "state": "hiz"}
+_son = {"t_s": 1e-6, "id": "q", "state": "driving"}
+_sfwd = _NET.solve(_shandover, fs=_nfs, n=3000, probes="bus", schedule=[_soff, _son])
+_srev = _NET.solve(_shandover, fs=_nfs, n=3000, probes="bus", schedule=[_son, _soff])
+check("events sharing a sample are applied as one step, so a hand-over has no order and no seam",
+      np.array_equal(_sfwd, _srev) and float(np.ptp(_sfwd)) < 1e-12,
+      f"both listings identical; total excursion across the hand-over "
+      f"{float(np.ptp(_sfwd)):.2e} V (a sequenced application would leave the node floating "
+      f"for one step and ring)")
+
+# A released driver is REMOVED from the stamp, so its parked level cannot pull the node.
+_spark = {"nodes": ["bus"], "rails": {"vdd": _nvdd},
+          "elements": [{"id": "rp", "kind": "r", "a": "bus", "b": "vdd", "ohm": _nrp},
+                       {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": _ncb}],
+          "drivers": [{"id": "d0", "node": "bus", "volts": -7.5, "ohm": _nrs, "state": "hiz"}]}
+check("a hi-Z driver's level is absent from the solve, not merely small",
+      np.array_equal(_NET.solve(_spark, fs=_nfs, n=1000, probes="bus"),
+                     _NET.solve(_nspec, fs=_nfs, n=1000, probes="bus")),
+      "a driver parked at -7.5 V while released gives the same samples as one parked at 0 V")
+
 check("a lead-in extent STATED in closed form scales with the physics it came from (open_drain: "
       "5 tau is proportional to Rp and to Cb)",
       _l1 > 0 and abs(_lstated(1770.0, 400e-12) / _l1 - 2.0) < 0.02

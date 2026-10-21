@@ -65,7 +65,7 @@ __version__ = _read_version()
 
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
-               acquire, patterns, quinary, hdf5, capture, net)
+               acquire, patterns, quinary, hdf5, capture, net, scenario)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -119,6 +119,9 @@ from .quinary import (encode_8b1q4, quartet_subsets, quartet_constellation, quin
                       test_mode_symbols, QUINARY_SYMBOLS, PARTIAL_RESPONSE_TAPS,
                       CLAUSE_40_BUDGET, SYMBOL_RATE_BD)
 from .bus import open_drain, combine_drivers, uart_frame, uart_decode
+# `scenario.schedule` is NOT re-exported at package level: `ws.schedule` reads as a verb
+# with no object, and the word is already taken by the net op's own `schedule=`.
+from .scenario import Hold, Agent, merge_holds, hold_windows
 from .acquire import AcquisitionProfile, acquire_record, record_decimation
 
 __all__ = [
@@ -130,7 +133,8 @@ __all__ = [
     # `resample` holds the interpolation kernel `physics` and `instrument` share. All three
     # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
     # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
-    "capture", "hdf5", "resample", "net",
+    "capture", "hdf5", "resample", "net", "scenario",
+    "Hold", "Agent", "merge_holds", "hold_windows",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "combine_drivers", "uart_frame", "uart_decode",
     "dc_balanced", "scramble_64b66b", "running_disparity", "max_run",

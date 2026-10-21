@@ -306,6 +306,57 @@ None of these add a protocol name: a wired-AND second sink is `open_drain(second
 apply (amplitude, tau, clamp voltage) is the caller's own registry — the same rule a PRBS
 polynomial already follows.
 
+## A shared bus, and the protocol layer you write above it
+
+`open_drain` is a one-line bus. When several parties share one net and hand it over —
+turnaround, contention, a weaker driver holding a level, a switched termination, a level
+translator — use `Signal.net()`. It is a channel-rank op that solves a whole lumped R/C
+network in closed form between switching events, so there is no step size and no accuracy that
+decays over a long record.
+
+Writing its event schedule by hand does not scale past one net. `wfmsynth.scenario` is the
+layer that produces it:
+
+```python
+from wfmsynth.scenario import Hold, Agent, merge_holds, hold_windows
+
+holds  = [Hold("host", 1e-6, 2.5e-6, field="addr", bit=0), ...]   # who was on the net, when
+agents = {"host": Agent(during={"pad_h": "driving"},              # what being on it DOES
+                        after={"pad_h": "hiz"}, lead=20e-9, lag=60e-9)}
+x = sig.net(**bus, holds=[h.to_dict() for h in holds],
+            agents={k: a.to_dict() for k, a in agents.items()}, probe="bus").waveform()
+labels = hold_windows(holds, fs, n)        # -> events.label_windows, carrying `who` + tags
+```
+
+The division of labour is the point, and it is the same boundary the pattern registry draws:
+
+```
+bytes --> [ YOUR protocol encoder ] --> holds --> [ scenario ] --> events --> [ net ] --> volts
+                  caller code                       library           library
+```
+
+The encoder knows start conditions and acknowledge slots and nothing about volts. The agents
+know about output stages and nothing about the protocol. **Do not look for `i2c()`, `spi()` or
+`can()` — they are deliberately absent**, like `nrz_prbs31_per_annex_C()`: which bits a standard
+puts on a wire has a revision date and a document behind it. Write the ~40-line encoder;
+`examples/i2c_bus.py` is a complete worked one (I2C across a 3.3 V/1.8 V MOSFET level
+translator) and is the file to copy from.
+
+Things that bite:
+
+- **Size the grid from the fastest MODE on the board, not from the bit rate.** A 60 ohm switch
+  between two bus capacitances is a nanosecond-scale redistribution on a microsecond-scale bus.
+  The solver warns when a mode finishes inside one sample — the levels stay exact, but an edge
+  measured off that record is the grid's.
+- **Merging is required.** Consecutive identical bits abut, so without `merge_holds` the bus
+  releases and re-acquires at every bit boundary.
+- **The holds are the labels.** A fault is an edit to the holds, which makes the edit its own
+  label — there is no second list to keep in step.
+- **Hand-overs need no rule.** Two agents holding at once are two parallel drivers; events on
+  one sample are applied as one configuration change, so there is no moment with nobody driving.
+- Lumped R and C only in this tier. Transmission lines, S-parameter blocks inside a net,
+  sub-nets, inductors and voltage-dependent laws are deferred — `BACKLOG.md` has the order.
+
 ## Writing records out
 
 There is no archive writer in this library — it produces waveforms, and the container is yours.

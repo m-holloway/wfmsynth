@@ -12,9 +12,54 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
-## Unreleased
+## 0.43.0 — 2026-10-20
+
+Two additions that belong together: a shared net (#72) and the layer that writes its schedule
+(#73). One entry under **Changed output**, and it can only reach a recipe rendered from `main`
+after 2026-10-19 — `net` itself has never been in a tagged release.
 
 ### Added
+
+- **`wfmsynth.scenario` — a scenario layer over the shared net: holds, agents, guarded
+  reactions** (#73). `net`'s schedule of `{"t_s", "id", "state"}` is the right interface for a
+  solver and the wrong one to write by hand. This is the layer between, and it adds no
+  electrical physics — it emits the events a careful person would have written.
+
+  - `Hold(who, t0, t1, **tag)` — an agent on the net over an interval, with free-form tags.
+  - `Agent(during, after, lead, lag, then, unless)` — a party configured by *behaviour*:
+    its turn-on and idle rows, how far each precedes or follows the logic edge, a release
+    reaction, and whose holds suppress that reaction because the net changed hands rather
+    than being released.
+  - `schedule(holds, agents)` — pure, deterministic, JSON-able.
+  - `merge_holds` — unions an agent's touching holds, so consecutive identical bits are one
+    hold rather than a release and re-acquire at every bit boundary.
+  - `hold_windows` — the same hold list as `events.label_windows` input, so the thing that
+    produced the waveform is the thing that labels it and a fault injected by editing the
+    holds labels itself.
+  - `Signal.net(holds=, agents=)` takes the authored pair and compiles it; the recipe stores
+    *that* rather than the events it expands to.
+
+  Two semantics worth knowing. A release reaction is all-or-nothing, decided over its whole
+  window: half of a settling sequence would park the thing it was settling in its intermediate
+  state permanently. And the `rest` row seeded at t=0 is the agent *settled* — `after` with the
+  reaction applied — not `after` alone, which for a switch that stays closed and then opens is
+  the opposite state.
+
+- **Protocol layers are caller code, and there is now a worked one.**
+  [`examples/i2c_bus.py`](examples/i2c_bus.py) writes a byte to an I2C target across a
+  3.3 V/1.8 V MOSFET level translator: a ~40-line encoder that knows I2C and nothing about
+  volts, over agents that know about output stages and nothing about I2C. It finds a real
+  result — the loaded 1.8 V side rises in 1209 ns against the 300 ns Fast-mode limit, and
+  R<sub>ds(on)</sub> at V<sub>gs</sub> = 1.8 V eats 90 % of the 3.3 V side's V<sub>OL</sub>
+  budget. No `i2c()` function was added and none will be: which bits a standard puts on a wire
+  has a revision date behind it, the same boundary the pattern registry draws.
+
+- **`net` schedule events take `g` and `src`.** `g` is a conductance in siemens (zero *is* an
+  open, so strength and state cannot disagree) and `src` a driver's Thevenin level in volts, so
+  a weaker driver taking over from a stronger one is two drivers at two strengths. `gate` (a
+  turn-on slew) and `relax` (settling toward another strength) are refused *by name* with what
+  to do instead, rather than ignored: both are elements that vary *during* an interval, which
+  is the one assumption the closed form rests on.
 
 - **`Signal.net(...)` and `wfmsynth.net` — a shared net as one channel stage** (#72, tier 1).
   Several drivers hand over through hi-Z, terminations and pull-ups switch on a schedule, and a
@@ -33,6 +78,21 @@ samples is called out explicitly under **Changed output** below.
 
   Lumped R and C only in this tier; transmission lines, S-parameter blocks, sub-nets, nonlinear
   laws and event emission are deferred, with the order and reasoning in `BACKLOG.md`.
+
+### Changed output
+
+- **`net` placed a scheduled event one sample late, depending on float representation.**
+  `2.5e-6 * 1e8` is `250.00000000000003`, so a generated schedule (`t0 + i*dt`, the normal
+  case) had edges landing on either side of a sample boundary according to how the generator
+  accumulated. `net.sample_at` now snaps a time within a billionth of a sample onto the
+  boundary, and `scenario.hold_windows` uses the same rule — so a hold's label window and the
+  instant the solver switched are the same sample rather than neighbours.
+
+  Recorded in `compose.NUMERIC_CHANGES`, so replaying an affected recipe says so. This is
+  listed under *Changed output* rather than *Fixed* because it moves samples, which is what a
+  consumer scanning this file is looking for — but the blast radius is small: `net` has never
+  been in a tagged release, so only a recipe rendered from `main` between 2026-10-19 and the
+  next release can carry it, and the shift is one sample at the odd switching instant.
 
 ## 0.42.0 — 2026-09-25
 

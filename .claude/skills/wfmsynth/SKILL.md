@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus or an instrument, or reproduce a waveform from a recipe.
-version: 3
+version: 4
 ---
 
 # wfmsynth
@@ -38,6 +38,12 @@ before writing code. This file is the shape of the thing and the mistakes that c
 
 Order is physical. A band limit before the sampler is a measurement; after it, an artefact. A
 defect placed upstream of a filter that removes it produces a label with no signal behind it.
+
+A chain is a SERIES path with one source and one probe. When several parties share one net and
+hand it over — a bus, a backplane, a level translator — that has no expression as a chain:
+`Signal.net()` solves the whole network, and `wfmsynth.scenario` compiles its schedule from
+"who held the net when". The protocol above it is yours to write (`examples/i2c_bus.py` is a
+worked one); see `REFERENCE.md`.
 
 `ws.IMPAIRMENTS` and `ws.PATTERNS` list what exists; `Signal.stage_kinds()` says which stage each
 op in a chain belongs to.
@@ -176,6 +182,12 @@ was asked for.
     the same visible clamp `physics.resolve_rise_time` gives every UI-fraction edge in this
     library (`carrier(tr_frac=...)`). `tr_s`/`tr_frac` here are absolute or a fraction of the
     RECORD, not of a UI, but the floor and the warning are the same mechanism.
+
+18. **On a shared net, size the grid from the fastest MODE, not the bit rate.** A 60 ohm
+    switch between two bus capacitances is a nanosecond redistribution on a microsecond bus —
+    three decades apart, and a bit-rate-derived grid measures none of it. `Signal.net()` says
+    so rather than returning a staircase. The same rule as #4, but the fast thing is no longer
+    the edge you asked for.
 
 ## Where the boundary sits
 

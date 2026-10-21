@@ -211,7 +211,11 @@ legacy array-warp workflows but should not be the default for a new physical cha
    [`examples/confounder_sweep.py`](examples/confounder_sweep.py).
 4. **Check realism:** [`examples/sim_to_real.py`](examples/sim_to_real.py) — find features
    that separate synthetic from measured data.
-5. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
+5. **Build a layer on top:** [`examples/i2c_bus.py`](examples/i2c_bus.py) — an I2C write
+   across a level translator, where a ~40-line protocol encoder you write produces *holds*
+   and this library turns them into volts and labels. The shape to copy for any shared bus;
+   the library deliberately takes no position on the protocol itself.
+6. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
    samples/UI, two-rate acquisition, and localized events (needles in a long record)
    are indexed in [`examples/README.md`](examples/README.md).
 
@@ -222,7 +226,7 @@ legacy array-warp workflows but should not be the default for a new physical cha
 | Composition and units | `compose`, `grid`, `streams` | `Signal`, recipes, deterministic factor streams, contrastive pairs |
 | Sources and effects | `physics`, `capture`, `impairments`, `events`, `grammar` | Digital/RF/analog/CMOS sources, a real capture from disk, channels, reflections, jitter, named faults, localized needles (incl. a generic clamped-exponential rail transient), broad shape generation |
 | Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, a probe pack (loading, compensation, ground-lead ring, termination, AC coupling, overload recovery), scope/ADC effects, segmented PAM4 datasets |
-| Links and systems | `rx`, `cdr`, `sparam`, `net`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, shared nets (several drivers, switched terminations), multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |
+| Links and systems | `rx`, `cdr`, `sparam`, `net`, `scenario`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, shared nets (several drivers, switched terminations) and the scenario layer that schedules them from "who held the net when", multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |
 | Dataset quality | `measure`, `sweep`, `simreal` | Measured labels, confounder control, synthetic-vs-real separability |
 | Scale and trust | `stream`, `validate` | Bounded-memory channel processing and physical-property assertions |
 | Long-record performance | `tools/benchmark.py`, `response_cache` | A benchmark suite gated in CI on peak memory and the scaling ratio `t(2n)/t(n)`; `apply_transfer(method="overlap")` for a block path that holds ~1.1x the record instead of ~5x; `response_cache()` to reuse a channel's minimum-phase response across a batch (`dataset()` already does) |

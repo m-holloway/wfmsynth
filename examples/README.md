@@ -91,7 +91,28 @@ non-zero on any mismatch **and on having verified nothing**, so a document that 
 digests cannot pass by accident. Its docstring is also the shortest tour of the chain
 (bits → coding → symbols → levels → waveform → instrument) and of which op sits where.
 
-### 6. Specialist topics
+### 6. Build a protocol layer on top
+
+[`i2c_bus.py`](i2c_bus.py) is the one example that is mostly *not* this library. It shows the
+shape of the layer you write above it:
+
+```
+bytes --> [ your protocol encoder ] --> holds --> [ scenario ] --> events --> [ net ] --> volts
+                 ~40 lines, yours                    library            library
+```
+
+An I2C host writes a byte to a 1.8 V target through a MOSFET level translator. The encoder
+knows start conditions and acknowledge slots and nothing about electricity; the agents know
+about output stages and nothing about I2C. Neither knows about the other, so the same encoder
+drives a different board by editing a dict, and the same board runs a different bus by swapping
+the encoder.
+
+It is a worked example rather than a module on purpose. Which bits a standard puts on a wire
+has a revision date and a document behind it, so it belongs in your code — the same boundary
+the pattern registry draws. What the library provides is the hooks: a shared net, a scenario
+compiler, and holds that are simultaneously the stimulus and the labels.
+
+### 7. Specialist topics
 
 | Example | Use it when |
 |---|---|
@@ -100,6 +121,7 @@ digests cannot pass by accident. Its docstring is also the shortest tour of the 
 | [`touchstone_channel.py`](touchstone_channel.py) | You have measured `.sNp` channel data or need resonances absent from an analytic model |
 | [`events.py`](events.py) | Rare localized defects (runt, glitch, ring, droop) in a long record, labelled per UI window |
 | [`replay.py`](replay.py) | Rebuilding and verifying a set of records from recipes alone, as a consumer of a handed-over archive |
+| [`i2c_bus.py`](i2c_bus.py) | Several parties share one net — a bus, a backplane, any hand-over — and you need a protocol layer above it |
 | [`analog_instrument.py`](analog_instrument.py) | The source is not a serial link: a bench signal (`carrier("sine"/"cmos"/...)`) or a real capture from disk (`Signal.capture`), taking the same later ops |
 
 ## Choosing a dataset generator
@@ -112,6 +134,7 @@ digests cannot pass by accident. Its docstring is also the shortest tour of the 
 | Broad, protocol-agnostic morphology pretraining | `generate()` |
 | A ready-made segmented PAM4 defect benchmark | `deep_capture()` |
 | Rare needles in a long record, labelled per window | `Signal.events()` + `label_windows()` |
+| Several parties sharing one net, labelled by who drove | `scenario.Hold`/`Agent` + `Signal.net()` |
 
 `deep_capture()` and `generate()` are specialized dataset presets. For a new system model,
 prefer a `Signal` recipe so the physical stages and their ordering are explicit.

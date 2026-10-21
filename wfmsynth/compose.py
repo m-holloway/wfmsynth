@@ -943,9 +943,17 @@ def _op_net(x, p, streams, grid, idx):
     piecewise-constant between events and keeps its closed-form solution. A driver whose VOLTAGE
     follows the waveform is a time-varying source and is deferred with the rest of the
     nonlinear tier; see `wfmsynth/net.py`."""
-    from . import net as NET
+    from . import net as NET, scenario as SC
     spec = {k: p[k] for k in ("nodes", "rails", "elements", "drivers") if k in p}
     sched = list(p.get("schedule", []) or [])
+    # `holds` + `agents` are the compact, authored form (see `wfmsynth/scenario.py`); the recipe
+    # stores THEM rather than the events they expand to, so what is recorded is what was meant.
+    # Precedence at one sample is follow, then scenario, then an explicit schedule -- and since
+    # the solver applies same-sample events as one step, this only decides who wins a direct
+    # contradiction on one id.
+    if "holds" in p or "agents" in p:
+        sched = SC.schedule(p.get("holds", ()), p.get("agents", {}),
+                            rest=p.get("rest", True)) + sched
     follow = p.get("follow")
     if follow is not None:
         sched = NET.schedule_from_waveform(x, follow, on_when=p.get("on_when", "high")) + sched
@@ -1968,17 +1976,34 @@ class Signal:
                  drivers=[{"id": "d0", "node": "bus", "volts": 0.0, "ohm": 20.0, "state": "hiz"}],
                  follow="d0")                       # the carrier drives d0's state
 
-        params: nodes, rails, elements, drivers, schedule, probe, follow, on_when.
+        params: nodes, rails, elements, drivers, schedule, holds, agents, rest, probe, follow,
+        on_when.
 
         `follow` names the driver whose STATE the incoming waveform sets, thresholded at the
         midpoint of its own excursion -- `open_drain_line`'s rule, and with one node and one
         driver this op reproduces that function to 2.2e-15 (pinned in `tests/test_net.py`).
         `schedule` is a plain list of `{"t_s", "id", "state"}` events in ABSOLUTE seconds, so a
         protocol, traffic or fault generator can produce one without this op knowing about it.
+        An event may also carry `g` (conductance, siemens) or `src` (a driver's level, volts).
+
+        `holds` + `agents` are that schedule's AUTHORED form -- "who held the net when", and
+        what holding it does -- compiled by `wfmsynth.scenario.schedule`. The recipe stores the
+        compact pair rather than the events, so what is recorded is what was meant, and the
+        same hold list is the label (`scenario.hold_windows`). Several parties holding at once
+        need no special case: they are parallel drivers, which the solve already resolves.
 
         Exact, not integrated: between events the network is constant and is solved in closed
         form, so there is no step size and no accuracy that decays over a long record. Lumped R
         and C only in this tier -- see `wfmsynth/net.py` for what is deferred and why."""
+        # `Hold` and `Agent` are convenient to author and are not JSON. A recipe is provenance
+        # only if it serialises, so they are flattened HERE, on the way in, rather than left to
+        # fail at `json.dumps` time in whatever wrote the archive.
+        from . import scenario as SC
+        if "holds" in params:
+            params["holds"] = [SC.Hold.from_dict(h).to_dict() for h in params["holds"]]
+        if "agents" in params:
+            params["agents"] = {str(k): SC.Agent.from_dict(v).to_dict()
+                                for k, v in dict(params["agents"]).items()}
         return self._add("net", **params)
 
     def reflect(self, **params):
@@ -2428,6 +2453,13 @@ NUMERIC_CHANGES = (
      "the sign convention was inverted so that NEGATIVE db means de-emphasis, matching how "
      "every specification quotes it (#53). A recipe written before 0.41.0 with a positive `db` "
      "asked for de-emphasis and now renders as PRE-emphasis; negate it to preserve the intent."),
+    ("0.43.0", "net",
+     "a schedule event is placed by snapping its time onto a sample boundary it is within a "
+     "billionth of a sample of, instead of a bare ceil (#73). A GENERATED schedule -- `t0 + "
+     "i*dt`, the normal case -- has times like 250.00000000000003 samples, which the old rule "
+     "put one sample late depending on how the generator accumulated. Affected recipes shift "
+     "the odd switching instant by one sample; `net` was never in a tagged release, so this "
+     "can only reach a recipe rendered from main between 2026-10-19 and 0.43.0."),
 )
 
 

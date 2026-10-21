@@ -497,3 +497,65 @@ and the solver says so rather than letting you measure the grid.
 
 **This tier is lumped R and C.** Transmission lines, S-parameter blocks inside a net, sub-nets,
 voltage-dependent laws and event emission are deferred — see `BACKLOG.md` for the order.
+
+## Scenario layer: who held the net when (holds, agents, labels)
+
+A schedule of `{"t_s", "id", "state"}` is the right interface for a solver and the wrong one to
+write by hand. `wfmsynth.scenario` is the layer between: **holds** say who was on the net and
+when, **agents** say what being on it does, and `schedule()` compiles the two into the net's
+event list. It adds no physics — it emits the events a careful person would have written.
+
+```python
+from wfmsynth.scenario import Hold, Agent, merge_holds, hold_windows
+
+holds = [Hold("host", 1.0e-6, 2.5e-6, field="addr", bit=0),   # tags are free-form
+         Hold("host", 2.5e-6, 4.0e-6, field="addr", bit=1),   # abuts: ONE hold after merging
+         Hold("target", 3.9e-6, 5.0e-6, field="ack")]         # overlaps -> a hand-over
+
+agents = {
+    "host":   Agent(during={"pad_h": "driving"}, after={"pad_h": "hiz"},
+                    lead=20e-9, lag=60e-9),       # the output stage leads and lags the logic
+    "target": Agent(during={"pad_t": "driving"}, after={"pad_t": "hiz"},
+                    lead=20e-9, lag=60e-9),
+}
+
+x = sig.net(**bus, holds=[h.to_dict() for h in holds],
+            agents={k: a.to_dict() for k, a in agents.items()}, probe="bus").waveform()
+```
+
+- **`lead` / `lag`** are device properties, not protocol: an output stage conducts before the
+  logic edge that asked for it and after the one that released it. Keeping them on the agent is
+  what lets the same encoder drive a different board.
+- **Merging is required, not an optimisation.** Consecutive identical bits abut, and without
+  `merge_holds` the bus would release and re-acquire at every bit boundary — seven spurious
+  edges inside a byte. It tolerates the float-noise case, where `t0 + i*dt + dt` and
+  `t0 + (i+1)*dt` are the same instant and differ in the last bit.
+- **A hand-over needs no special case.** Two agents holding at once are two parallel drivers,
+  which the nodal solve resolves. Events landing on one sample are applied as *one*
+  configuration change, so a hand-over never passes through a moment with nobody driving.
+- **`then` is a release reaction** — `(dt, id, state)` rows after the agent lets go, for a
+  switch that keeps conducting for a while or a stage that settles. **`unless`** names agents
+  whose holds suppress it: the net changed hands rather than being released. The whole reaction
+  is suppressed together, so `after` must be a complete idle row on its own.
+- **The holds are also the labels.** `hold_windows(holds, fs, n)` produces the window dicts
+  `events.label_windows` consumes, carrying `who` and every tag. One list made the waveform and
+  describes it, so they cannot disagree — and a fault injected by editing the holds labels
+  itself.
+
+An event may also set `g` (conductance in siemens, where zero *is* an open) or `src` (a driver's
+Thevenin level in volts), so a weaker driver taking over from a stronger one is two drivers at
+two strengths. A quantity that varies *during* an interval (`gate`, a turn-on slew; `relax`,
+settling) is refused by name — that is a time-varying element, which is what the closed form
+rules out — with the staircase of `g` events to use instead.
+
+**[`examples/i2c_bus.py`](../examples/i2c_bus.py) is the worked example**: an I2C write across a
+3.3 V / 1.8 V MOSFET level translator, with a ~40-line protocol encoder that knows nothing about
+volts and agents that know nothing about I2C. It finds a real result — the loaded 1.8 V side
+rises in 1209 ns against a 300 ns Fast-mode limit, and the translator's R<sub>ds(on)</sub> eats
+90 % of the 3.3 V side's V<sub>OL</sub> budget.
+
+**The protocol layer is deliberately not in this library.** Encoders, traffic and gap
+generators, fault injection and parameter priors are caller code — plain classes returning a
+list of holds. Which bits a standard puts on a wire has a revision date and a document behind
+it; "an agent held the net and its output stage turned on early" does not. Same boundary as the
+pattern registry: mechanisms here, standards knowledge yours.
