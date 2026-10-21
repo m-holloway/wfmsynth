@@ -336,12 +336,21 @@ def test_the_docstring_teaches_the_chain():
         assert op in doc, f"the docstring must say where the {op!r} op sits"
 
 
+@pytest.mark.skipif(not hasattr(sys, "stdlib_module_names"),
+                    reason="sys.stdlib_module_names is 3.10+; this project still supports 3.9, "
+                           "and the property being checked is a property of the FILE rather "
+                           "than of the interpreter, so the 3.10+ legs of the matrix cover it")
 def test_the_replayer_imports_nothing_but_this_library_and_the_standard_one():
     """THE STANDALONE PROPERTY, gated rather than asserted in prose. The file ships next to an
     archive, so anything it imports is something the consumer must also have. numpy is in
     because this library requires it; every other name must be the standard library or this
     library itself. An `import` naming a sibling project is what this catches, and it catches
-    it without needing to know that project's name."""
+    it without needing to know that project's name.
+
+    The allowed set is whichever Python is running, which is the PERMISSIVE direction: a module
+    that is stdlib in 3.12 but not in 3.9 would pass here and still fail for a 3.9 consumer.
+    Tightening that needs a pinned per-version list, which is not worth carrying for a check
+    whose real job is to catch an `import my_other_project`."""
     allowed = set(sys.stdlib_module_names) | {"wfmsynth", "numpy"}
     tree = ast.parse(open(_REPLAY_PY).read())
     seen = set()
