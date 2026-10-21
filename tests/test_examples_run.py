@@ -15,6 +15,7 @@ The whole file costs about nine seconds.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -50,11 +51,31 @@ CLI_TOOLS = [
 ]
 
 
+# A deliberately SMALL environment, so an example that only works because of something in the
+# developer's shell fails here rather than in a reader's terminal.
+#
+# Windows needs more of it than Unix does. Without SYSTEMROOT, CPython cannot reach the
+# CryptoAPI it seeds hash randomization from and dies before executing a line of the example:
+# "Fatal Python error: _Py_HashRandomization_Init: failed to get random numbers". 3.12 recovers
+# and 3.9 does not, which is why this only ever appeared on the windows/py3.9 leg -- as all
+# fourteen examples failing at once with a message about none of them.
+_WINDOWS_ESSENTIALS = ("SYSTEMROOT", "SystemRoot", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+                       "USERPROFILE", "LOCALAPPDATA", "APPDATA", "NUMBER_OF_PROCESSORS")
+
+
+def _env():
+    env = {"PYTHONPATH": str(ROOT), "HOME": str(Path.home())}
+    if os.name == "nt":
+        env["PATH"] = os.environ.get("PATH", "")
+        env.update({k: os.environ[k] for k in _WINDOWS_ESSENTIALS if k in os.environ})
+    else:
+        env["PATH"] = "/usr/bin:/bin"
+    return env
+
+
 def _run(name, args=()):
     return subprocess.run([sys.executable, str(EXAMPLES / name), *args],
-                          cwd=ROOT, capture_output=True, text=True, timeout=300,
-                          env={"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin",
-                               "HOME": str(Path.home())})
+                          cwd=ROOT, capture_output=True, text=True, timeout=300, env=_env())
 
 
 def test_every_example_is_classified():
