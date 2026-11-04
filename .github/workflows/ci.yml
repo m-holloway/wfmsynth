@@ -59,6 +59,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]   # macOS excluded (dev machine + 10x cost)
         python: ["3.9", "3.12"]
+        # `ubuntu-latest` rolled to Ubuntu 26.04 on 2026-11-04 and setup-python has NO 3.9
+        # build for it -- 3.9 is published for 22.04 and 24.04 only, so that leg could not
+        # install a Python at all and failed before running a test. Do NOT fold this back into
+        # `ubuntu-latest`: this project declares `requires-python >= 3.9`, so the floor has to
+        # be tested on Linux, and the newest image will keep moving away from it.
+        exclude:
+          - os: ubuntu-latest
+            python: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python: "3.9"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
