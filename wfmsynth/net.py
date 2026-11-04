@@ -30,6 +30,27 @@ the network constant BETWEEN events, which is the one thing the closed form belo
 quantity that varies DURING an interval (`gate`, a turn-on slew; `relax`, settling toward
 another strength) is refused by name rather than by silence, with what to do instead.
 
+A DRIVER WHOSE LEVEL IS A WAVEFORM
+----------------------------------
+`sources={"d0": volts_per_sample}` gives a driver a per-sample Thevenin level instead of the
+fixed `volts` in its description -- its own levels, its own edge rate, its own timing
+impairments, one sample per record sample. On a shared net each party usually has a different
+output stage and a different path to the node, and adding their contributions by hand outside
+the solve is where a level held by a driver that has let go gets carried into the next owner's
+baseline. Here it cannot: a released driver is out of the stamp, so its level is absent rather
+than inherited, and what it was holding decays through the elements on the node.
+
+This is still exact. Only `b` moves -- the network itself is constant between events, so the
+eigenbasis is computed once per interval as before and the sampled source is carried through it
+by the zero-order-hold recurrence in `_step_sources`, which is the analytic answer for a source
+held across each sample (`physics.open_drain_line` holds its target the same way). An interval
+whose sources happen not to move is routed back to the closed form, so a constant source array
+reproduces a constant `volts` BIT-FOR-BIT rather than nearly.
+
+The level is volts and the array is numbers, so it does not belong in the net description, which
+has to stay JSON for a recipe. `Signal.net` carries each driver's `source` as a nested spec --
+its own chain -- renders it, and passes the arrays here.
+
 Several drivers may sit on one node. Each conducting one stamps its own conductance and its own
 current, which is the parallel Thevenin combination, so a weaker driver holding a level against
 a stronger one and a hand-over where both are briefly on are ordinary solves, not special cases.
@@ -69,6 +90,10 @@ Transmission lines and S-parameter blocks inside a net, sub-nets, inductors, vol
 (nonlinear) laws, and emitting driver/element intervals as events. A net whose elements are all
 lumped R and C is solved exactly here; the frequency-domain tier earns its place when
 distributed elements arrive, which is the case this one cannot represent at all.
+
+A driver's SOURCE may be a waveform (above); its OUTPUT CONDUCTANCE still may not. A resistance
+that varies within an interval is the one thing the closed form cannot absorb, and it is why
+`gate` and `relax` are refused by name.
 """
 from __future__ import annotations
 
@@ -76,6 +101,7 @@ import warnings
 
 import numpy as np
 from scipy.linalg import eigh
+from scipy.signal import lfilter
 
 GND = "gnd"
 
@@ -102,6 +128,17 @@ _DEFERRED_KEYS = {
     "relax": "settling toward another strength is the same thing: a time-varying element. The "
              "same staircase applies.",
 }
+
+
+# What an element and a driver description may say, per kind. A description is a dict, so a
+# misspelled key would otherwise be accepted and do nothing: a driver written with `ohms=60`
+# falls back to whatever the schedule set, and a capacitor written with a `state` is switched
+# by nobody -- a capacitor is never removed from the stamp, because its charge is the state the
+# solve carries across every switch. As in a recipe op, anything beginning with an underscore
+# is annotation and is ignored.
+_ELEMENT_KEYS = {"r": frozenset({"id", "kind", "a", "b", "ohm", "state"}),
+                 "c": frozenset({"id", "kind", "a", "b", "farad"})}
+_DRIVER_KEYS = frozenset({"id", "node", "volts", "ohm", "state"})
 
 
 def _is_on(state):
@@ -165,13 +202,44 @@ def _check(net):
         raise ValueError(f"net: {GND!r} is the implicit 0 V reference and cannot be a solved node")
     known = set(nodes) | set(rails) | {GND}
     ids = {}
-    for e in list(net.get("elements", [])) + list(net.get("drivers", [])):
+    for e, what in ([(e, "element") for e in net.get("elements", [])]
+                    + [(d, "driver") for d in net.get("drivers", [])]):
         eid = e.get("id")
         if not eid:
             raise ValueError(f"net: every element and driver needs an 'id'; this one has none: {e}")
         if eid in ids:
             raise ValueError(f"net: duplicate id {eid!r}; ids address the schedule and must be unique")
         ids[eid] = e
+        if what == "driver":
+            if "node" not in e:
+                raise ValueError(f"net: driver {eid!r} has no 'node'; a driver drives one node")
+            # an unknown kind is named by `_stamp`, which says what this tier supports, so the
+            # key check falls back to the union rather than pre-empting it with a worse message
+            ok = _DRIVER_KEYS
+        else:
+            if "kind" not in e:
+                raise ValueError(f"net: element {eid!r} has no 'kind'; this tier has 'r' and 'c'")
+            kind = str(e["kind"]).lower()
+            if kind not in _ELEMENT_KEYS:
+                # Named HERE rather than when the element is first stamped: an element the tier
+                # cannot represent is a broken description whether or not the schedule happens
+                # to leave it open, and refusing it only when it conducts means a net with an
+                # inductor parked open renders as though the inductor were not there.
+                raise ValueError(f"net: element {eid!r} has kind {e['kind']!r}; this tier "
+                                 f"supports 'r' and 'c' only (see the module docstring for "
+                                 f"what is deferred)")
+            ok = _ELEMENT_KEYS[kind]
+        for k in sorted(set(e) - ok):
+            if k.startswith("_"):
+                continue                     # annotation, as in a recipe op
+            if k == "source" and what == "driver":
+                raise ValueError(
+                    f"net: driver {eid!r} carries 'source' in its description. A per-sample "
+                    f"level is an ARRAY of volts and the description has to stay JSON for a "
+                    f"recipe, so pass it separately: solve(..., sources={{{eid!r}: volts}}). "
+                    f"Through `Signal.net` a driver's `source` IS a nested spec and is rendered "
+                    f"for you.")
+            raise ValueError(f"net: {what} {eid!r} has unknown key {k!r}; it accepts {sorted(ok)}")
         for key in ("a", "b", "node"):
             if key in e and e[key] not in known:
                 raise ValueError(f"net: {eid!r} references node {e[key]!r}, which is not a solved "
@@ -179,10 +247,19 @@ def _check(net):
     return {nm: i for i, nm in enumerate(nodes)}, rails, ids
 
 
-def _stamp(net, index, rails, state, over=None):
-    """Nodal G, C and b for ONE configuration. `state` maps id -> bool (conducting); `over`
-    maps id -> the schedule's `g` / `src` overrides for it, empty when nothing set any."""
+def _stamp(net, index, rails, state, over=None, sources=None):
+    """Nodal G, C and b for ONE configuration, plus the per-sample injections.
+
+    `state` maps id -> bool (conducting); `over` maps id -> the schedule's `g` / `src`
+    overrides for it, empty when nothing set any. `sources` names the drivers whose level is a
+    waveform: those contribute no constant term to `b` and are returned as
+    `[(node_index, siemens, driver_id)]` for the caller to fold in sample by sample.
+
+    A driver that is not conducting appears in neither, which is the whole point -- its level
+    is absent from the solution rather than carried into it."""
     over = over or {}
+    sources = sources or {}
+    inj = []
     n = len(index)
     G, C, b = np.zeros((n, n)), np.zeros((n, n)), np.zeros(n)
 
@@ -203,9 +280,6 @@ def _stamp(net, index, rails, state, over=None):
             continue
         if not state.get(eid, True):
             continue
-        if kind != "r":
-            raise ValueError(f"net: element {eid!r} has kind {e['kind']!r}; this tier supports "
-                             f"'r' and 'c' only (see the module docstring for what is deferred)")
         ov = over.get(eid, {})
         if "src" in ov:
             raise ValueError(f"net: the schedule sets src={ov['src']!r} on element {eid!r}, but "
@@ -236,8 +310,11 @@ def _stamp(net, index, rails, state, over=None):
         # A hi-Z driver is removed from the stamp entirely, above -- so its level is not
         # "ignored", it is absent, and parking a released driver at some non-rest voltage
         # cannot leak into the solution.
+        if d["id"] in sources:
+            inj.append((i, g, d["id"]))      # its level is a waveform; folded in per sample
+            continue
         b[i] += g * float(ov["src"] if "src" in ov else d["volts"])
-    return G, C, b
+    return G, C, b, inj
 
 
 def _modes(G, C, b, index):
@@ -325,6 +402,44 @@ def _apply_event(ev, state, over):
         over.setdefault(eid, {})["src"] = float(ev["src"])
 
 
+def _step_sources(lam, V, Cm, cur, B, dt):
+    """One interval whose network is constant but whose driver LEVELS move: the exact
+    zero-order-hold solution, evaluated in the modal basis.
+
+    Modal coordinates (v = V z, with V^T C V = I and V^T G V = diag(lam)) turn `C v' = -G v + b`
+    into independent scalars `z' = -lam z + f`, where `f = V^T b`. Holding `f` across one sample
+    -- which is what a SAMPLED source is, and the same hold `physics.open_drain_line` applies to
+    its target -- integrates exactly to
+
+        z[k+1] = exp(-lam dt) z[k] + (1 - exp(-lam dt))/lam * f[k]
+
+    one first-order recurrence per mode, run by `lfilter` rather than by a Python loop over
+    samples. There is no integration error and no step size to choose: `dt` is the grid, and the
+    answer is the analytic response to the source the grid actually carries.
+
+    For a CONSTANT `f` this is algebraically the closed form used for the rest of the module --
+    same fixed point `f/lam`, same decay `exp(-lam dt)` per step -- so the two agree to rounding.
+    `solve` routes a constant interval to the closed form anyway, so the reduction to tier 1 is
+    bit-exact rather than merely close.
+    """
+    a = np.exp(-lam * dt)
+    # -expm1(-x)/x rather than (1 - exp(-x))/x: at lam*dt around 1e-9 that subtraction throws
+    # away most of the mantissa, and this gain is what carries the source into the answer.
+    # lam is positive here (`_modes` refuses a singular G), so the guard is only against an
+    # exact zero arriving from a degenerate configuration.
+    safe = np.where(lam > 0.0, lam, 1.0)
+    gain = np.where(lam > 0.0, -np.expm1(-lam * dt) / safe, dt)
+    F = V.T @ B                                  # modal forcing, one column per sample
+    z0 = V.T @ (Cm @ cur)                        # modal state at the interval's first instant
+    Z = np.empty_like(F)
+    for m in range(lam.size):
+        # zi is the filter's stored state, which for a=[1, -alpha] holds alpha*y[-1]: the
+        # previous interval's final voltage, so continuity across a switch is still the
+        # capacitor voltages carried forward.
+        Z[m] = lfilter([gain[m]], [1.0, -a[m]], F[m], zi=np.array([a[m] * z0[m]]))[0]
+    return (V @ Z).T
+
+
 def _warn_unresolved(lam, dt, seg, warned):
     """Name a mode the grid cannot show. The solve is EXACT either way -- this is the analytic
     solution sampled, not an integration -- but a transient that completes inside one sample is
@@ -349,7 +464,37 @@ def _warn_unresolved(lam, dt, seg, warned):
             RuntimeWarning, stacklevel=3)
 
 
-def solve(net, fs, n, schedule=(), probes=None, v0=None):
+def _prepare_sources(sources, ids, n):
+    """Validate `sources` and return `{driver_id: float array of length n}`."""
+    out = {}
+    for did, arr in dict(sources or {}).items():
+        did = str(did)
+        if did not in ids:
+            raise ValueError(f"net: sources names {did!r}, which is not an element or driver. "
+                             f"Known ids: {sorted(ids)}")
+        d = ids[did]
+        if "node" not in d:
+            raise ValueError(f"net: sources names {did!r}, which is an ELEMENT. A per-sample "
+                             f"level is a DRIVER's Thevenin source; a resistor has none, and "
+                             f"scheduling a resistor's strength is 'g'.")
+        if "volts" in d:
+            raise ValueError(f"net: driver {did!r} has both volts={d['volts']!r} and a rendered "
+                             f"per-sample source. Both are its Thevenin level, so one would be "
+                             f"silently ignored -- drop `volts`, the source is the level.")
+        a = np.asarray(arr, dtype=float)
+        if a.shape != (n,):
+            raise ValueError(f"net: the source for {did!r} has shape {a.shape}, but this record "
+                             f"is {n} samples. A driver's level is a waveform ON THIS GRID, one "
+                             f"sample per record sample -- not a resampled or truncated one.")
+        if not np.all(np.isfinite(a)):
+            bad = int(np.flatnonzero(~np.isfinite(a))[0])
+            raise ValueError(f"net: the source for {did!r} is not finite at sample {bad} "
+                             f"({a[bad]!r}); a Thevenin level has to be a number of volts.")
+        out[did] = a
+    return out
+
+
+def solve(net, fs, n, schedule=(), probes=None, v0=None, sources=None):
     """Solve a switched lumped net on a uniform grid. Returns ``{node: array}``, or one array
     when `probes` names a single node.
 
@@ -361,8 +506,17 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None):
     convention, which makes the one-node case bit-for-bit (pinned in `tests/test_net.py`), and
     it means ``v[0]`` is one step past the initial condition rather than the initial condition.
 
+    `sources` maps a driver id to a per-sample array of VOLTS, length `n`: that driver's
+    Thevenin level is a waveform -- its own levels and its own edge rate -- rather than the
+    fixed `volts` in its description, which it must then not carry. Still exact: only `b` moves,
+    so the eigenbasis is computed once per interval as before and the sampled source is carried
+    through it by a zero-order-hold recurrence (`_step_sources`). An interval across which no
+    conducting source actually moves is routed to the closed form, so a constant source array
+    reproduces a constant `volts` bit-for-bit.
+
     The initial condition is the DC steady state of whatever configuration is in force at t=0,
-    unless `v0` gives node voltages.
+    unless `v0` gives node voltages -- with a source, the steady state of its FIRST sample, so
+    a record does not open on an edge nobody asked for.
     """
     index, rails, ids = _check(net)
     fs, n = float(fs), int(n)
@@ -375,8 +529,15 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None):
         if str(e.get("kind", "")).lower() != "c":
             state[e["id"]] = _is_on(e.get("state"))
 
+    src = _prepare_sources(sources, ids, n)
     for ev in schedule or ():
         _check_event(ev, ids)
+        if "src" in ev and ev["id"] in src:
+            raise ValueError(
+                f"net: driver {ev['id']!r} has a rendered per-sample source AND the schedule "
+                f"sets src={ev['src']!r} on it at t={ev['t_s']}. Both are its Thevenin level. "
+                f"Schedule its CONDUCTANCE instead ('g', or a state): a hand-over is a driver "
+                f"leaving the stamp, not a driver changing level.")
     events = sorted(schedule or (), key=lambda ev: (ev.get("_sample", float(ev["t_s"]) * fs)))
 
     def _at(ev):
@@ -401,19 +562,35 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None):
             _apply_event(events[seg - 1], state, over)
         if bnd <= a:
             continue                             # two events at the same sample: no interval
-        G, C, b = _stamp(net, index, rails, state, over)
-        v_ss, lam, V, Cm = _modes(G, C, b, index)
+        G, C, b, inj = _stamp(net, index, rails, state, over, src)
+        # The conducting source drivers' contribution to b, one column per sample. Their
+        # conductance is part of G and is constant across the interval; only the level moves.
+        S = None
+        if inj:
+            S = np.zeros((len(index), bnd - a))
+            for i, g, did in inj:
+                S[i] += g * src[did][a:bnd]
+            if not np.any(S[:, 1:] != S[:, :1]):
+                # nothing actually moves here -- a held level, an idle interval, or a source
+                # that is constant throughout. Fold it into b and take the closed form, which
+                # is what makes a constant source EQUAL a constant `volts` rather than round
+                # to it. The comparison is exact on purpose: constant means identical bits.
+                b, S = b + S[:, 0], None
+        v_ss, lam, V, Cm = _modes(G, C, b if S is None else b + S[:, 0], index)
         _warn_unresolved(lam, dt, seg, warned)
         if cur is None:
             cur = np.array([float(v0[nm]) for nm in index], float) if v0 else v_ss.copy()
-        # k starts at ONE: sample k records the voltage at the END of its own step, so a
-        # schedule event is first visible on the sample it fires at. That is the convention
-        # `physics.open_drain_line` already uses -- it advances then records -- and matching it
-        # makes the one-node case bit-for-bit rather than off by one. It also means v[0] is one
-        # step past the initial condition, not the initial condition itself.
-        k = np.arange(1, bnd - a + 1)[:, None]
-        z0 = V.T @ (Cm @ (cur - v_ss))
-        seg_v = v_ss + (np.exp(-lam[None, :] * (k * dt)) * z0[None, :]) @ V.T
+        if S is None:
+            # k starts at ONE: sample k records the voltage at the END of its own step, so a
+            # schedule event is first visible on the sample it fires at. That is the convention
+            # `physics.open_drain_line` already uses -- it advances then records -- and matching
+            # it makes the one-node case bit-for-bit rather than off by one. It also means v[0]
+            # is one step past the initial condition, not the initial condition itself.
+            k = np.arange(1, bnd - a + 1)[:, None]
+            z0 = V.T @ (Cm @ (cur - v_ss))
+            seg_v = v_ss + (np.exp(-lam[None, :] * (k * dt)) * z0[None, :]) @ V.T
+        else:
+            seg_v = _step_sources(lam, V, Cm, cur, b[:, None] + S, dt)
         v[a:bnd] = seg_v
         # the state handed to the next configuration is this one evaluated one sample PAST its
         # last, which is the capacitor voltage at the switching instant. Continuity across a

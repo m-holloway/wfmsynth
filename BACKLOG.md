@@ -532,10 +532,11 @@ exact closed-form solution per configuration. `open_drain_line` is reproduced to
    on one net.
 4. **Driver and element state intervals emitted as events**, in the existing events vocabulary,
    so a labelled defect can have a physical origin.
-5. **A driver whose VOLTAGE follows the incoming waveform.** Tier 1 follows a driver's STATE
-   (thresholded, so the net stays piecewise-constant and keeps its closed form). A
-   voltage-following driver is a time-varying source: tractable as a zero-order-hold recurrence
-   `v[k+1] = P v[k] + q0 + q1 x[k]`, but per-sample rather than per-interval.
+5. ~~**A driver whose VOLTAGE follows the incoming waveform.**~~ **DELIVERED** — see the
+   section below. It was indeed the zero-order-hold recurrence predicted here, but in the
+   modal basis rather than on the node voltages, which keeps it one `lfilter` per mode instead
+   of a per-sample loop and lets an interval that does not move route back to the closed form
+   bit-for-bit.
 6. Inductors.
 
 **Why the tier order was inverted, since the issue proposed the frequency-domain solve first.**
@@ -591,6 +592,51 @@ existing five for no behaviour that depends on it.
 **Not planned, deliberately:** protocol encoders, traffic and gap generators, fault injection
 and parameter priors. Caller code — `examples/i2c_bus.py` is the worked pattern, and the
 boundary is the one `CONTRIBUTING.md` already draws for patterns.
+
+### #72 follow-on: drivers whose output follows their own signal chain
+
+**Status:** DELIVERED (`net.solve(sources=)`, `Signal.net(drivers=[{"source": ...}])`,
+`examples/multi_driver_bus.py`, `tests/test_net_sources.py`). This closes deferred item 5
+above; item 2 of the #73 list (`src` as a shape or a caller-supplied waveform) is closed by it
+too, since a caller-supplied waveform is exactly what a driver source is.
+
+**How it stays exact.** Between events the network is still constant — only `b` moves — so the
+eigenbasis is computed once per interval as before and the sampled source is carried through it
+by `z[k+1] = exp(-lam dt) z[k] + (1 - exp(-lam dt))/lam f[k]`, one first-order recurrence per
+mode, run by `lfilter`. That is the analytic response to a source held across each sample,
+which is what a sampled source IS, and is the same hold `physics.open_drain_line` applies to
+its target. An interval across which no conducting source actually moves is routed back to the
+closed form, so the reduction to tier 1 is `np.array_equal` and not a tolerance.
+
+**Three decisions worth recording.**
+
+1. **The arrays do not go in the net description.** `solve` takes `sources={id: volts}`
+   separately, because the description has to stay JSON for the recipe to be provenance and
+   volts are numbers. `Signal.net` carries each driver's `source` as a nested *spec* and
+   renders it. A `source` key found in a description is refused, pointing at the argument.
+2. **`volts` is required on a source, not defaulted.** A net is in volts and a carrier returns
+   normalised ±1, so a source passed through unconverted is a driver a thousand times too weak
+   and the solve is perfectly correct about it — the silent-impairment failure mode
+   `docs/ARCHITECTURE.md` exists to stop. `volts=True` asserts already-volts; `[lo, hi]` maps
+   ±1 onto those two, affinely, so a `tx_ffe`'s amplitude or an overshoot survives rather than
+   being renormalised away. Both wrong combinations are refused by name against the carrier
+   kind the spec ends on, where that is knowable.
+3. **Randomness is namespaced by driver id** (`net/<op>/<id>/<role>`), not drawn from the
+   parent chain's op roles — two drivers written from one spec would otherwise share every
+   draw with each other and with op 0 of the chain the net sits in.
+
+**Deferred from this, in order:**
+
+1. **A driver whose output conductance is a waveform.** The source may move; the strength may
+   not. That is the one thing the closed form cannot absorb, and it is the same deferral as
+   `gate` / `relax` — a real output stage's turn-on slew is both at once.
+2. **A source rendered on a different grid and resampled into the net.** Today a source chain
+   must render exactly `n` samples, and the ops that change a record's length (`acquire`,
+   `digitize(n_out=)`, `sample_clock`) are refused inside one rather than silently
+   interpolated.
+3. **Driver sources as labels.** `hold_windows` says who held the net; what each driver was
+   *sending* while it held is in its own chain and is not emitted back out. Related to #72
+   item 4.
 
 ## Known limitations and claim boundaries
 

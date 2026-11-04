@@ -342,8 +342,34 @@ puts on a wire has a revision date and a document behind it. Write the ~40-line 
 `examples/i2c_bus.py` is a complete worked one (I2C across a 3.3 V/1.8 V MOSFET level
 translator) and is the file to copy from.
 
+A driver's Thevenin level may itself be a waveform — its own supply, edge rate and timing
+impairments — injected through its own scheduled output conductance:
+
+```python
+drivers=[{"id": "ctrl", "node": "bus", "ohm": 20.0, "state": "hiz",
+          "source": {"ops": Signal(grid=g).carrier("cmos", v_lo=0.0, v_hi=3.3,
+                                                   f_hz=20e6, tr_s=2e-9)
+                                          .timing(rj_ps=12.0),
+                     "volts": True}},                       # already volts
+         {"id": "n2", "node": "bus", "ohm": 55.0, "state": "hiz",
+          "source": {"kind": "nrz", "n_ui": 328, "seed": 37,
+                     "volts": [0.0, 1.8]}}]                 # map ±1 onto these volts
+```
+
+A body is exactly one of `from="chain"` (the waveform arriving at the op), `ops=` (its own op
+list, or a `Signal`), or a carrier spec by `kind=`. With every driver carrying one, the net can
+be the FIRST op — nothing has to arrive at it. `examples/multi_driver_bus.py` is the worked one.
+
 Things that bite:
 
+- **`volts` is required on a driver source, and it is the trap.** A net is in volts; a carrier
+  returns normalised ±1 (rule 2). `volts=True` asserts the chain is already volts, `[lo, hi]`
+  maps ±1 onto those two. Omitted, it refuses — because a source passed through unconverted is
+  a driver a thousand times too weak and the solve would be perfectly correct about it.
+- **A released driver contributes nothing, whatever its chain is doing.** It is out of the
+  stamp, so its level is absent rather than small. That is the whole reason to put the sources
+  inside the solve: summing each party's contribution by hand leaves the level it was holding
+  in the sum, and the baseline drifts by one held offset at every change of hands.
 - **Size the grid from the fastest MODE on the board, not from the bit rate.** A 60 ohm switch
   between two bus capacitances is a nanosecond-scale redistribution on a microsecond-scale bus.
   The solver warns when a mode finishes inside one sample — the levels stay exact, but an edge
@@ -354,8 +380,10 @@ Things that bite:
   label — there is no second list to keep in step.
 - **Hand-overs need no rule.** Two agents holding at once are two parallel drivers; events on
   one sample are applied as one configuration change, so there is no moment with nobody driving.
-- Lumped R and C only in this tier. Transmission lines, S-parameter blocks inside a net,
-  sub-nets, inductors and voltage-dependent laws are deferred — `BACKLOG.md` has the order.
+- Lumped R and C only in this tier, and a driver's SOURCE may be a waveform but its output
+  CONDUCTANCE may not (`gate`, `relax` are refused by name). Transmission lines, S-parameter
+  blocks inside a net, sub-nets, inductors and voltage-dependent laws are deferred —
+  `BACKLOG.md` has the order.
 
 ## Writing records out
 

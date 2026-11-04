@@ -935,16 +935,197 @@ def _op_cascade(x, p, streams, grid, idx):
     return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"), **kw)
 
 
+class _Namespaced:
+    """A `Streams` view that prefixes every role name.
+
+    A nested chain asks for the same role names as the outer one -- `jitter/0`, `noise/1` --
+    keyed by its own op index, so handing it the parent's `Streams` would give a driver's jitter
+    the parent op 0's draws. Prefixing keeps each driver's randomness independent of the others
+    and of the chain the net sits in, while still deriving from the record's single seed, so one
+    `Signal(seed=)` moves the whole record coherently and `Streams.reroll` can still name a
+    driver's factor exactly (`reroll("net/3/host/jitter/0")`).
+    """
+    __slots__ = ("_st", "_pre")
+
+    def __init__(self, st, pre):
+        self._st, self._pre = st, pre
+
+    def role(self, name):
+        return self._st.role(self._pre + str(name))
+
+
+_NO_VOLTS = object()
+
+
+def _source_volts(volts, y, did, last_kind):
+    """Apply a driver source's declared level domain, and refuse the ways it can be wrong.
+
+    A net is in VOLTS. A carrier is normalised amplitude of about +/-1 (see `waveform`'s own
+    docstring), so a source handed to a net as-is by mistake is a driver a thousand times too
+    weak, the solve is perfectly correct about it, and nothing says so -- which is why `volts`
+    is required rather than defaulted. `last_kind` is the carrier kind the spec ENDS on when
+    that is knowable, and None when the chain's last op is something else and guessing its
+    level domain would be worse than not checking.
+    """
+    if volts is _NO_VOLTS:
+        raise ValueError(
+            f"net: driver {did!r}'s `source` must say `volts`. A net is in volts and a carrier "
+            f"returns normalised amplitude of about +/-1, so a source taken as-is by mistake is "
+            f"a driver a thousand times too weak and the solve says nothing about it. Write "
+            f"volts=[lo, hi] to map -1 and +1 onto those volts, or volts=True when the chain is "
+            f"already volts (a {P.VOLTS_ANALOG_KINDS[0]!r} carrier, or anything ending in one).")
+    native = last_kind in P.VOLTS_ANALOG_KINDS if last_kind is not None else None
+    if volts is True:
+        if native is False:
+            raise ValueError(
+                f"net: driver {did!r}'s source says volts=True but ends on a {last_kind!r} "
+                f"carrier, which is the normalised +/-1 convention and not volts. Give it "
+                f"volts=[lo, hi] -- the two levels its output stage drives -- or build it from "
+                f"a volts-native kind {list(P.VOLTS_ANALOG_KINDS)}.")
+        return y
+    try:
+        lo, hi = (float(v) for v in volts)
+    except (TypeError, ValueError):
+        raise ValueError(f"net: driver {did!r}'s source has volts={volts!r}; it is either True "
+                         f"(already volts) or a [lo, hi] pair of volts that -1 and +1 map "
+                         f"onto.") from None
+    if native:
+        raise ValueError(f"net: driver {did!r}'s source is a {last_kind!r} carrier, which is "
+                         f"already in volts, so mapping it again with volts=[{lo!r}, {hi!r}] "
+                         f"would rescale real levels. Set its own levels on the carrier and "
+                         f"pass volts=True.")
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        raise ValueError(f"net: driver {did!r}'s source has volts=[{lo!r}, {hi!r}]; both are "
+                         f"volts and have to be finite")
+    if lo == hi:
+        raise ValueError(f"net: driver {did!r}'s source maps every level onto {lo!r} V, so it "
+                         f"has no swing at all. A driver that holds one level is `volts={lo!r}` "
+                         f"in its description and needs no source.")
+    # AFFINE, deliberately: -1 -> lo and +1 -> hi, extrapolating past them. Renormalising to the
+    # rendered excursion instead would erase exactly what a source chain is for -- a tx_ffe's
+    # amplitude, a compression, an overshoot -- by scaling it back out again.
+    return lo + (y + 1.0) * (0.5 * (hi - lo))
+
+
+def _driver_source(src, x, streams, grid, idx, did, n):
+    """One driver's `source` spec -> its Thevenin level in VOLTS, one sample per record sample.
+
+    Three bodies, exactly one of them: `from="chain"` (the waveform arriving at this op --
+    this driver IS the chain), `ops=[...]` (its own chain, any ops, rendered on this grid), or
+    a bare carrier spec by `kind` (the idiom `crosstalk(aggressor=)` and `open_drain(second=)`
+    already use). Plus `volts`, which says what level domain the result is in.
+    """
+    if not isinstance(src, dict):
+        raise ValueError(f"net: driver {did!r}'s `source` is {src!r}; it is a spec dict -- "
+                         f"{{'from': 'chain', ...}}, {{'ops': [...], ...}} or a carrier spec "
+                         f"{{'kind': 'cmos', ...}} -- plus `volts`. An array does not belong in "
+                         f"a recipe; call `wfmsynth.net.solve(sources=...)` for one.")
+    spec = dict(src)
+    volts = spec.pop("volts", _NO_VOLTS)
+    frm, ops = spec.pop("from", None), spec.pop("ops", None)
+    bodies = [nm for nm, v in (("from", frm), ("ops", ops), ("kind", spec.get("kind")))
+              if v is not None]
+    if len(bodies) != 1:
+        raise ValueError(
+            f"net: driver {did!r}'s `source` needs exactly one of 'from' (the chain this op is "
+            f"in), 'ops' (its own chain) or 'kind' (one carrier); it has "
+            f"{bodies if bodies else 'none of them'}.")
+    last_kind = None
+    if frm is not None:
+        if frm != "chain":
+            raise ValueError(f"net: driver {did!r}'s source has from={frm!r}; the only value is "
+                             f"'chain', meaning the waveform arriving at this op.")
+        if x is None:
+            raise ValueError(f"net: driver {did!r}'s source is from='chain', but this net is the "
+                             f"first op so no waveform has arrived. Put a carrier before it, or "
+                             f"give the driver its own 'ops'/'kind'.")
+        y = np.asarray(x, float)
+    elif ops is not None:
+        sub = Signal(grid=grid)
+        sub.ops = [dict(o) for o in ops]
+        if not sub.ops:
+            raise ValueError(f"net: driver {did!r}'s source has an empty `ops`, so it renders "
+                             f"nothing. A driver that holds one level is `volts=` in its "
+                             f"description and needs no source.")
+        for o in sub.ops:
+            if o.get("op") not in _EXEC:
+                raise ValueError(f"net: driver {did!r}'s source chain has op {o.get('op')!r}, "
+                                 f"which does not exist. Known ops: {sorted(_EXEC)}")
+            OPKEYS.check(o["op"], o)         # the same gate the builders go through
+        if sub.ops and sub.ops[-1]["op"] == "carrier":
+            last_kind = sub.ops[-1].get("kind")
+        y = np.asarray(sub._run(_Namespaced(streams, f"net/{idx}/{did}/")), float)
+    else:
+        last_kind = spec.get("kind")
+        y = np.asarray(_carrier(spec, streams, grid, f"net/{idx}/{did}/carrier"), float)
+    if y.shape != (n,):
+        raise ValueError(
+            f"net: driver {did!r}'s source rendered {y.shape[0] if y.ndim == 1 else y.shape} "
+            f"samples but this net is solved over {n}. A driver's level is a waveform on the "
+            f"SAME grid as the net -- give it `n` or a grid that agrees, and keep the ops that "
+            f"resample or truncate a record (`acquire`, `digitize(n_out=)`, `sample_clock`) "
+            f"outside it.")
+    return _source_volts(volts, y, did, last_kind)
+
+
+def _flatten_driver(d):
+    """One driver description on the way into a recipe, with a `Signal` source chain flattened.
+
+    `source={"ops": Signal(...)}` is the pleasant thing to write and is not JSON; a recipe is
+    provenance only if it serialises, so the op list is taken here rather than left to fail in
+    whatever writes the archive. A driver with no source, or one whose `ops` is already a list,
+    passes through unchanged -- including identically, so no existing recipe moves.
+    """
+    src = d.get("source")
+    if not isinstance(src, dict):
+        return d
+    ops = src.get("ops")
+    if isinstance(ops, Signal):
+        if ops.lead_in or ops.lead_out is not None:
+            raise ValueError(
+                f"net: driver {d.get('id')!r}'s source Signal sets a lead-in, which renders a "
+                f"LONGER record and discards the guard. A driver's level has to be the same "
+                f"length as the net it drives, so put the lead-in on the chain the net is in.")
+        ops = [dict(o) for o in ops.ops]
+    elif ops is not None:
+        ops = [dict(o) for o in ops]
+    else:
+        return d
+    return {**d, "source": {**src, "ops": ops}}
+
+
 def _op_net(x, p, streams, grid, idx):
     """A shared net as one channel stage: several drivers, switched terminations, one solve.
 
     The incoming waveform drives the STATE of the driver named by `follow`, thresholded at the
-    midpoint of its own excursion -- the rule `open_drain_line` already uses -- so the net stays
-    piecewise-constant between events and keeps its closed-form solution. A driver whose VOLTAGE
-    follows the waveform is a time-varying source and is deferred with the rest of the
-    nonlinear tier; see `wfmsynth/net.py`."""
+    midpoint of its own excursion -- the rule `open_drain_line` already uses. A driver may also
+    carry its OWN `source` chain, which becomes its per-sample Thevenin level: its levels, its
+    edge rate, its timing impairments, injected through its own scheduled output conductance so
+    that what it was holding when it let go decays through the net instead of being inherited by
+    the next driver. See `wfmsynth/net.py`; what remains deferred is a time-varying
+    CONDUCTANCE."""
     from . import net as NET, scenario as SC
     spec = {k: p[k] for k in ("nodes", "rails", "elements", "drivers") if k in p}
+    n = len(x) if x is not None else (grid.n if grid is not None else None)
+    if n is None:
+        raise ValueError("net: this net is the first op in the chain, so its length comes from "
+                         "the grid -- pass Signal(grid=Grid(fs=..., n=...)).")
+    # A driver's `source` is a nested SPEC in the recipe and an array in the solve: the net
+    # description has to stay JSON for the recipe to be provenance, and volts are numbers. So
+    # the specs are rendered here and handed over separately.
+    sources = None
+    if any("source" in d for d in spec.get("drivers", ()) or ()):
+        drivers, sources = [], {}
+        for d in spec["drivers"]:
+            if "source" not in d:
+                drivers.append(d)
+                continue
+            did = d.get("id")
+            if not did:
+                raise ValueError(f"net: every driver needs an 'id'; this one has none: {d}")
+            drivers.append({k: v for k, v in d.items() if k != "source"})
+            sources[did] = _driver_source(d["source"], x, streams, grid, idx, did, n)
+        spec = {**spec, "drivers": drivers}
     sched = list(p.get("schedule", []) or [])
     # `holds` + `agents` are the compact, authored form (see `wfmsynth/scenario.py`); the recipe
     # stores THEM rather than the events they expand to, so what is recorded is what was meant.
@@ -956,6 +1137,10 @@ def _op_net(x, p, streams, grid, idx):
                             rest=p.get("rest", True)) + sched
     follow = p.get("follow")
     if follow is not None:
+        if x is None:
+            raise ValueError(f"net: follow={follow!r} takes the driver's state from the waveform "
+                             f"arriving at this op, but this net is the first op in the chain. "
+                             f"Put a carrier before it, or schedule the driver.")
         sched = NET.schedule_from_waveform(x, follow, on_when=p.get("on_when", "high")) + sched
     probe = p.get("probe")
     if probe is None:
@@ -969,7 +1154,7 @@ def _op_net(x, p, streams, grid, idx):
     if not isinstance(probe, str):
         raise ValueError(f"net: probe must be one node name, got {probe!r}; a Signal chain "
                          f"carries one waveform. Use `wfmsynth.net.solve` for several.")
-    return NET.solve(spec, fs=grid.fs, n=len(x), schedule=sched, probes=probe)
+    return NET.solve(spec, fs=grid.fs, n=n, schedule=sched, probes=probe, sources=sources)
 
 
 def _op_digitize(x, p, streams, grid, idx, win=None):
@@ -1992,13 +2177,44 @@ class Signal:
         same hold list is the label (`scenario.hold_windows`). Several parties holding at once
         need no special case: they are parallel drivers, which the solve already resolves.
 
+        A DRIVER MAY BRING ITS OWN CHAIN. `source=` on a driver makes its Thevenin level a
+        waveform rather than the fixed `volts` -- its own levels, edge rate and timing
+        impairments, rendered on this grid and injected through its own scheduled output
+        conductance:
+
+            .net(..., drivers=[
+                   {"id": "host", "node": "sda", "ohm": 60.0, "state": "hiz",
+                    "source": {"ops": Signal(grid=g).carrier("cmos", v_lo=0.0, v_hi=3.3,
+                                                             f_hz=4e5, duty=0.5, tr_s=8e-9),
+                               "volts": True}},
+                   {"id": "tgt", "node": "sda", "ohm": 30.0, "state": "hiz",
+                    "source": {"kind": "nrz", "n_ui": 64, "seed": 5, "volts": [0.0, 1.8]}}])
+
+        A source body is exactly one of `from="chain"` (the waveform arriving at this op, so
+        this driver IS the chain), `ops=` (its own op list, or a `Signal` to take it from), or a
+        carrier spec by `kind=` -- the idiom `crosstalk(aggressor=)` already uses. `volts` is
+        REQUIRED and says the level domain: `True` for a chain already in volts, or `[lo, hi]`
+        to map the +/-1 carrier convention onto those two volts. Without it a normalised carrier
+        would make a driver a thousand times too weak and the solve would be perfectly correct
+        about it. Each driver's randomness is namespaced by its id, so one `Signal(seed=)` moves
+        the whole record and no two drivers share a draw.
+
+        With every driver carrying its own source the net can be the FIRST op -- nothing has to
+        arrive at it, and its length comes from the grid.
+
         Exact, not integrated: between events the network is constant and is solved in closed
-        form, so there is no step size and no accuracy that decays over a long record. Lumped R
-        and C only in this tier -- see `wfmsynth/net.py` for what is deferred and why."""
-        # `Hold` and `Agent` are convenient to author and are not JSON. A recipe is provenance
-        # only if it serialises, so they are flattened HERE, on the way in, rather than left to
-        # fail at `json.dumps` time in whatever wrote the archive.
+        form, so there is no step size and no accuracy that decays over a long record. A moving
+        source does not change that -- only `b` moves, carried through the same eigenbasis by a
+        zero-order-hold recurrence, and an interval across which nothing moves is routed back to
+        the closed form so a constant source equals a constant `volts` bit-for-bit. Lumped R and
+        C only in this tier -- see `wfmsynth/net.py` for what is deferred and why."""
+        # `Hold`, `Agent` and a `Signal` used as a driver's source chain are convenient to
+        # author and are not JSON. A recipe is provenance only if it serialises, so they are
+        # flattened HERE, on the way in, rather than left to fail at `json.dumps` time in
+        # whatever wrote the archive.
         from . import scenario as SC
+        if "drivers" in params:
+            params["drivers"] = [_flatten_driver(d) for d in params["drivers"]]
         if "holds" in params:
             params["holds"] = [SC.Hold.from_dict(h).to_dict() for h in params["holds"]]
         if "agents" in params:

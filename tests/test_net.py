@@ -270,10 +270,16 @@ def test_a_schedule_event_for_an_unknown_id_is_refused():
                   schedule=[{"t_s": 1e-9, "id": "ghost", "state": "driving"}])
 
 
-def test_an_unsupported_element_kind_says_what_this_tier_has():
+@pytest.mark.parametrize("state", [None, "open"])
+def test_an_unsupported_element_kind_says_what_this_tier_has(state):
+    """Refused from the DESCRIPTION, not from the stamp: an inductor parked open would
+    otherwise render as though it were not there."""
     spec = _bus()
-    spec["elements"].append({"id": "l", "kind": "l", "a": "bus", "b": "gnd", "henry": 1e-9})
-    with pytest.raises(ValueError, match="kind|'r' and 'c'"):
+    el = {"id": "l", "kind": "l", "a": "bus", "b": "gnd", "henry": 1e-9}
+    if state:
+        el["state"] = state
+    spec["elements"].append(el)
+    with pytest.raises(ValueError, match=r"has kind 'l'.*'r' and 'c' only"):
         NET.solve(spec, fs=FS, n=8, probes="bus")
 
 

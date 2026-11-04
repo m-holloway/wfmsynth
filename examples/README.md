@@ -112,6 +112,23 @@ has a revision date and a document behind it, so it belongs in your code — the
 the pattern registry draws. What the library provides is the hooks: a shared net, a scenario
 compiler, and holds that are simultaneously the stimulus and the labels.
 
+[`multi_driver_bus.py`](multi_driver_bus.py) is the other half of that: not who talks, but
+*what each talker is*. Three transceivers of different supplies, output impedances and edge
+rates take turns on one terminated backplane bus, each driving through its **own** chain —
+
+```python
+drivers=[{"id": "ctrl", "node": "bus", "ohm": 20.0, "state": "hiz",
+          "source": {"ops": Signal(grid=g).carrier("cmos", v_hi=3.3, tr_s=2e-9)
+                                          .timing(rj_ps=12.0),
+                     "volts": True}}, ...]
+```
+
+— so the net is the first op in the chain and nothing has to arrive at it. Every measured level
+and edge lands on its closed form to ~0.2 %, the weakest part misses the receiver's V_IH by
+346 mV because a terminated bus penalises it twice, and the bus returns to its bias *exactly*
+at every hand-over, against the −1.765 V of drift a by-hand sum of the three contributions
+would have accumulated. That last number is the reason the sources belong inside the solve.
+
 ### 7. Specialist topics
 
 | Example | Use it when |
@@ -122,6 +139,7 @@ compiler, and holds that are simultaneously the stimulus and the labels.
 | [`events.py`](events.py) | Rare localized defects (runt, glitch, ring, droop) in a long record, labelled per UI window |
 | [`replay.py`](replay.py) | Rebuilding and verifying a set of records from recipes alone, as a consumer of a handed-over archive |
 | [`i2c_bus.py`](i2c_bus.py) | Several parties share one net — a bus, a backplane, any hand-over — and you need a protocol layer above it |
+| [`multi_driver_bus.py`](multi_driver_bus.py) | The parties on a shared net are different parts — own supply, own output impedance, own edge rate, own jitter — and must not inherit each other's levels |
 | [`analog_instrument.py`](analog_instrument.py) | The source is not a serial link: a bench signal (`carrier("sine"/"cmos"/...)`) or a real capture from disk (`Signal.capture`), taking the same later ops |
 
 ## Choosing a dataset generator

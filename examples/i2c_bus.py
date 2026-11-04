@@ -246,9 +246,9 @@ def main():
 
     # The same chain through `Signal`, so the record carries a recipe. `holds` and `agents` go
     # in as they were authored and the recipe stores THAT -- not the 60-odd events they expand
-    # to -- so what is recorded is what was meant.
+    # to -- so what is recorded is what was meant. The net is the whole chain: no waveform
+    # arrives at it, because every level on this board comes from a rail or a driver.
     sig = (ws.Signal(seed=1, grid=grid)
-           .carrier("dc", level=0.0)
            .net(**board(), holds=[h.to_dict() for h in holds],
                 agents={k: a.to_dict() for k, a in agents(t_fet_off).items()},
                 probe="sda_a"))

@@ -12,6 +12,67 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## 0.44.0 — 2026-11-03
+
+A driver on a shared net may now render its own signal chain as its output level. Nothing
+existing changes: every path without a driver source is bit-identical, and a source that never
+moves is routed back to the closed form so it equals a declared `volts` bit-for-bit.
+
+### Added
+
+- **Drivers whose output follows their own signal chain** (#72 follow-on). Tier 1 let a
+  driver's *state* follow a carrier; its output was still a fixed Thevenin level. On a net
+  shared by several parties each one usually has its own supply, output impedance, edge rate
+  and timing impairments, and adding their contributions by hand outside the solve is where a
+  level held by a driver that has let go gets carried into the next owner's baseline.
+
+  - `net.solve(..., sources={driver_id: volts_per_sample})` — a driver's Thevenin level as a
+    waveform on the record's own grid.
+  - `Signal.net(drivers=[{..., "source": <spec>}])` — the same thing as a nested spec, so it
+    survives into the recipe. A body is exactly one of `from="chain"` (the waveform arriving
+    at this op), `ops=` (its own op list, or a `Signal` to take it from), or a carrier spec by
+    `kind=` — the idiom `crosstalk(aggressor=)` already uses.
+  - `volts=` is **required** on a source: `True` when the chain is already volts, or
+    `[lo, hi]` to map the ±1 carrier convention onto those two volts. A net is in volts and a
+    carrier is not, so a source passed through unconverted would be a driver a thousand times
+    too weak and the solve would be perfectly correct about it. The map is affine, so a
+    `tx_ffe`'s amplitude or an overshoot survives rather than being renormalised away.
+  - A net all of whose drivers carry their own source may be the **first op** in a chain:
+    nothing has to arrive at it, and its length comes from the grid.
+  - Each driver's randomness is namespaced by its id, so two drivers written from one spec are
+    two devices rather than one written twice, and `Signal(seed=)` still moves the whole
+    record.
+
+  Still exact. Only `b` moves between events, so the eigenbasis is computed once per interval
+  as before and the sampled source is carried through it by the zero-order-hold recurrence
+  `physics.open_drain_line` already applies to its target — no step size, no integration
+  error. Checked against an independent RK45 integrator written from the node equations
+  (1e-11 V on a 2.2 V swing), against the scalar closed form for the one-driver case (5e-15 V),
+  and for the reduction by `np.array_equal`. A time-varying *conductance* is still refused by
+  name (`gate`, `relax`): that is the one thing the closed form cannot absorb.
+
+- **`examples/multi_driver_bus.py`** — three transceivers of different supplies, output
+  impedances and edge rates taking turns on one terminated backplane bus. Every measured level
+  and edge lands on its closed form to ~0.2 %; the weakest part misses the receiver's V_IH by
+  346 mV because a terminated bus penalises it twice; and the bus returns to its bias exactly
+  at every hand-over, against the −1.765 V of drift a by-hand sum would have accumulated.
+
+### Changed
+
+- **A misspelled key on a `net` element or driver description is now refused, naming it.** A
+  description is a dict, so `{"id": "d", "node": "bus", "ohms": 60}` was previously accepted
+  and did nothing — the record rendered, the digest was stable, and the driver had whatever
+  strength the schedule happened to set. The accepted set is per *kind*, because the traps
+  differ: a capacitor is never switched out of the stamp (its charge is the state the solve
+  carries across every switch), so a `state` on one was honoured by nobody. An element with no
+  `kind`, a driver with no `node`, and an element of an unsupported kind are refused the same
+  way — the last of those from the description rather than from the stamp, since an inductor
+  parked `state="open"` previously rendered as though it were not there. Keys beginning with
+  an underscore are annotation and are still ignored, as in a recipe op. These are refusals,
+  not output changes; no rendered samples move.
+- `examples/i2c_bus.py` no longer puts a decorative `carrier("dc")` in front of its net, now
+  that a net can be the first op. Its output is unchanged.
+
 ## 0.43.0 — 2026-10-20
 
 Two additions that belong together: a shared net (#72) and the layer that writes its schedule

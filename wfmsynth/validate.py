@@ -2223,6 +2223,52 @@ check("a hi-Z driver's level is absent from the solve, not merely small",
                      _NET.solve(_nspec, fs=_nfs, n=1000, probes="bus")),
       "a driver parked at -7.5 V while released gives the same samples as one parked at 0 V")
 
+# ---- drivers whose output follows their own chain (GitHub #72, follow-on) ----
+# A driver's Thevenin level may be a WAVEFORM. The claim is still exactness, so: the reduction
+# is bit-for-bit, the one-driver case is a closed form, and a released driver contributes
+# nothing whatever its own chain is doing -- which is the baseline-drift bug this answered.
+_wspec = {"nodes": ["bus"], "rails": {"vdd": _nvdd},
+          "elements": [{"id": "rp", "kind": "r", "a": "bus", "b": "vdd", "ohm": _nrp},
+                       {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": _ncb}],
+          "drivers": [{"id": "d0", "node": "bus", "ohm": _nrs, "state": "driving"}]}
+_wdecl = {**_wspec, "drivers": [{**_wspec["drivers"][0], "volts": 0.4}]}
+check("a driver source that never moves IS a declared level -- bit for bit, not to a tolerance",
+      np.array_equal(_NET.solve(_wdecl, fs=_nfs, n=2000, probes="bus"),
+                     _NET.solve(_wspec, fs=_nfs, n=2000, probes="bus",
+                                sources={"d0": np.full(2000, 0.4)})),
+      "a constant source array is routed back to the closed form, so an idle interval cannot "
+      "pick up a different last bit from the tier that has no sources at all")
+
+_wn, _wrd = 2000, 90.0
+_wt = np.arange(_wn) / _nfs
+_wsrc = 1.25 + np.sin(2 * np.pi * 3e6 * _wt) + 0.3 * np.sin(2 * np.pi * 11e6 * _wt)
+_wonly = {"nodes": ["bus"],
+          "elements": [{"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": _ncb}],
+          "drivers": [{"id": "d0", "node": "bus", "ohm": _wrd, "state": "driving"}]}
+_wgot = _NET.solve(_wonly, fs=_nfs, n=_wn, probes="bus", sources={"d0": _wsrc})
+_walpha, _wv = np.exp(-1.0 / (_nfs * _wrd * _ncb)), _wsrc[0]
+_wref = np.empty(_wn)
+for _wk in range(_wn):                     # exponential stepping -- open_drain_line's method
+    _wv = _wsrc[_wk] + (_wv - _wsrc[_wk]) * _walpha
+    _wref[_wk] = _wv
+check("one driver with its own chain IS that chain through its own R and C",
+      float(np.abs(_wgot - _wref).max()) < 1e-14 * float(np.ptp(_wref)),
+      f"max |net - exponential stepping| = {float(np.abs(_wgot - _wref).max()):.2e} V over a "
+      f"{float(np.ptp(_wref)):.3f} V swing; tau = {_wrd * _ncb:.4g} s")
+
+_whold = [{"t_s": 0.0, "id": "d0", "state": "driving"},
+          {"t_s": 1e-6, "id": "d0", "state": "hiz"}]
+_wk1 = _NET.sample_at(1e-6, _nfs)
+_wloud = _wsrc.copy()
+_wloud[_wk1:] = -37.0 + 9.0 * np.sin(2 * np.pi * 7e6 * _wt[_wk1:])   # absurd, while released
+check("a released driver contributes nothing, whatever its own chain is then doing",
+      np.array_equal(_NET.solve(_wspec, fs=_nfs, n=_wn, probes="bus", schedule=_whold,
+                                sources={"d0": _wsrc}),
+                     _NET.solve(_wspec, fs=_nfs, n=_wn, probes="bus", schedule=_whold,
+                                sources={"d0": _wloud})),
+      "the level a driver was holding when it let go is ABSENT from the stamp, so it cannot be "
+      "carried into the next owner's baseline -- the drift this feature was asked for")
+
 check("a lead-in extent STATED in closed form scales with the physics it came from (open_drain: "
       "5 tau is proportional to Rp and to Cb)",
       _l1 > 0 and abs(_lstated(1770.0, 400e-12) / _l1 - 2.0) < 0.02

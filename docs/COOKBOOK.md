@@ -559,3 +559,55 @@ generators, fault injection and parameter priors are caller code — plain class
 list of holds. Which bits a standard puts on a wire has a revision date and a document behind
 it; "an agent held the net and its output stage turned on early" does not. Same boundary as the
 pattern registry: mechanisms here, standards knowledge yours.
+
+### A driver with its own chain
+
+A driver's Thevenin level may be a **waveform** rather than a number — its own supply, its own
+edge rate, its own timing impairments — injected through its own scheduled output conductance:
+
+```python
+sig.net(nodes=["bus"], rails={"vbias": 1.5},
+        elements=[{"id": "rt", "kind": "r", "a": "bus", "b": "vbias", "ohm": 56.0},
+                  {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": 60e-12}],
+        drivers=[
+            {"id": "ctrl", "node": "bus", "ohm": 20.0, "state": "hiz",
+             "source": {"ops": Signal(grid=g).carrier("cmos", v_lo=0.0, v_hi=3.3,
+                                                      f_hz=20e6, tr_s=2e-9)
+                                             .timing(rj_ps=12.0),      # its own clock
+                        "volts": True}},
+            {"id": "n2", "node": "bus", "ohm": 55.0, "state": "hiz",
+             "source": {"kind": "nrz", "n_ui": 328, "seed": 37,        # the compact form
+                        "volts": [0.0, 1.8]}}],                        # ±1 → these volts
+        holds=..., agents=..., probe="bus")
+```
+
+- **A source body is exactly one of three.** `from="chain"` (the waveform arriving at this op,
+  so this driver *is* the chain), `ops=` (its own op list, or a `Signal` to take it from), or a
+  carrier spec by `kind=` — the idiom `crosstalk(aggressor=)` already uses. With every driver
+  carrying its own source the net can be the **first op**: nothing has to arrive at it, and its
+  length comes from the grid.
+- **`volts` is required**, and says the level domain: `True` for a chain already in volts (a
+  `cmos` carrier, or anything ending in one), or `[lo, hi]` to map the ±1 carrier convention
+  onto those two volts. A net is in volts; a normalised carrier passed through unconverted is a
+  driver a thousand times too weak, and the solve would be perfectly correct about it. The map
+  is affine, so a `tx_ffe`'s amplitude or an overshoot survives it rather than being
+  renormalised away.
+- **A released driver contributes nothing**, whatever its own chain is then doing — it is out
+  of the stamp, so the level it was holding is *absent* rather than small. Adding each party's
+  contribution by hand outside the solve is where that level gets carried into the next owner's
+  baseline, and the bus drifts by one held offset at every change of hands.
+- **Still exact.** Only `b` moves between events, so the eigenbasis is computed once per
+  interval as before and the sampled source is carried through it by the zero-order-hold
+  recurrence `physics.open_drain_line` uses on its target. An interval across which nothing
+  moves is routed back to the closed form, so a constant source equals a constant `volts`
+  bit-for-bit. A time-varying **conductance** is still refused (`gate`, `relax`).
+- Each driver's randomness is namespaced by its id, so two drivers written from the same spec
+  are two devices rather than one written twice, and one `Signal(seed=)` still moves the whole
+  record.
+
+**[`examples/multi_driver_bus.py`](../examples/multi_driver_bus.py) is the worked example**:
+three transceivers of different supplies, output impedances and edge rates taking turns on one
+terminated backplane bus. Every measured level and edge lands on its closed form to ~0.2 %, the
+weakest part misses the receiver's V<sub>IH</sub> by 346 mV because a terminated bus penalises
+it twice, and the bus returns to its bias **exactly** at every hand-over against the −1.765 V a
+by-hand sum would have accumulated.
