@@ -495,8 +495,10 @@ form, so there is no step size to choose and no accuracy that decays over a long
 the grid still decides is *visibility*: a transient faster than a sample completes inside one,
 and the solver says so rather than letting you measure the grid.
 
-**This tier is lumped R and C.** Transmission lines, S-parameter blocks inside a net, sub-nets,
-voltage-dependent laws and event emission are deferred — see `BACKLOG.md` for the order.
+**This tier is lumped R, L and C** — the inductance is what makes a hand-over ring rather than
+settle, and it has its own section below. A distributed transmission line, S-parameter blocks
+inside a net, sub-nets, voltage-dependent laws and event emission are deferred — see
+`BACKLOG.md` for the order.
 
 ## Scenario layer: who held the net when (holds, agents, labels)
 
@@ -611,3 +613,92 @@ terminated backplane bus. Every measured level and edge lands on its closed form
 weakest part misses the receiver's V<sub>IH</sub> by 346 mV because a terminated bus penalises
 it twice, and the bus returns to its bias **exactly** at every hand-over against the −1.765 V a
 by-hand sum would have accumulated.
+
+### An inductance, and a hand-over that rings
+
+An R-C net can only *settle*. What a scope shows when a fast driver takes a bus, changes it or
+lets go of it is overshoot and a ring — at a frequency set by the package and trace inductance
+against the node capacitance, decaying at a rate set by the termination. `{"kind": "l"}` is that
+inductance (GitHub #74):
+
+```python
+elements=[{"id": "lp", "kind": "l", "a": "pad", "b": "bus", "henry": 8e-9, "ohm": 0.3},
+          {"id": "cp", "kind": "c", "a": "pad", "b": "gnd", "farad": 2e-12},
+          {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": 20e-12},
+          {"id": "rt", "kind": "r", "a": "bus", "b": "vb", "ohm": 100.0}]
+```
+
+- **`ohm` on an inductor is the series resistance of the same piece of wire**, not a parallel
+  resistor, and absent means ideal. It is one element with two numbers because the node *between*
+  a series R and a series L has no capacitance, and this tier solves states — so writing them as
+  two elements is refused, with that explanation. A bond wire is one piece of metal with both
+  properties anyway.
+- **An inductor is not switchable**, and the schedule refuses it by name. Its current is a state
+  variable carried across every switch exactly as capacitor charge is, so taking it out of the
+  stamp would drive that current to zero within one sample, which is the one thing an inductor
+  cannot do. Switch what is in *series* with it — the driver, or an `r`. The current then flows
+  on into the node capacitance, which is what rings on a real board, and is why "every node has
+  some capacitance" is physics here rather than a solver's convenience. (A capacitor is refused
+  the same way, for the same reason; both used to render as though the event had not been
+  written.)
+- **`probes=["bus", "i(lp)"]`** reads an inductor's current in **amps** — the state the solve now
+  carries, and the only way to see it. `v0={"bus": 0.0, "i(lp)": 0.0}` sets it; a current `v0`
+  does not name starts at zero, which is at rest.
+- **Still closed-form, by a different decomposition.** An inductor costs the symmetry the R-C
+  eigensolver needs, and eigenvectors do not survive *exactly* critical damping
+  (`R = 2·√(L/C)` — a damping network somebody designs on purpose), where the matrix is defective
+  and a modal solve returns 368 mV of nonsense on a 1 V step. So the inductive path takes the
+  exact zero-order-hold pair for one sample and back-substitutes it through a **Schur** form,
+  whose basis is unitary at every damping. Measured against the textbook series-RLC step
+  response: **3.5e-14 V** underdamped, **8.2e-14** critically damped, **4.3e-14** overdamped, on
+  a 1 V step. A net with **no** inductors does not take this path and renders bit for bit as
+  before.
+- **A ring the grid cannot show aliases**, and that is worse than a decay it cannot show: a fast
+  decay is simply missing from the record, but an aliased ring comes back at a frequency that is
+  not the circuit's and looks entirely plausible. Below 8 samples per ring period the solver says
+  so, and past Nyquist it says the record's ring is an alias.
+
+**[`examples/inductive_handover.py`](../examples/inductive_handover.py) is the worked example**:
+one 3.3 V transceiver, 7 Ω output stage, 8 nH of package, 20 pF of bus. The bus overshoots to
+**+4.396 V** and undershoots to **−1.096 V** — 796 mV past both of the receiver's absolute
+maxima — while the R-C model of the identical board sits 412 mV *inside* both and is wrong about
+every edge; the two records differ by up to **1.758 V, 57 % of the swing**. Letting go while
+carrying 15.4 mA kicks the pad 0.980 V in 195 ps, against the 1.020 V that current into the
+loop's own 66 Ω accounts for, ringing at a measured 1339 MHz against 1320 MHz closed form. And
+12 Ω of series damping is the whole fix, for 131 ps of fall time.
+
+### A line between two nodes, as a lumped ladder
+
+A transmission line inside a net is still deferred — `lossy`, `sparam`, `cascade` and `reflect`
+represent one *as* a line, exactly and at any length, and the only thing they cannot do is sit
+inside a switched net. What the inductor makes reachable is a lumped **ladder**, which is a real
+approximation with a stated error:
+
+```python
+nodes, elements = ws.net.line_ladder("near", "far", z0_ohm=50.0, delay_s=1e-9, tr_s=500e-12)
+```
+
+The edge is an argument rather than an afterthought, because the approximation *is* a cutoff: a
+ladder carries an edge that spans several sections and mangles one that does not — as its own
+overshoot, which is the one artefact indistinguishable from the ringing the net is there to show.
+The section count comes from a **measured** rule:
+
+    sections = ceil(6 × (delay_s / tr_s) ** 1.5)
+
+| line length (delay / rise time) | sections | ladder's own error |
+|---|---|---|
+| 0.5 | 3 | 1.14 % of the swing |
+| 1 | 6 | 1.94 % |
+| 2 | 17 | 1.73 % |
+| 3 | 32 | 1.60 % |
+| 5 | 68 | 1.67 % |
+| 10 | 190 | 1.82 % |
+
+measured against a matched source into a matched load, as the worst deviation from the same edge
+delayed and halved. Below the rule it degrades quickly — about **5 %** of the swing at half the
+count and **10–16 %** at a quarter — so a smaller `sections=` warns rather than rendering
+quietly. The cost of the accuracy is states: the count grows as the 1.5 power of the line's
+length in rise times and the per-interval solve as roughly its cube (0.07 s at five rise times,
+0.45 s at ten, *each time the schedule switches*), so past 256 sections it is refused and names
+the frequency-domain ops instead. `loss_ohm` spreads a total series DC resistance along the line
+— a divider, and nothing about frequency: skin effect and dielectric loss belong to `lossy`.

@@ -129,6 +129,23 @@ and edge lands on its closed form to ~0.2 %, the weakest part misses the receive
 at every hand-over, against the −1.765 V of drift a by-hand sum of the three contributions
 would have accumulated. That last number is the reason the sources belong inside the solve.
 
+[`inductive_handover.py`](inductive_handover.py) is the third: what the same hand-over does once
+the **package inductance** is in the net. An R-C net can only settle; a real bus overshoots and
+rings, and `{"kind": "l", "henry": 8e-9, "ohm": 0.3}` is the reason —
+
+```python
+elements=[{"id": "lp", "kind": "l", "a": "pad", "b": "bus", "henry": 8e-9, "ohm": 0.3},
+          {"id": "cp", "kind": "c", "a": "pad", "b": "gnd", "farad": 2e-12}, ...]
+```
+
+One 3.3 V transceiver with a 7 Ω output stage drives a 20 pF bus to **+4.396 V** and
+**−1.096 V**, 796 mV past both of the receiver's absolute maxima, while the R-C model of the
+identical board sits 412 mV *inside* both: the two records differ by 1.758 V, 57 % of the swing.
+Letting go while carrying 15.4 mA kicks the pad 0.980 V in 195 ps — a current is a state and
+cannot stop — and 12 Ω of series damping is the whole fix, for 131 ps of fall time. The
+inductance is also what makes a line reachable as a lumped ladder (`net.line_ladder`), sized by
+a measured rule rather than a rule of thumb.
+
 ### 7. Specialist topics
 
 | Example | Use it when |
@@ -140,6 +157,7 @@ would have accumulated. That last number is the reason the sources belong inside
 | [`replay.py`](replay.py) | Rebuilding and verifying a set of records from recipes alone, as a consumer of a handed-over archive |
 | [`i2c_bus.py`](i2c_bus.py) | Several parties share one net — a bus, a backplane, any hand-over — and you need a protocol layer above it |
 | [`multi_driver_bus.py`](multi_driver_bus.py) | The parties on a shared net are different parts — own supply, own output impedance, own edge rate, own jitter — and must not inherit each other's levels |
+| [`inductive_handover.py`](inductive_handover.py) | A hand-over has to ring: package inductance, overshoot past a receiver's absolute maxima, and what a series damping resistor costs |
 | [`analog_instrument.py`](analog_instrument.py) | The source is not a serial link: a bench signal (`carrier("sine"/"cmos"/...)`) or a real capture from disk (`Signal.capture`), taking the same later ops |
 
 ## Choosing a dataset generator

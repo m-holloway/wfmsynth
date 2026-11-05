@@ -4,6 +4,8 @@ Run before trusting the generator. Prints PASS/FAIL per property; exits nonzero 
 any failure. This is the "don't fool yourself" gate for the data engine.
 """
 import sys
+import warnings
+
 import numpy as np
 from scipy import signal as sp
 from wfmsynth import physics as P
@@ -2268,6 +2270,117 @@ check("a released driver contributes nothing, whatever its own chain is then doi
                                 sources={"d0": _wloud})),
       "the level a driver was holding when it let go is ABSENT from the stamp, so it cannot be "
       "carried into the next owner's baseline -- the drift this feature was asked for")
+
+# ---- inductance in the shared net, so that a hand-over rings (GitHub #74) ----
+# An R-C net can only SETTLE. Overshoot and ringing need an inductance, and they are what a
+# scope shows at a driver turning on or letting go. The solve is a different decomposition from
+# the R-C tier's (a zero-order-hold pair back-substituted through a Schur form, because an
+# inductor costs the symmetry the eigensolver needs), so exactness is re-established here rather
+# than inherited -- against the textbook series-RLC step response, in all three damping regimes.
+_iL, _iC, _iVS = 100e-9, 100e-12, 1.0
+_ifs, _in = 2e10, 4000
+_it = np.arange(1, _in + 1) / _ifs
+
+
+def _irlc(ohm):
+    spec = {"nodes": ["bus"], "rails": {"vdd": _iVS},
+            "elements": [{"id": "lp", "kind": "l", "a": "vdd", "b": "bus",
+                          "henry": _iL, "ohm": ohm},
+                         {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": _iC}]}
+    return _NET.solve(spec, fs=_ifs, n=_in, probes="bus", v0={"bus": 0.0, "i(lp)": 0.0})
+
+
+def _ianalytic(ohm):
+    al, w0 = ohm / (2.0 * _iL), 1.0 / np.sqrt(_iL * _iC)
+    if al < w0 * (1 - 1e-12):
+        wd = np.sqrt(w0 ** 2 - al ** 2)
+        return _iVS * (1 - np.exp(-al * _it) * (np.cos(wd * _it) + al / wd * np.sin(wd * _it)))
+    if al > w0 * (1 + 1e-12):
+        wd = np.sqrt(al ** 2 - w0 ** 2)
+        return _iVS * (1 - np.exp(-al * _it) * (np.cosh(wd * _it) + al / wd * np.sinh(wd * _it)))
+    return _iVS * (1 - np.exp(-al * _it) * (1 + al * _it))
+
+
+_icrit = 2.0 * np.sqrt(_iL / _iC)
+for _iohm, _ilbl in ((10.0, "underdamped"), (_icrit, "critically damped"),
+                     (4 * np.sqrt(_iL / _iC), "overdamped")):
+    _ierr = float(np.abs(_irlc(_iohm) - _ianalytic(_iohm)).max())
+    check(f"a series RLC IS the analytic step response, {_ilbl}",
+          _ierr < 1e-12,
+          f"max |net - closed form| = {_ierr:.2e} V on a {_iVS:.1f} V step at "
+          f"R = {_iohm:.4g} ohm (R_crit = {_icrit:.4g})")
+
+_iv = _irlc(10.0)
+_ia, _iw0 = 10.0 / (2.0 * _iL), 1.0 / np.sqrt(_iL * _iC)
+_iwd = np.sqrt(_iw0 ** 2 - _ia ** 2)
+_ios, _iwant = float(_iv.max() - _iVS), _iVS * float(np.exp(-_ia * np.pi / _iwd))
+check("and the three numbers a measurement reports off it are the circuit's: ring frequency, "
+      "damping, overshoot",
+      abs(_ios / _iwant - 1.0) < 1e-4,
+      f"first peak {_ios * 1e3:.2f} mV over the level against exp(-alpha pi / wd) = "
+      f"{_iwant * 1e3:.2f} mV; ring at {_iwd / (2 * np.pi) / 1e6:.3f} MHz, "
+      f"tau = {1 / _ia * 1e9:.1f} ns")
+check("  ... and critical damping really is the fastest settle without overshoot, which is why "
+      "the defective case is one somebody designs to and not a corner",
+      _irlc(_icrit * 0.98).max() > _iVS and _irlc(_icrit).max() <= _iVS + 1e-12
+      and int(np.flatnonzero(_irlc(_icrit) > 0.99)[0])
+      < int(np.flatnonzero(_irlc(_icrit * 1.02) > 0.99)[0]),
+      f"R = {_icrit:.4g} ohm reaches 99 % in "
+      f"{int(np.flatnonzero(_irlc(_icrit) > 0.99)[0]) / _ifs * 1e9:.2f} ns with no overshoot; "
+      f"2 % more resistance takes "
+      f"{int(np.flatnonzero(_irlc(_icrit * 1.02) > 0.99)[0]) / _ifs * 1e9:.2f} ns")
+
+# A SWITCH while current flows. The acceptance criterion is continuity, and the sharp statement
+# of it is an identity: split the record at the switch, re-enter the solve with the voltages AND
+# the inductor current it handed over, and the two halves must be the one record bit for bit.
+_ibrd = {"nodes": ["pad", "bus"], "rails": {"vdd": 3.3},
+         "elements": [{"id": "lp", "kind": "l", "a": "pad", "b": "bus", "henry": 4e-9,
+                       "ohm": 0.2},
+                      {"id": "cp", "kind": "c", "a": "pad", "b": "gnd", "farad": 4e-12},
+                      {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": 20e-12},
+                      {"id": "rt", "kind": "r", "a": "bus", "b": "vdd", "ohm": 150.0}],
+         "drivers": [{"id": "d0", "node": "pad", "volts": 0.0, "ohm": 5.0, "state": "driving"}]}
+_ifs2, _in2, _iksw = 4e10, 4000, 2000
+_ipr = ["pad", "bus", "i(lp)"]
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", RuntimeWarning)     # the 4 pF pad settles inside a sample
+    _iwhole = _NET.solve(_ibrd, fs=_ifs2, n=_in2, probes=_ipr,
+                         schedule=[{"t_s": _iksw / _ifs2, "id": "d0", "state": "hiz"}])
+    _ifirst = _NET.solve(_ibrd, fs=_ifs2, n=_iksw, probes=_ipr)
+    _irel = {**_ibrd, "drivers": [{**_ibrd["drivers"][0], "state": "hiz"}]}
+    _isecond = _NET.solve(_irel, fs=_ifs2, n=_in2 - _iksw, probes=_ipr,
+                          v0={nm: _ifirst[nm][-1] for nm in _ipr})
+check("an inductor current is continuous across a switch -- as an IDENTITY, not a tolerance: the "
+      "state handed over at the switch reproduces the record",
+      all(np.array_equal(_iwhole[nm][_iksw:], _isecond[nm]) for nm in _ipr)
+      and all(np.array_equal(_iwhole[nm][:_iksw], _ifirst[nm]) for nm in _ipr),
+      f"the driver lets go sinking {abs(_ifirst['i(lp)'][-1]) * 1e3:.1f} mA, and the pad then "
+      f"overshoots to {_iwhole['pad'][_iksw:].max():.3f} V against a {3.3:.1f} V rail")
+
+# AND A LINE, as a lumped ladder -- the one approximation in this module, so its own error is
+# measured against what it is approximating rather than asserted.
+_ild, _iltr, _ilz = 1e-9, 500e-12, 50.0
+_ilfs = 4e11
+_iln = int(round((10 * _iltr + 3 * _ild) * _ilfs))
+_ilu = np.clip((np.arange(_iln) / _ilfs - 5 * _iltr) / (_iltr / 0.8) + 0.5, 0.0, 1.0)
+_ilvs = np.where((_ilu > 0) & (_ilu < 1), 0.5 - 0.5 * np.cos(np.pi * _ilu), _ilu)
+_ilnodes, _ilels = _NET.line_ladder("a", "b", _ilz, _ild, _iltr)
+_ilspec = {"nodes": ["a", "b"] + _ilnodes,
+           "elements": _ilels + [{"id": "rl", "kind": "r", "a": "b", "b": "gnd", "ohm": _ilz}],
+           "drivers": [{"id": "d", "node": "a", "ohm": _ilz, "state": "driving"}]}
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", RuntimeWarning)
+    _ilgot = _NET.solve(_ilspec, fs=_ilfs, n=_iln, probes="b", sources={"d": _ilvs})
+_ilk = int(round(_ild * _ilfs))
+_ilref = 0.5 * np.concatenate([np.zeros(_ilk), _ilvs[:_iln - _ilk]])
+_ilerr = float(np.abs(_ilgot - _ilref).max()) / 0.5
+check("a lumped ladder at its own measured section count delivers the edge delayed and halved, "
+      "to the error the rule promises",
+      _ilerr < 0.02 and abs(float(_ilgot[-1]) - 0.5) < 1e-3,
+      f"{len(_ilnodes) + 1} sections for a line {_ild / _iltr:.3g} rise times long: "
+      f"{_ilerr * 100:.2f} % of the swing against an ideal delay, and a matched divider at DC "
+      f"({float(_ilgot[-1]):.4f} of 0.5)")
+
 
 check("a lead-in extent STATED in closed form scales with the physics it came from (open_drain: "
       "5 tau is proportional to Rp and to Cb)",

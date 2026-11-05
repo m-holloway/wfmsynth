@@ -12,6 +12,84 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## 0.45.0 — 2026-11-04
+
+A shared net gains inductance, so a hand-over rings instead of merely settling — the last place
+a synthetic record differed from a measured one by more than noise. A net with **no** inductor
+does not take the new code path at all and renders bit for bit as 0.44.0 did.
+
+### Added
+
+- **An inductor element in the shared net** (#74). An R-C net can only settle toward a level.
+  What a scope shows when a fast driver takes a bus, changes it or lets go of it is overshoot
+  and a ring, at a frequency set by the package and trace inductance against the node
+  capacitance and decaying at a rate set by the termination.
+
+  - `{"id": "lp", "kind": "l", "a": "pad", "b": "bus", "henry": 8e-9, "ohm": 0.3}` — `ohm` is
+    the series resistance of the *same piece of wire* (absent means ideal), not a parallel
+    resistor. It is one element with two numbers because the node *between* a series R and a
+    series L has no capacitance, so it is not a state and this tier refuses it; the refusal now
+    says that by name.
+  - `solve(..., probes=["bus", "i(lp)"])` reads an inductor's branch current in **amps** — the
+    state the solve now carries across every switch, and the only way to see it.
+    `v0={"bus": 0.0, "i(lp)": 0.0}` sets it; a current `v0` does not name starts at zero, which
+    is at rest. `v0` must now name every node, and an unknown `v0` key is refused.
+  - `net.line_ladder(a, b, z0_ohm, delay_s, tr_s)` and `net.line_sections(delay_s, tr_s)` — a
+    line between two nodes as a lumped L-C ladder, which is the one approximation in the module.
+    The section count comes from a measured rule, `ceil(6 * (delay/tr) ** 1.5)`, holding the
+    ladder's own error between 1.1 % and 1.9 % of the swing for lines from half a rise time to
+    ten rise times long. A smaller explicit `sections=` warns (about 5 % of the swing at half
+    the rule's count, 10-16 % at a quarter); past 256 sections it is refused and names
+    `lossy` / `sparam` / `cascade` / `reflect`, which represent a line *as* a line at any length.
+  - `examples/inductive_handover.py` — one 3.3 V transceiver, a 7 ohm output stage, 8 nH of
+    package, 20 pF of bus. The bus reaches +4.396 V and -1.096 V, 796 mV past both of the
+    receiver's absolute maxima, while the R-C model of the identical board sits 412 mV *inside*
+    both and is wrong about every edge; the two records differ by up to 1.758 V, 57 % of the
+    swing. Letting go while carrying 15.4 mA kicks the pad 0.980 V in 195 ps against the
+    1.020 V that current into the loop's own 66 ohm accounts for, ringing at a measured
+    1339 MHz against 1320 MHz closed form. 12 ohm of series damping is the whole fix, for
+    131 ps of fall time.
+  - `tests/test_net_inductors.py` (43 tests) and seven new hard checks in `wfmsynth.validate`.
+
+- **A warning for a ring the grid cannot show**, separate from the existing one for a decay it
+  cannot show, because the two fail differently: a fast decay is simply absent from the record,
+  but a fast ring **aliases** and comes back at a frequency that is not the circuit's and looks
+  entirely plausible. It fires below 8 samples per ring period — the library's own k >= 8
+  sizing rule — and says explicitly when the record's ring is past Nyquist and therefore an
+  alias. Once per distinct frequency, not once per interval.
+
+### Changed
+
+- **A schedule event targeting a capacitor or an inductor is refused**, as is a `state` key on
+  either in the description. Both are *state*: a capacitor's charge and an inductor's current
+  are what the solve carries across a switch, so neither can be taken out of the stamp without
+  a discontinuity. Previously an event on a capacitor rendered as though it had not been
+  written — a silent no-op. Refusals only: no rendered samples move, so there is no
+  `compose.NUMERIC_CHANGES` entry.
+- The unsupported-element-kind message now says `'r', 'c' and 'l'`.
+
+### How it stays exact
+
+An inductor's branch current joins the state vector, and the resulting system matrix is no
+longer symmetric — that skew coupling between charge and flux is exactly what makes a mode
+oscillate rather than decay — so the R-C tier's symmetric eigensolver does not apply. Nor do
+eigenvectors in general: at **exactly** critical damping (`R = 2*sqrt(L/C)`, a damping network
+somebody designs on purpose) the matrix is defective, its eigenvector matrix is singular, and a
+modal solve returns 368 mV of nonsense on a 1 V step. So the inductive path takes the exact
+zero-order-hold pair for one sample out of one matrix exponential and back-substitutes it
+through a **Schur** form, whose basis is unitary and therefore well conditioned at every
+damping, one `lfilter` call per state.
+
+Measured against the textbook series-RLC step response: **3.5e-14 V** underdamped, **8.2e-14**
+critically damped, **4.3e-14** overdamped, on a 1 V step; and 2.0e-10 V against an independent
+RK45 integration of a switched two-node board, which is the integrator's own tolerance rather
+than the solve's. The one cost is a rounding floor the R-C path
+does not have, because the answer is accumulated sample by sample rather than evaluated at
+`k dt`: 3.5e-14 V for any mode that decays, and **8.4e-12 V** over 262144 samples of a lossless
+tank, which is the worst case there is. A net with no inductors is verified bit-identical to
+0.44.0 by digest, and the test suite pins it by refusing to let an R-C net enter the inductive
+code at all.
+
 ## 0.44.0 — 2026-11-03
 
 A driver on a shared net may now render its own signal chain as its output level. Nothing

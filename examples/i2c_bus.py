@@ -31,7 +31,8 @@ own pull-up and its own bus capacitance, which is where the interesting physics 
 
 TWO APPROXIMATIONS, NAMED
 -------------------------
-1. The real FET switches on its own terminal voltage. This tier solves lumped R and C, so it
+1. The real FET switches on its own terminal voltage. This tier solves lumped R, L and C --
+   all linear -- so it
    does not. But the scenario already knows who is pulling, so the FET's state is SCHEDULED
    from the holds -- exact for the levels and the falling edge. Its turn-OFF is the part that
    genuinely depends on a voltage (it conducts until the low side rises past Vgs(th)), and

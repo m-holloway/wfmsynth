@@ -408,7 +408,7 @@ def test_a_misspelled_driver_key_is_refused_rather_than_ignored(bad, match):
 
 @pytest.mark.parametrize("bad,match", [
     ({"id": "x", "kind": "c", "a": "bus", "b": "gnd", "farad": 1e-12, "state": "open"},
-     r"element 'x' has unknown key 'state'"),
+     r"c 'x' carries 'state'.*CHARGE is the state"),
     ({"id": "x", "kind": "r", "a": "bus", "b": "gnd", "farad": 1e-12},
      r"element 'x' has unknown key 'farad'"),
     ({"id": "x", "a": "bus", "b": "gnd", "ohm": 1e3}, r"no 'kind'"),

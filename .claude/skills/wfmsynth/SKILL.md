@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus or an instrument, or reproduce a waveform from a recipe.
-version: 5
+version: 6
 ---
 
 # wfmsynth
@@ -45,9 +45,12 @@ hand it over — a bus, a backplane, a level translator — that has no expressi
 "who held the net when". Each driver may bring its OWN chain as its level (`source=`, with a
 required `volts=`), so parties with different supplies, output impedances and edge rates share
 one solve instead of being summed by hand — and a released driver then contributes nothing
-rather than leaving its last level in the next owner's baseline. The protocol above it is yours
-to write (`examples/i2c_bus.py` and `examples/multi_driver_bus.py` are worked ones); see
-`REFERENCE.md`.
+rather than leaving its last level in the next owner's baseline. Elements are lumped R, L and
+C, so a hand-over RINGS rather than merely settling: package inductance against node
+capacitance is what a scope shows at turn-on and release, and it was the last visible
+difference between a synthetic record and a measured one. The protocol above it is yours to
+write (`examples/i2c_bus.py`, `examples/multi_driver_bus.py` and
+`examples/inductive_handover.py` are worked ones); see `REFERENCE.md`.
 
 `ws.IMPAIRMENTS` and `ws.PATTERNS` list what exists; `Signal.stage_kinds()` says which stage each
 op in a chain belongs to.
@@ -192,6 +195,11 @@ was asked for.
     three decades apart, and a bit-rate-derived grid measures none of it. `Signal.net()` says
     so rather than returning a staircase. The same rule as #4, but the fast thing is no longer
     the edge you asked for.
+19. **An under-sampled RING does not go missing, it ALIASES.** A decay the grid cannot show is
+    simply absent from the record; a ring the grid cannot show comes back at a frequency that
+    is not the circuit's and looks entirely plausible. With an inductance on the net, size the
+    grid for 8 samples per ring period (`f0 = 1/(2*pi*sqrt(L*C))`), not just for the edge. The
+    solver warns below that and says explicitly when the record's ring is an alias.
 
 ## Where the boundary sits
 

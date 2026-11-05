@@ -516,9 +516,10 @@ since a measured response must cover the band it is applied to at BOTH ends or `
 
 **Status:** Tier 1 DELIVERED (`wfmsynth/net.py`, `Signal.net`). This is what remains.
 
-Delivered: nodes, rails, lumped R and C, Thevenin drivers with a scheduled output conductance,
-a schedule of absolute-time events against stable ids, several probes off one solve, and an
-exact closed-form solution per configuration. `open_drain_line` is reproduced to 2.2e-15.
+Delivered: nodes, rails, lumped R, L and C, Thevenin drivers with a scheduled output
+conductance, a schedule of absolute-time events against stable ids, several probes off one
+solve, and an exact closed-form solution per configuration. `open_drain_line` is reproduced to
+2.2e-15.
 
 **Deferred, in the order they are likely worth having:**
 
@@ -537,7 +538,11 @@ exact closed-form solution per configuration. `open_drain_line` is reproduced to
    modal basis rather than on the node voltages, which keeps it one `lfilter` per mode instead
    of a per-sample loop and lets an interval that does not move route back to the closed form
    bit-for-bit.
-6. Inductors.
+6. ~~**Inductors.**~~ **DELIVERED** (#74) — see the section below. `{"kind": "l"}` with an
+   optional series `ohm`, its current in the state vector, and a line reachable as a lumped
+   ladder. Item 1 above is NOT closed by it: a ladder is an approximation with a measured error
+   and a section count that grows as the 1.5 power of the line's length in rise times, so a
+   distributed element is still the distributed tier's job.
 
 **Why the tier order was inverted, since the issue proposed the frequency-domain solve first.**
 For a LUMPED switched net the closed form is exact: between events the network is constant, the
@@ -637,6 +642,84 @@ closed form, so the reduction to tier 1 is `np.array_equal` and not a tolerance.
 3. **Driver sources as labels.** `hold_windows` says who held the net; what each driver was
    *sending* while it held is in its own chain and is not emitted back out. Related to #72
    item 4.
+
+### #74: inductance in the shared net, so that a hand-over rings
+
+**Status:** DELIVERED (`{"kind": "l", "henry":, "ohm":}`, `probes=["i(lp)"]`, `v0={"i(lp)":}`,
+`net.line_ladder` / `net.line_sections`, `examples/inductive_handover.py`,
+`tests/test_net_inductors.py`). This closes deferred item 6 above. Acceptance criteria 1-3 of
+the issue are pinned in `validate.py` as hard checks, and a net with no inductors is verified
+bit-identical to 0.44.0 by digest, in the test suite by a sentinel that refuses to let an R-C
+net enter the inductive code at all.
+
+**Why the decomposition had to change, and why not eigenvectors.** An inductor's branch current
+joins the state vector, and the resulting system matrix is no longer symmetric — that skew
+coupling between charge and flux is exactly what makes a mode OSCILLATE rather than decay — so
+`eigh` does not apply. A general eigendecomposition does not either: at EXACTLY critical damping
+(`R = 2*sqrt(L/C)`, which is a damping network somebody designs on purpose) the matrix is
+defective, its eigenvector matrix is singular, and the modal solve returns **368 mV** of
+nonsense on a 1 V step. Measured, in the obvious implementation, before it was replaced. So the
+inductive path takes the exact zero-order-hold pair for one sample from one matrix exponential
+(van Loan's identity, so `W` is never inverted) and back-substitutes it through a SCHUR form,
+whose basis is unitary and therefore `cond == 1` at every damping. Each triangular row is one
+`lfilter` call, as in the source path.
+
+The cost is a rounding floor the R-C path does not have, because the answer is accumulated one
+sample at a time rather than evaluated at `k dt`: **3.5e-14 V** on a 1 V step for any mode that
+decays, and **8.4e-12 V** over 262144 samples of a LOSSLESS tank, the worst case there is. That
+is the trade — exactness at critical damping, and one code path for all three regimes, against
+a floor at 1e-13.
+
+**Four decisions worth recording.**
+
+1. **An inductor is not switchable, and neither is a capacitor.** Both are STATE; removing
+   either from the stamp would take its current or its charge to zero within one sample. Both
+   are now refused by name, in the description and in the schedule. Before this, an event on a
+   capacitor rendered as though it had not been written — a silent no-op, and the same class of
+   bug as the misspelled-key refusals 0.44.0 added.
+2. **The series resistance lives ON the inductor** (`ohm`), not as a separate `r`. The node
+   between a series R and a series L has no capacitance, so it is not a state and this tier
+   refuses it — and the refusal now says so by name. A bond wire is one piece of metal with
+   both properties, so it is one element with both numbers. The two-element form is still
+   expressible where the intermediate node has real capacitance, and `tests/test_net_inductors.py`
+   pins the two against each other to 1e-5 V (the difference being the parasitic the split form
+   has to invent, not the reading of `ohm`).
+3. **"Every node has capacitance" was kept rather than relaxed.** Eliminating capacitance-free
+   nodes algebraically would have let the series-R-then-L form through, but an inductor in
+   series with an opening switch and no capacitance across it is a NON-physical model — the
+   current has nowhere to go, and the real board's answer is the pad capacitance ringing. The
+   rule is the physics, so the refusal stands and the message names the fix.
+4. **An under-resolved RING gets its own warning, separate from an under-resolved decay.** A
+   decay too fast for the grid is simply absent from the record; a ring too fast ALIASES and
+   comes back at a frequency that is not the circuit's and looks entirely plausible. The warning
+   fires below 8 samples per period (the library's own k >= 8 rule) and says explicitly which
+   side of Nyquist the mode fell on.
+
+**The line, which the issue marked optional.** `line_ladder` emits a lumped L-C ladder with the
+line's own capacitance as a half section at each end, sized by a MEASURED rule,
+`ceil(6 * (delay/tr) ** 1.5)`, which holds its error between 1.1 % and 1.9 % of the swing for
+lines from half a rise time to ten rise times long (measured at seven lengths; three of them are
+pinned in `tests/test_net_inductors.py` and one in `validate.py`). Below the rule it degrades to ~5 % at half
+the count and 10-16 % at a quarter, so an explicit smaller `sections=` warns. It is refused past
+256 sections, because the state count grows as the 1.5 power of the line's length in rise times
+and the per-interval solve as roughly its cube — 0.45 s at ten rise times, *per switch*. An
+electrically long line is still `lossy` / `sparam` / `cascade` / `reflect`, which represent it
+exactly at any length; the only thing they cannot do is sit inside a switched net.
+
+**Deferred from this, in order:**
+
+1. **A distributed line inside a net** (#72 item 1, unchanged). The ladder is an approximation
+   with a stated error and a cost that grows steeply; a real line needs the frequency-domain
+   tier.
+2. **Frequency-dependent line loss.** `loss_ohm` spreads a total series DC resistance along the
+   ladder and is nothing more than a divider. Skin effect and dielectric loss are `lossy`'s, and
+   putting them in a ladder would mean a per-section pole nobody measured.
+3. **Mutual inductance between branches** (`k` or a mutual-henry matrix), for a connector or a
+   bond-wire pair whose coupled inductance is the actual aggressor. The state system already
+   carries branch currents, so this is an off-diagonal in the `M` block rather than new
+   machinery — but it needs its own measured check against a closed form.
+4. **An inductor current emitted as a label.** `probes=["i(lp)"]` reads it; nothing emits an
+   interval of it back out, same as #72 item 4.
 
 ## Known limitations and claim boundaries
 

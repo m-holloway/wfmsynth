@@ -33,6 +33,7 @@ DEMOS = [
     "events.py",
     "ground_truth.py",
     "i2c_bus.py",
+    "inductive_handover.py",
     "multi_driver_bus.py",
     "non_integer_sps.py",
     "provenance.py",

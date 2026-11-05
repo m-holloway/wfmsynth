@@ -217,7 +217,10 @@ legacy array-warp workflows but should not be the default for a new physical cha
    the library deliberately takes no position on the protocol itself.
    [`examples/multi_driver_bus.py`](examples/multi_driver_bus.py) is the companion: three
    transceivers of different supplies, output impedances and edge rates on one terminated
-   bus, each driving through its own rendered chain.
+   bus, each driving through its own rendered chain, and
+   [`examples/inductive_handover.py`](examples/inductive_handover.py) is what the same
+   hand-over does once the package inductance is in the net: overshoot and ringing past the
+   receiver's absolute maxima, where the R-C model of the identical board passes.
 6. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
    samples/UI, two-rate acquisition, and localized events (needles in a long record)
    are indexed in [`examples/README.md`](examples/README.md).
@@ -229,7 +232,7 @@ legacy array-warp workflows but should not be the default for a new physical cha
 | Composition and units | `compose`, `grid`, `streams` | `Signal`, recipes, deterministic factor streams, contrastive pairs |
 | Sources and effects | `physics`, `capture`, `impairments`, `events`, `grammar` | Digital/RF/analog/CMOS sources, a real capture from disk, channels, reflections, jitter, named faults, localized needles (incl. a generic clamped-exponential rail transient), broad shape generation |
 | Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, a probe pack (loading, compensation, ground-lead ring, termination, AC coupling, overload recovery), scope/ADC effects, segmented PAM4 datasets |
-| Links and systems | `rx`, `cdr`, `sparam`, `net`, `scenario`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, shared nets (several drivers, switched terminations, each driver optionally rendering its own chain as its level) and the scenario layer that schedules them from "who held the net when", multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |
+| Links and systems | `rx`, `cdr`, `sparam`, `net`, `scenario`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, shared nets (several drivers, switched terminations, R/L/C elements so a hand-over rings, each driver optionally rendering its own chain as its level) and the scenario layer that schedules them from "who held the net when", multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |
 | Dataset quality | `measure`, `sweep`, `simreal` | Measured labels, confounder control, synthetic-vs-real separability |
 | Scale and trust | `stream`, `validate` | Bounded-memory channel processing and physical-property assertions |
 | Long-record performance | `tools/benchmark.py`, `response_cache` | A benchmark suite gated in CI on peak memory and the scaling ratio `t(2n)/t(n)`; `apply_transfer(method="overlap")` for a block path that holds ~1.1x the record instead of ~5x; `response_cache()` to reuse a channel's minimum-phase response across a batch (`dataset()` already does) |

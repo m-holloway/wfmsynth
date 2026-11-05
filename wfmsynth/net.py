@@ -30,6 +30,31 @@ the network constant BETWEEN events, which is the one thing the closed form belo
 quantity that varies DURING an interval (`gate`, a turn-on slew; `relax`, settling toward
 another strength) is refused by name rather than by silence, with what to do instead.
 
+AN INDUCTOR, AND WHY A HAND-OVER RINGS
+--------------------------------------
+`{"kind": "l", "a": ..., "b": ..., "henry": ..., "ohm": ...}` is a package or trace inductance,
+with `ohm` the series resistance of the same piece of wire (absent means ideal). It is what a
+scope actually shows at a driver turning on or letting go: overshoot and a ring at a frequency
+set by the inductance against the node capacitance, decaying at a rate set by the termination.
+An RC net can only settle; it cannot overshoot, so a hand-over rendered without inductance is
+the one place a synthetic record differs from a measured one by more than noise.
+
+The series `ohm` is on the inductor rather than a separate `r` on purpose: the node BETWEEN a
+series resistor and a series inductor has no capacitance, and this tier solves states (below),
+so it would be refused. A bond wire is one piece of metal with both properties, so it is one
+element with both numbers.
+
+An inductor's CURRENT is a state variable, carried across every switch exactly as capacitor
+charge is -- which is why it is not switchable and the schedule refuses it by name. Removing an
+inductor from the stamp would take its current to zero within one sample, and that is the one
+thing an inductor cannot do. Switch what is in SERIES with it (the driver, or an `r`): the
+current then keeps flowing into the node capacitance, which is what rings on a real board, and
+is why "every node has some capacitance" is a physical rule here rather than a solver's
+convenience.
+
+`solve(..., probes=["bus", "i(lp)"])` reads an inductor's current in AMPS, which is the only
+way to see the state the solve now carries; `v0={"bus": 0.0, "i(lp)": 0.0}` sets it.
+
 A DRIVER WHOSE LEVEL IS A WAVEFORM
 ----------------------------------
 `sources={"d0": volts_per_sample}` gives a driver a per-sample Thevenin level instead of the
@@ -84,23 +109,49 @@ is evaluated for every sample of the interval AT ONCE. That means:
 `physics.open_drain_line` is the one-node case of exactly this recurrence, and
 `tests/test_net.py` pins the two against each other.
 
+WITH AN INDUCTOR IT IS STILL CLOSED-FORM, BY A DIFFERENT DECOMPOSITION
+---------------------------------------------------------------------
+An inductor adds its branch current to the state vector, and the resulting system matrix is no
+longer symmetric -- the skew coupling between charge and flux is precisely what makes a mode
+OSCILLATE rather than decay -- so `eigh` does not apply. Eigenvectors in general do not either:
+at EXACTLY critical damping (`R = 2*sqrt(L/C)`, which is a damping network somebody designs on
+purpose) the matrix is defective, its eigenvector matrix is singular, and a modal solve returns
+hundreds of millivolts of nonsense. So the inductive path instead takes the exact zero-order-hold
+pair for one sample (`Phi = expm(-W dt)` and its integral, both from one matrix exponential) and
+back-substitutes them through a SCHUR form, whose basis is unitary and therefore well conditioned
+for every damping. Each triangular row is then one first-order recurrence in `lfilter`, as in
+`_step_sources`, with the rows below it already solved.
+
+That is still the analytic answer, now accumulated one sample at a time rather than evaluated at
+`k dt` in closed form, so it carries a rounding floor instead of none: measured 3.5e-14 V on a
+1 V step for any mode that decays, and 8.4e-12 V over 262144 samples of a LOSSLESS tank, the
+worst case there is, where nothing damps the accumulation. It buys exactness at critical damping
+and it is identical in all three damping regimes. A net with no inductors does not take this
+path at all and renders bit for bit as before.
+
 WHAT THIS TIER DOES NOT DO, stated so nobody infers it
 -------------------------------------------------------
-Transmission lines and S-parameter blocks inside a net, sub-nets, inductors, voltage-dependent
+Transmission lines and S-parameter blocks inside a net, sub-nets, voltage-dependent
 (nonlinear) laws, and emitting driver/element intervals as events. A net whose elements are all
-lumped R and C is solved exactly here; the frequency-domain tier earns its place when
+lumped R, L and C is solved exactly here; the frequency-domain tier earns its place when
 distributed elements arrive, which is the case this one cannot represent at all.
+
+A LINE between two nodes is reachable as a lumped ladder of the elements above --
+`line_ladder()` builds one, sized by its own measured rule -- which is a real approximation with
+a stated error rather than a distributed solve. It has a cutoff: a ladder passes an edge whose
+rise time spans several sections and mangles one that does not, so the helper refuses a count
+that cannot carry the edge you say you are sending.
 
 A driver's SOURCE may be a waveform (above); its OUTPUT CONDUCTANCE still may not. A resistance
 that varies within an interval is the one thing the closed form cannot absorb, and it is why
-`gate` and `relax` are refused by name.
+`gate` and `relax` are refused by name. An inductance is constant for the same reason.
 """
 from __future__ import annotations
 
 import warnings
 
 import numpy as np
-from scipy.linalg import eigh
+from scipy.linalg import eigh, expm, schur
 from scipy.signal import lfilter
 
 GND = "gnd"
@@ -137,7 +188,23 @@ _DEFERRED_KEYS = {
 # solve carries across every switch. As in a recipe op, anything beginning with an underscore
 # is annotation and is ignored.
 _ELEMENT_KEYS = {"r": frozenset({"id", "kind", "a", "b", "ohm", "state"}),
-                 "c": frozenset({"id", "kind", "a", "b", "farad"})}
+                 "c": frozenset({"id", "kind", "a", "b", "farad"}),
+                 "l": frozenset({"id", "kind", "a", "b", "henry", "ohm"})}
+
+# Why a schedule cannot target one of these at all, said per kind rather than as "unknown id".
+# Both are STATE: a capacitor's charge and an inductor's current are what the solve carries
+# across a switch, so neither can be taken out of the stamp without a discontinuity. Today an
+# event on either rendered as though it had not been written.
+_UNSWITCHABLE = {
+    "c": "a capacitor's CHARGE is the state this solve carries across every switch, so a "
+         "capacitor is never removed from the stamp and there is nothing here for an event to "
+         "set. Switch a resistor or a driver in series with it.",
+    "l": "an inductor's CURRENT is the state this solve carries across every switch. 'g' is a "
+         "conductance and an inductor has none, and switching it out would take its current to "
+         "zero within one sample -- the one thing an inductor cannot do. Switch what is in "
+         "SERIES with it (the driver, or an 'r'): the current then flows on into the node "
+         "capacitance, which is what rings on a real board.",
+}
 _DRIVER_KEYS = frozenset({"id", "node", "volts", "ohm", "state"})
 
 
@@ -185,6 +252,33 @@ def _conductance(e, ov, what):
     return 1.0 / ohm
 
 
+def _check_inductor(e):
+    """`henry` and the optional series `ohm`, checked where the description is read rather than
+    where the matrix is stamped, so a net with an inductor it cannot solve is refused before any
+    of it renders."""
+    eid = e["id"]
+    if "henry" not in e:
+        raise ValueError(f"net: inductor {eid!r} has no 'henry'; an inductance in henries is "
+                         f"what makes it an inductor (a few nanohenries for a bond wire, "
+                         f"a few hundred picohenries per millimetre of trace)")
+    h = float(e["henry"])
+    if h <= 0:
+        raise ValueError(f"net: inductor {eid!r} has henry={h!r}; an inductance must be "
+                         f"positive. Zero henries is a wire: name both ends the same node "
+                         f"instead, or give the wire the series 'ohm' it really has.")
+    r = float(e.get("ohm", 0.0))
+    if r < 0:
+        raise ValueError(f"net: inductor {eid!r} has ohm={r!r}; on an inductor 'ohm' is the "
+                         f"series resistance of the same piece of wire and is non-negative "
+                         f"(absent or 0 means ideal). It is not a parallel resistor, and it "
+                         f"is not switchable.")
+    if e.get("a") == e.get("b"):
+        raise ValueError(f"net: inductor {eid!r} has both ends on {e.get('a')!r}. A loop of "
+                         f"inductance with nothing in it carries a current the solve cannot "
+                         f"determine -- at DC an inductor is a short, so the loop divides "
+                         f"current by nothing.")
+
+
 def _check(net):
     """Validate the description and return (node_index, rails, ids). Every refusal names the
     thing it is refusing."""
@@ -210,28 +304,33 @@ def _check(net):
         if eid in ids:
             raise ValueError(f"net: duplicate id {eid!r}; ids address the schedule and must be unique")
         ids[eid] = e
+        kind = None
         if what == "driver":
             if "node" not in e:
                 raise ValueError(f"net: driver {eid!r} has no 'node'; a driver drives one node")
-            # an unknown kind is named by `_stamp`, which says what this tier supports, so the
-            # key check falls back to the union rather than pre-empting it with a worse message
             ok = _DRIVER_KEYS
         else:
             if "kind" not in e:
-                raise ValueError(f"net: element {eid!r} has no 'kind'; this tier has 'r' and 'c'")
+                raise ValueError(f"net: element {eid!r} has no 'kind'; this tier has 'r', 'c' "
+                                 f"and 'l'")
             kind = str(e["kind"]).lower()
             if kind not in _ELEMENT_KEYS:
                 # Named HERE rather than when the element is first stamped: an element the tier
                 # cannot represent is a broken description whether or not the schedule happens
                 # to leave it open, and refusing it only when it conducts means a net with an
-                # inductor parked open renders as though the inductor were not there.
+                # element parked open renders as though it were not there.
                 raise ValueError(f"net: element {eid!r} has kind {e['kind']!r}; this tier "
-                                 f"supports 'r' and 'c' only (see the module docstring for "
-                                 f"what is deferred)")
+                                 f"supports 'r', 'c' and 'l' only (see the module docstring "
+                                 f"for what is deferred)")
             ok = _ELEMENT_KEYS[kind]
+            if kind == "l":
+                _check_inductor(e)
         for k in sorted(set(e) - ok):
             if k.startswith("_"):
                 continue                     # annotation, as in a recipe op
+            if k == "state" and kind in _UNSWITCHABLE:
+                raise ValueError(f"net: {kind} {eid!r} carries 'state', but "
+                                 f"{_UNSWITCHABLE[kind]}")
             if k == "source" and what == "driver":
                 raise ValueError(
                     f"net: driver {eid!r} carries 'source' in its description. A per-sample "
@@ -278,6 +377,10 @@ def _stamp(net, index, rails, state, over=None, sources=None):
         if kind == "c":
             add(C, e["a"], e["b"], float(e["farad"]))
             continue
+        if kind == "l":
+            # a branch CURRENT rather than a conductance, so it is not in G at all; `_inductors`
+            # collects it once per solve, because an inductor is not switchable
+            continue
         if not state.get(eid, True):
             continue
         ov = over.get(eid, {})
@@ -317,8 +420,8 @@ def _stamp(net, index, rails, state, over=None, sources=None):
     return G, C, b, inj
 
 
-def _modes(G, C, b, index):
-    """(v_ss, eigenvalues, V, C) for one configuration -- the closed-form ingredients."""
+def _require_states(C, index):
+    """Every node's voltage has to BE a state, which means every node needs capacitance."""
     # EXACT zero, not np.isclose. These are farads: a 400 pF bus capacitance is 4e-10, and
     # np.isclose's default atol of 1e-8 calls that zero -- which rejected the open-drain bus,
     # the very net this tier exists for. The matrix is stamped here, so a node untouched by any
@@ -330,7 +433,14 @@ def _modes(G, C, b, index):
             f"net: node(s) {sorted(names)} have no capacitance, so their voltage is algebraically "
             f"determined rather than a state, and this tier solves states. Every real node has "
             f"some capacitance -- give it a small 'c' to gnd (a parasitic picofarad is usually "
-            f"honest) -- or remove the node and wire through it.")
+            f"honest) -- or remove the node and wire through it. A series resistance and a "
+            f"series inductance between the same two nodes are ONE element: give the 'l' an "
+            f"'ohm' rather than inventing a node between them.")
+
+
+def _modes(G, C, b, index):
+    """(v_ss, eigenvalues, V, C) for one configuration -- the closed-form ingredients."""
+    _require_states(C, index)
     if np.linalg.matrix_rank(G) < G.shape[0]:
         raise ValueError(
             "net: the conductance matrix is singular, so at least one node has no resistive path "
@@ -339,6 +449,223 @@ def _modes(G, C, b, index):
     v_ss = np.linalg.solve(G, b)
     lam, V = eigh(G, C)                 # G V = C V diag(lam); V^T C V = I
     return v_ss, lam, V, C
+
+
+def _inductors(net, index, rails):
+    """The inductor branches of a net, or None when it has none.
+
+    `(ids, henry, series_ohm, A, e)`, where `A[node, k]` is +1 at inductor k's `a` end and -1 at
+    its `b` end -- its current flows a -> b, so it LEAVES node a -- and `e[k]` carries the rail
+    voltages at whichever of its ends are rails. An inductor is not switchable, so none of this
+    depends on the schedule and it is built once per solve rather than once per interval."""
+    ls = [e for e in net.get("elements", []) if str(e["kind"]).lower() == "l"]
+    if not ls:
+        return None
+    A = np.zeros((len(index), len(ls)))
+    e = np.zeros(len(ls))
+    for k, el in enumerate(ls):
+        for end, sign in ((el["a"], 1.0), (el["b"], -1.0)):
+            if end in index:
+                A[index[end], k] += sign
+            elif end in rails:
+                e[k] += sign * float(rails[end])
+    return ([el["id"] for el in ls],
+            np.array([float(el["henry"]) for el in ls], float),
+            np.array([float(el.get("ohm", 0.0)) for el in ls], float), A, e)
+
+
+def _rlc_system(G, C, b, ind):
+    """`M x' = -K x + f` for one configuration of a net WITH inductors, where the state vector
+    is `x = [node voltages; inductor currents]`.
+
+    Nodal KCL gains the branch currents (`G v + A i = b`) and each inductor brings its own law
+    (`L i' = v_a - v_b - R_s i`, which is `A^T v - R_s i + e`), so
+
+        M = [[C, 0], [0, diag(henry)]]      K = [[G, A], [-A^T, diag(ohm)]]      f = [b, e]
+
+    `M` is symmetric positive definite, which is the same statement as "every node has
+    capacitance and every inductance is positive". `K` is NOT symmetric, and that asymmetry is
+    the physics: it is the skew coupling between charge and flux, and it is what turns a pair of
+    real decaying modes into a complex conjugate pair that rings."""
+    ids, henry, rs, A, e = ind
+    n, m = G.shape[0], len(ids)
+    K = np.block([[G, A], [-A.T, np.diag(rs)]])
+    M = np.block([[C, np.zeros((n, m))], [np.zeros((m, n)), np.diag(henry)]])
+    return K, M, np.concatenate([b, e])
+
+
+def _rlc_dc(K, f, index, ind):
+    """The DC operating point of one configuration, and the refusal when it has none."""
+    if np.linalg.matrix_rank(K) < K.shape[0]:
+        raise ValueError(
+            f"net: this configuration has no DC operating point, so there is nothing for the "
+            f"transient to settle to. Either a node has no DC path to a rail or to {GND!r} -- a "
+            f"node left floating by a schedule needs a leak resistor to somewhere -- or two or "
+            f"more IDEAL inductors ({sorted(ind[0])}) sit in parallel or form a loop: at DC an "
+            f"inductor is a short, so the loop divides current by nothing and there is no single "
+            f"answer. Give one of them the series 'ohm' the wire really has.")
+    return np.linalg.solve(K, f)
+
+
+def _rlc_prepare(K, M, dt):
+    """`(S, Q, Gam, lam)` for one configuration of a net with inductors: the exact zero-order-hold
+    pair for one sample, in a basis that is well conditioned for every damping.
+
+    `Phi = expm(-W dt)` with `W = M^-1 K` advances the state one sample, and
+    `Gam = (integral of expm(-W u) du over one sample) M^-1` carries the forcing held across it.
+    Both come out of ONE matrix exponential, by van Loan's identity
+
+        expm([[-W dt, I dt], [0, 0]]) = [[Phi, integral], [0, I]]
+
+    which also means `W` is never inverted: a configuration whose `K` is singular is refused by
+    `_rlc_dc` for having no DC point, not by a linear algebra error here.
+
+    The decomposition is a SCHUR form (`Phi = Q S Q^H`, `S` upper triangular, `Q` unitary) and
+    not an eigendecomposition, which matters at exactly critical damping (`R = 2 sqrt(L/C)` --
+    a damping network somebody designs on purpose). There `Phi` is defective: its eigenvalues
+    coincide, its eigenvector matrix is singular, and a modal solve of the same circuit returns
+    368 mV of nonsense on a 1 V step. `Q` is unitary for every matrix, so `cond(Q) == 1` and
+    there is no regime where this degrades."""
+    s = K.shape[0]
+    W = np.linalg.solve(M, K)
+    Z = np.zeros((s, s))
+    E = expm(np.block([[-W * dt, np.eye(s) * dt], [Z, Z]]))
+    Gam = np.linalg.solve(M.T, E[:s, s:].T).T          # (integral) @ inv(M), M symmetric
+    S, Q = schur(E[:s, :s], output="complex")
+    # the CONTINUOUS eigenvalues, for the resolution warning only: read off Phi they would come
+    # back through a logarithm whose branch is exactly what aliasing destroys, so a ring too
+    # fast for the grid would be reported at the wrong frequency -- the one thing the warning
+    # exists to say.
+    return S, Q, Gam, np.linalg.eigvals(W)
+
+
+def _rlc_run(S, Q, Gam, F, x0, nsamp):
+    """One interval of a net with inductors: `x[k+1] = Phi x[k] + Gam f[k]`, back-substituted
+    through the Schur form so that each row is one scalar recurrence.
+
+    In `y = Q^H x` the step is `y[k+1] = S y[k] + Q^H Gam f[k]` with `S` upper triangular, so
+    row r depends only on rows BELOW it in the state vector (`r+1 ...`), which are already
+    solved. Each row is then a first-order recurrence run by `lfilter` rather than by a Python
+    loop over samples -- the same shape as `_step_sources`, one call per state instead of one
+    per mode.
+
+    `F` is the forcing, one column per sample, or a single column for an interval across which
+    nothing moves (the ordinary case: it is broadcast). This is the analytic answer for a source
+    held across each sample, accumulated sample by sample rather than evaluated at `k dt`, so it
+    carries a rounding floor the RC path does not: measured 3.5e-14 V on a 1 V step for any mode
+    that decays, and 8.4e-12 V over 262144 samples of a lossless tank, where nothing damps the
+    accumulation at all."""
+    s = S.shape[0]
+    U = Q.conj().T @ (Gam @ F)                 # the forcing in the Schur basis
+    y0 = Q.conj().T @ x0
+    Y = np.empty((s, nsamp), complex)
+    for r in range(s - 1, -1, -1):
+        w = np.full(nsamp, U[r, 0]) if U.shape[1] == 1 else U[r].copy()
+        if r + 1 < s:
+            # `y_r[k+1]` takes the lower rows at sample k. Y holds samples 1..nsamp, so sample k
+            # is y0 when k == 0 and Y[:, k-1] after that -- an off-by-one here is a quarter of a
+            # percent of the swing and looks exactly like a plausible answer.
+            w = w + S[r, r + 1:] @ np.concatenate([y0[r + 1:, None], Y[r + 1:, :-1]], axis=1)
+        # zi holds S_rr * y_r[0], the previous sample's state: continuity across a switch is the
+        # capacitor voltages AND the inductor currents carried forward, which is the physics.
+        Y[r] = lfilter([1.0], [1.0, -S[r, r]], w, zi=np.array([S[r, r] * y0[r]]))[0]
+    return np.real(Q @ Y).T
+
+
+# A lumped ladder's own error, as a fraction of the swing, is set by how many sections an edge
+# spans -- not by the section count alone, because phase error accumulates along the line. The
+# measured rule is N = CEIL * (delay/rise time) ** EXP, which holds the error between 1.1 % and
+# 1.9 % of the swing for a line half a rise time to ten rise times long;
+# `tests/test_net_inductors.py` pins three points of that and `validate.py` one. Below the rule
+# it degrades fast: about 5 % of the swing at half the count and 10 to 16 % at a quarter.
+_LADDER_CEIL, _LADDER_EXP, _LADDER_MAX = 6.0, 1.5, 256
+
+
+def line_sections(delay_s, tr_s):
+    """How many L-C sections a lumped ladder needs to carry an edge of 10-90 % rise time `tr_s`
+    down a line of one-way delay `delay_s`, holding the ladder's own error near 2 % of the
+    swing. See `line_ladder`, which is where the number is used and the measurement is stated."""
+    delay_s, tr_s = float(delay_s), float(tr_s)
+    if delay_s <= 0 or tr_s <= 0:
+        raise ValueError(f"net: a line needs a positive delay and a positive rise time; got "
+                         f"delay_s={delay_s!r} tr_s={tr_s!r}")
+    return max(1, int(np.ceil(_LADDER_CEIL * (delay_s / tr_s) ** _LADDER_EXP)))
+
+
+def line_ladder(a, b, z0_ohm, delay_s, tr_s, sections=None, loss_ohm=None, prefix="ln"):
+    """A lumped L-C ladder standing in for a line of impedance `z0_ohm` and one-way delay
+    `delay_s` between nodes `a` and `b`. Returns ``(nodes, elements)`` to splice into a net.
+
+    This is an APPROXIMATION, which the rest of this module is not, and the approximation is a
+    cutoff: a ladder is a low-pass filter, so it carries an edge that spans several sections and
+    mangles one that does not -- as its own overshoot, which is the one artefact indistinguishable
+    from the inductive ringing the net is being built to show. So the edge is an argument rather
+    than an afterthought. `tr_s` is the 10-90 % rise time of the fastest edge you intend to send
+    down it, and the default section count comes from it:
+
+        sections = ceil(6 * (delay_s / tr_s) ** 1.5)
+
+    which is MEASURED, not a rule of thumb: against a matched source and load it holds the
+    ladder's error between 1.1 % and 1.9 % of the swing for lines from half a rise time to ten
+    rise times long. Below it the error grows quickly -- about 5 % of the swing at half the
+    count, 10 to 16 % at a quarter -- so a smaller `sections` warns rather than renders
+    quietly.
+
+    The cost of that accuracy is states: the count grows as the 1.5 power of the line's length in
+    rise times, and the per-interval solve as roughly its cube (0.07 s at five rise times, 0.45 s
+    at ten, each time the schedule switches). Past `_LADDER_MAX` sections it is refused, because
+    an electrically LONG line is what the frequency-domain ops are for -- `lossy`, `sparam`,
+    `cascade` and `reflect` represent a line as a line, exactly and at any length, and the only
+    thing they cannot do is sit inside a switched net.
+
+    `loss_ohm` is the line's total series DC resistance, spread evenly along it. It is a DC
+    resistance and nothing more: skin effect and dielectric loss are frequency-dependent and
+    belong to `lossy`, which models them properly.
+
+    The line's own capacitance appears as a half section at each end, so `a` and `b` come out
+    with capacitance whether or not the caller gave them any -- which is also what makes them
+    solvable nodes here."""
+    z0, td = float(z0_ohm), float(delay_s)
+    if z0 <= 0:
+        raise ValueError(f"net: a line needs a positive impedance; got z0_ohm={z0_ohm!r}")
+    rule = line_sections(td, tr_s)
+    n = rule if sections is None else int(sections)
+    if n < 1:
+        raise ValueError(f"net: a ladder needs at least one section; got sections={sections!r}")
+    if n > _LADDER_MAX:
+        raise ValueError(
+            f"net: this line is {td / float(tr_s):.3g} rise times long, so carrying its edge "
+            f"takes {rule} ladder sections ({2 * rule} more states) and more than "
+            f"{_LADDER_MAX} is refused: the solve cost grows as roughly the cube of the state "
+            f"count, per switch. A line this long is what the frequency-domain ops are for -- "
+            f"`lossy`, `sparam`, `cascade`, `reflect` -- which represent it exactly at any "
+            f"length. Pass `sections=` explicitly if you mean to accept a coarser ladder.")
+    if sections is not None and n < rule:
+        warnings.warn(
+            f"net: a {n}-section ladder for a line {td / float(tr_s):.3g} rise times long is "
+            f"under the measured rule of {rule}. The ladder's own cutoff then shows as overshoot "
+            f"and a softened edge -- about 5 % of the swing at half the rule's count and 10 to "
+            f"16 % at a quarter -- and that overshoot is indistinguishable from the circuit's "
+            f"own ring, which is what this net is for.", RuntimeWarning, stacklevel=2)
+    # L and C per section from the two line equations: Z0 = sqrt(L/C), delay = sqrt(L*C).
+    henry, farad = z0 * td / n, td / (z0 * n)
+    ohm = (float(loss_ohm) / n) if loss_ohm else None
+    nodes = [f"{prefix}/{k}" for k in range(1, n)]
+    elements = []
+    for k in range(n):
+        el = {"id": f"{prefix}/l{k}", "kind": "l",
+              "a": a if k == 0 else f"{prefix}/{k}",
+              "b": b if k == n - 1 else f"{prefix}/{k + 1}", "henry": henry}
+        if ohm is not None:
+            el["ohm"] = ohm
+        elements.append(el)
+    # half a section's capacitance at each end -- a symmetric T ladder, and the reason `a` and
+    # `b` need no capacitance of their own
+    elements.append({"id": f"{prefix}/c0", "kind": "c", "a": a, "b": GND, "farad": farad / 2})
+    elements.append({"id": f"{prefix}/cn", "kind": "c", "a": b, "b": GND, "farad": farad / 2})
+    elements += [{"id": f"{prefix}/c{k}", "kind": "c", "a": f"{prefix}/{k}", "b": GND,
+                  "farad": farad} for k in range(1, n)]
+    return nodes, elements
 
 
 def schedule_from_waveform(x, driver_id, on_when="high"):
@@ -371,6 +698,10 @@ def _check_event(ev, ids):
     if ev["id"] not in ids:
         raise ValueError(f"net: schedule event at t={ev['t_s']} targets id {ev['id']!r}, which "
                          f"is not an element or driver. Known ids: {sorted(ids)}")
+    kind = str(ids[ev["id"]].get("kind", "")).lower()
+    if kind in _UNSWITCHABLE:
+        raise ValueError(f"net: schedule event at t={ev['t_s']} targets {kind} {ev['id']!r}, but "
+                         f"{_UNSWITCHABLE[kind]}")
     for k in sorted(set(ev) - _EVENT_KEYS):
         if k in _DEFERRED_KEYS:
             raise ValueError(f"net: event for {ev['id']!r} uses {k!r}, which this tier does not "
@@ -447,11 +778,38 @@ def _warn_unresolved(lam, dt, seg, warned):
     `physics.open_drain_line` gives the same warning for the same reason; this is its
     generalisation, with the time constants read straight off the eigenvalues.
 
-    Warned once per distinct time constant, not once per interval: a bus that switches a
-    thousand times has one under-resolved edge, not a thousand."""
-    tau = 1.0 / lam[lam > 0]
+    A RINGING mode (a complex eigenvalue, which only an inductor produces) needs the second
+    check, and it is the more dangerous of the two: a decay the grid cannot show is simply
+    missing from the record, but a ring the grid cannot show ALIASES, and comes back as a
+    slower ring that looks entirely plausible and is not the circuit's. The library's own
+    sizing rule is k >= 8 samples across the fastest feature, so that is the line here too,
+    with the message saying which side of Nyquist the mode actually fell.
+
+    Warned once per distinct time constant and once per distinct frequency, not once per
+    interval: a bus that switches a thousand times has one under-resolved edge, not a thousand."""
+    lam = np.asarray(lam)
+    if np.iscomplexobj(lam):
+        for f0 in np.unique(np.abs(lam.imag)[np.abs(lam.imag) > 0] / (2.0 * np.pi)):
+            per_dt = 1.0 / (f0 * dt)                      # samples per ring period
+            if per_dt >= 8.0:
+                continue
+            key = ("ring", round(float(f0), 6))
+            if key in warned:
+                continue
+            warned.add(key)
+            aliased = ("" if per_dt > 2.0 else
+                       " It is past Nyquist, so the ring IN THE RECORD is an alias at some "
+                       "other frequency entirely, not this one.")
+            warnings.warn(
+                f"net: an inductive mode rings at {f0:.4g} Hz, which this grid samples "
+                f"{per_dt:.3g} times per period (dt = {dt:.4g} s). Overshoot and ring frequency "
+                f"read off this record are the grid's below about 8 samples per period.{aliased} "
+                f"Raise fs above {8.0 * f0:.4g} Sa/s, or damp the mode (more series resistance, "
+                f"less inductance).",
+                RuntimeWarning, stacklevel=3)
+    tau = 1.0 / lam.real[lam.real > 0]
     for t in tau[tau < 2.0 * dt]:
-        key = round(float(t), 15)
+        key = ("tau", round(float(t), 15))
         if key in warned:
             continue
         warned.add(key)
@@ -494,9 +852,47 @@ def _prepare_sources(sources, ids, n):
     return out
 
 
+def _state_columns(index, ind):
+    """state name -> column. Node voltages in volts, then `i(<id>)` for each inductor in amps."""
+    cols = dict(index)
+    if ind is not None:
+        for k, lid in enumerate(ind[0]):
+            cols[f"i({lid})"] = len(index) + k
+    return cols
+
+
+def _initial(v0, index, ind):
+    """The state vector `v0` asks for, or None. Every node has to be named -- a partial initial
+    condition is a steady state for the nodes left out, mixed with an arbitrary one for the rest,
+    and nothing about the record would say so. An inductor current not named starts at ZERO,
+    which is at rest; it is named `i(<id>)`, as in `probes`."""
+    if v0 is None:
+        return None
+    v0 = {str(k): v for k, v in dict(v0).items()}
+    cols = _state_columns(index, ind)
+    unknown = sorted(set(v0) - set(cols))
+    if unknown:
+        raise ValueError(f"net: v0 names {unknown}, which are not solved states. An initial "
+                         f"condition is a node voltage in volts, or an inductor current in amps "
+                         f"as 'i(<id>)'. This net has {sorted(cols)}.")
+    missing = sorted(set(index) - set(v0))
+    if missing:
+        raise ValueError(f"net: v0 leaves node(s) {missing} unset. Give every node a voltage: a "
+                         f"partial initial condition is the steady state for the nodes left out "
+                         f"and something else for the rest, and nothing in the record says which "
+                         f"is which. Inductor currents default to zero, which is at rest.")
+    x0 = np.zeros(len(cols))
+    for k, i in cols.items():
+        if k in v0:
+            x0[i] = float(v0[k])
+    return x0
+
+
 def solve(net, fs, n, schedule=(), probes=None, v0=None, sources=None):
     """Solve a switched lumped net on a uniform grid. Returns ``{node: array}``, or one array
-    when `probes` names a single node.
+    when `probes` names a single node. A probe named ``i(<inductor id>)`` reads that inductor's
+    current in AMPS instead of a node voltage -- the state an inductive net carries across every
+    switch, and the only way to see it.
 
     `fs` samples per second, `n` samples. Events landing on the same sample are applied as ONE
     configuration change, not in sequence, so a hand-over written as two events never passes
@@ -516,7 +912,13 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None, sources=None):
 
     The initial condition is the DC steady state of whatever configuration is in force at t=0,
     unless `v0` gives node voltages -- with a source, the steady state of its FIRST sample, so
-    a record does not open on an edge nobody asked for.
+    a record does not open on an edge nobody asked for. `v0` must name every node; an inductor
+    current it does not name (as ``i(<id>)``) starts at zero, which is at rest.
+
+    An `{"kind": "l", ...}` element puts its branch current into the state vector and the solve
+    takes its inductive path, which is closed-form in the same sense and exact at every damping
+    (see the module docstring). A net with no inductors is untouched by it and renders bit for
+    bit as before.
     """
     index, rails, ids = _check(net)
     fs, n = float(fs), int(n)
@@ -524,9 +926,13 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None, sources=None):
         raise ValueError(f"net: fs and n must be positive, got fs={fs!r} n={n!r}")
     dt = 1.0 / fs
 
+    ind = _inductors(net, index, rails)
+    cols = _state_columns(index, ind)
+    nst = len(cols)
+
     state = {}
     for e in list(net.get("elements", [])) + list(net.get("drivers", [])):
-        if str(e.get("kind", "")).lower() != "c":
+        if str(e.get("kind", "")).lower() not in _UNSWITCHABLE:
             state[e["id"]] = _is_on(e.get("state"))
 
     src = _prepare_sources(sources, ids, n)
@@ -548,7 +954,8 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None, sources=None):
 
     starts = [0] + [_at(ev) for ev in events] + [n]
 
-    v = np.zeros((n, len(index)))
+    x_init = _initial(v0, index, ind)
+    v = np.zeros((n, nst))
     cur, warned, over = None, set(), {}
     for seg in range(len(starts) - 1):
         a, bnd = starts[seg], starts[seg + 1]
@@ -576,10 +983,27 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None, sources=None):
                 # is what makes a constant source EQUAL a constant `volts` rather than round
                 # to it. The comparison is exact on purpose: constant means identical bits.
                 b, S = b + S[:, 0], None
+        if ind is not None:
+            # an inductor's branch current is one more state, and the system is no longer
+            # symmetric, so this takes the zero-order-hold/Schur path instead of the modal
+            # closed form. The RC net above is untouched by it, down to the last bit.
+            _require_states(C, index)
+            K, M, f = _rlc_system(G, C, b if S is None else b + S[:, 0], ind)
+            Sch, Q, Gam, lam = _rlc_prepare(K, M, dt)
+            _warn_unresolved(lam, dt, seg, warned)
+            x_ss = _rlc_dc(K, f, index, ind)
+            if cur is None:
+                cur = x_ss if x_init is None else x_init
+            F = f[:, None] if S is None else np.vstack(
+                [b[:, None] + S, np.broadcast_to(ind[4][:, None], (len(ind[0]), bnd - a))])
+            seg_v = _rlc_run(Sch, Q, Gam, F, cur, bnd - a)
+            v[a:bnd] = seg_v
+            cur = seg_v[-1]
+            continue
         v_ss, lam, V, Cm = _modes(G, C, b if S is None else b + S[:, 0], index)
         _warn_unresolved(lam, dt, seg, warned)
         if cur is None:
-            cur = np.array([float(v0[nm]) for nm in index], float) if v0 else v_ss.copy()
+            cur = x_init if x_init is not None else v_ss.copy()
         if S is None:
             # k starts at ONE: sample k records the voltage at the END of its own step, so a
             # schedule event is first visible on the sample it fires at. That is the convention
@@ -598,7 +1022,10 @@ def solve(net, fs, n, schedule=(), probes=None, v0=None, sources=None):
         cur = seg_v[-1]
     want = list(index) if probes is None else ([probes] if isinstance(probes, str) else list(probes))
     for p in want:
-        if p not in index:
-            raise ValueError(f"net: probe {p!r} is not a solved node; have {sorted(index)}")
-    out = {p: v[:, index[p]].copy() for p in want}
+        if p not in cols:
+            extra = ("" if ind is not None else
+                     " This net has no inductors, so there are no branch currents to probe.")
+            raise ValueError(f"net: probe {p!r} is not a solved state; have {sorted(cols)}. A "
+                             f"node name reads volts and 'i(<inductor id>)' reads amps.{extra}")
+    out = {p: v[:, cols[p]].copy() for p in want}
     return out[want[0]] if isinstance(probes, str) else out

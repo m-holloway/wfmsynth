@@ -380,10 +380,39 @@ Things that bite:
   label — there is no second list to keep in step.
 - **Hand-overs need no rule.** Two agents holding at once are two parallel drivers; events on
   one sample are applied as one configuration change, so there is no moment with nobody driving.
-- Lumped R and C only in this tier, and a driver's SOURCE may be a waveform but its output
+- Lumped R, L and C only in this tier, and a driver's SOURCE may be a waveform but its output
   CONDUCTANCE may not (`gate`, `relax` are refused by name). Transmission lines, S-parameter
-  blocks inside a net, sub-nets, inductors and voltage-dependent laws are deferred —
-  `BACKLOG.md` has the order.
+  blocks inside a net, sub-nets and voltage-dependent laws are deferred — `BACKLOG.md` has the
+  order.
+
+An inductance is what makes a hand-over RING rather than settle, which is the one place a
+synthetic record differed from a measured one by more than noise:
+
+```python
+elements=[{"id": "lp", "kind": "l", "a": "pad", "b": "bus", "henry": 8e-9, "ohm": 0.3},
+          {"id": "cp", "kind": "c", "a": "pad", "b": "gnd", "farad": 2e-12}, ...]
+out = ws.net.solve(spec, fs=fs, n=n, schedule=sched, probes=["bus", "i(lp)"],
+                   v0={"pad": 0.0, "bus": 0.0, "i(lp)": 0.0})    # i(...) is AMPS
+```
+
+- **`ohm` on an inductor is the series resistance of the same wire**, not a parallel resistor
+  (absent means ideal). One element with two numbers, because the node between a series R and a
+  series L has no capacitance and this tier solves states — so writing them as two elements is
+  refused with that explanation.
+- **An inductor is not switchable**, nor is a capacitor, and the schedule refuses both by name.
+  A current and a charge are the states carried across every switch; removing either from the
+  stamp would zero it within one sample. Switch what is in SERIES with it, and the node
+  capacitance takes the current — which is what rings. (Both used to render as though the event
+  had not been written.)
+- **A ring the grid cannot show ALIASES**, unlike a decay it cannot show, which is simply
+  absent. Below 8 samples per ring period the solver says so and past Nyquist it says the
+  record's ring is not the circuit's. The solve is exact at every damping including exactly
+  critical (3.5e-14 V against the closed form; a modal solve of that case returns 368 mV of
+  nonsense, which is why the inductive path is a Schur form).
+- **A line** is reachable as `net.line_ladder(a, b, z0_ohm, delay_s, tr_s)`, a lumped ladder
+  sized by a measured rule — `ceil(6·(delay/tr)**1.5)` sections for ~2 % of the swing. It is the
+  one approximation in the module, it refuses a line longer than ~12 rise times, and a real line
+  still belongs to `lossy`/`sparam`/`cascade`. `examples/inductive_handover.py` is the worked one.
 
 ## Writing records out
 
