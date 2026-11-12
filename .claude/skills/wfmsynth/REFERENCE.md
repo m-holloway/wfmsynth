@@ -869,7 +869,9 @@ dip["wavelength_nm"], dip["q"], dip["extinction_db"]   # 1550.00000, 99999.98, 1
 `level=` is the record's OFF-RESONANCE baseline: 1.0 here (unit laser, unit detector, no other
 loss). On a bench with insertion loss, a responsivity or another power, pass
 `transmission(x, nm, power=<the detector's reading with no device>)` or leave `level` out
-(the spectrum's median); a `level` the record never reaches is refused. `resonator`'s
+(the spectrum's median). `level` is not checked against the record: only one it never comes
+HALF WAY up to (over 3 dB of loss) is refused, and 1 dB left in with `level=1.0` reads the
+width 30 % wide (Q 76000 for 1e5) and the dip 1 dB too deep. `resonator`'s
 `intrinsic_hz` and `coupling_hz` are its two loss rates as linewidths in Hz:
 `Q = nu0 / (intrinsic_hz + coupling_hz)` (`nu0 = ws.swept.hz(wavelength_nm)`), the dip reaches
 `((ki - ke) / (ki + ke))**2`, equal rates are critical coupling. The die a unit drew is

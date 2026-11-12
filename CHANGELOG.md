@@ -325,10 +325,16 @@ None of these moves a rendered sample.
     1.2 THz apart summed coherently): refused, as the sub-chain form is.
   - `states.intervals(at=)` returned `[]` for a namespace nothing is at: refused, listing
     those that are. `measure.resonances(level=)` returned NaN widths when the record never
-    reached the stated baseline: refused, naming `transmission(power=)`.
+    came HALF WAY up to the stated baseline (over 3 dB of loss): refused, naming
+    `transmission(power=)`. A smaller loss cannot be told from a ring of low finesse and
+    is read as stated: 1 dB left in with `level=1.0` gives the width 30 % wide.
   - `measure.swept_map` misread the part fringe at a record's end where the sweep rate was
     changing (up to 0.7 fringe, and every sample when it was the first): it is now read from
-    the fringe's own crest and trough (0.02 at worst over the same sweeps).
+    the fringe's own crest and trough (0.02 at worst over the same sweeps). A crest is the
+    extreme of the samples averaged over an eighth of a turn, not the highest sample, which
+    detector noise places short of a crest the record never reached: with 1 % and 2 % noise
+    on a rippled, bowed sweep the ends read to 0.023 and 0.039 fringe (the highest sample
+    put them 0.27 out in 5 and 17 draws of 60).
   - `rf.evm(..., ofdm=)` gained `symbols=` (a mask over OFDM symbols) and `block=` (the
     fits refitted per block, for a fade); without `ofdm=` on an OFDM record it names the
     argument. `ofdm.plan()` returns `ref_power`. `recipes.ripple` and `pickup` take

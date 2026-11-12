@@ -231,41 +231,95 @@ def _fringe_end(c, guess, x, rising):
     puts out by more than the quarter turn that would decide it: a part fringe is under one
     turn, so it climbs to at most one crest and falls to at most one trough, in an order the
     end it is at fixes, and the phase is -a before a crest, +a after it, and a turn on past
-    a trough. The crest is the highest sample of the stretch that stands above half height
-    and the trough the lowest of the stretch below minus half, as the whole fringes are
-    counted. What those phases say the guess is out by is then fitted as a smooth curve in
-    `x` (zero at the join), weighted by the fringe's slope, so one noisy sample near a crest
-    does not decide the answer."""
-    c = np.clip(c, -1.0, 1.0)
-    n, a = len(c), np.arccos(c)
+    a trough. The crest is sought in the stretch that stands above half height and the
+    trough in the stretch below minus half, as the whole fringes are counted.
+
+    A turn is the extreme of the samples AVERAGED over an eighth of a turn, not the extreme
+    sample: with detector noise on a walk still climbing when the record ends, some sample
+    before the last is the highest, and all after it would be read as coming down from a
+    crest never reached (a quarter of a fringe out, at 1 % noise). Where the averages are
+    still climbing at the last whole one, the walk has either not turned or turned in the
+    few samples after; both are read, and the one whose cosine lies closer to the samples
+    is kept.
+
+    What a reading says the guess is out by is fitted as a smooth curve in `x` (zero at the
+    join), weighted by the fringe's slope, and the curve is then moved to where its cosine
+    is closest to the samples, so no one noisy sample near a crest decides the answer.
+    Under eight samples there is no fit, and the reading itself is returned."""
+    n = len(c)
+    if not n:
+        return guess
+    raw, c = np.asarray(c, float), np.clip(c, -1.0, 1.0)
+    a = np.arccos(c)
     side = np.sign(c) * (np.abs(c) > 0.5)
     held = side[np.maximum.accumulate(np.where(side != 0, np.arange(n), 0))]
     # until it first stands below minus half, the walk is on the stretch it set out on:
     # up to the crest, or down to that trough
     below = np.flatnonzero(side < 0)
     held[:below[0] if len(below) else n] = 1.0 if rising else -1.0
-    hi, lo = np.flatnonzero(held > 0), np.flatnonzero(held < 0)
-    crest = int(hi[np.argmax(c[hi])]) if len(hi) else None
-    trough = int(lo[np.argmin(c[lo])]) if len(lo) else None
-    i = np.arange(n)
-    if rising:                       # ... crest, then trough
-        turn = np.zeros(n) if trough is None else (i > trough).astype(float)
-        sign = np.where((i <= (n if crest is None else crest)) | (turn > 0), -1.0, 1.0)
-    else:                            # ... trough, then crest
-        after = np.zeros(n, bool) if crest is None else i > crest
-        turn = (np.zeros(n) if trough is None else (i > trough).astype(float))
-        sign = np.where((i <= (n if trough is None else trough)) | after, 1.0, -1.0)
-    read = sign * a + 2 * np.pi * turn
-    if n:
+    # `c` averaged over an eighth of a turn at the guess's rate, each average whole
+    h = int(np.pi / 8 * (n - 1) / max(abs(guess[-1] - guess[0]), 1e-300)) if n > 1 else 0
+    mean = np.convolve(c, np.full(2 * h + 1, 1.0 / (2 * h + 1)), "valid") if n > 2 * h else c
+
+    def turning(stretch, up):
+        """Where the walk turns in this stretch, and where else it may have."""
+        whole = stretch[(stretch >= h) & (stretch < n - h)]
+        if len(whole):
+            level = mean[whole - h]
+            k = int(whole[np.argmax(level if up else -level)])
+            if k < n - 1 - h:
+                return k, None
+            # on the last whole average the walk is still on its way to the turn, or has
+            # made it among the samples after: the extreme of those is where, if it has
+            rest = stretch[stretch >= k]
+            return None, int(rest[np.argmax(c[rest] if up else -c[rest])]) if h else None
+        if not len(stretch) or stretch[-1] == n - 1:
+            return None, None                 # too short a walk to have turned
+        return int(stretch[np.argmax(c[stretch] if up else -c[stretch])]), None
+
+    (crest, or_crest), (trough, or_trough) = (turning(np.flatnonzero(held > 0), True),
+                                              turning(np.flatnonzero(held < 0), False))
+    i, x = np.arange(n), np.asarray(x, float)
+    basis = np.stack([x, x * x], axis=1)
+
+    def reading(crest, trough):
+        """The phases these turns give, and how far their cosine lies from the samples."""
+        if rising:                       # ... crest, then trough
+            turn = np.zeros(n) if trough is None else (i > trough).astype(float)
+            sign = np.where((i <= (n if crest is None else crest)) | (turn > 0), -1.0, 1.0)
+        else:                            # ... trough, then crest
+            after = np.zeros(n, bool) if crest is None else i > crest
+            turn = (np.zeros(n) if trough is None else (i > trough).astype(float))
+            sign = np.where((i <= (n if trough is None else trough)) | after, 1.0, -1.0)
+        read = sign * a + 2 * np.pi * turn
         read += 2 * np.pi * np.round((guess[0] - read[0]) / (2 * np.pi))
-    off = read - guess
-    if n < 8:
-        return guess + off
-    x = np.asarray(x, float)
-    w = np.sqrt(1.0 - c * c) + 1e-3
-    lin, quad = np.linalg.lstsq(np.stack([x, x * x], axis=1) * w[:, None], off * w,
-                                rcond=None)[0]
-    return guess + lin * x + quad * x * x     # not `basis @ coef`: numpy 2.0 on macOS warns
+        if n < 8:
+            return 0.0, read
+        w = np.sqrt(1.0 - c * c) + 1e-3
+        coef = np.linalg.lstsq(basis * w[:, None], (read - guess) * w, rcond=None)[0]
+
+        def fitted(coef):                 # not `basis @ coef`: numpy 2.0 on macOS warns
+            return guess + coef[0] * x + coef[1] * x * x
+
+        # ... then moved to where its cosine lies closest to the samples themselves, which
+        # asks no sample which side of a turn it is on
+        miss = np.sum((raw - np.cos(fitted(coef))) ** 2)
+        for _ in range(8):
+            phase = fitted(coef)
+            step = np.linalg.lstsq(basis * np.sin(phase)[:, None], np.cos(phase) - raw,
+                                   rcond=None)[0]
+            closer = np.sum((raw - np.cos(fitted(coef + step))) ** 2)
+            if not closer < miss:
+                break
+            coef, miss = coef + step, closer
+        return miss, fitted(coef)
+
+    best = reading(crest, trough)
+    if or_crest is not None or or_trough is not None:
+        other = reading(crest if or_crest is None else or_crest,
+                        trough if or_trough is None else or_trough)
+        best = other if other[0] < best[0] else best
+    return best[1]
 
 
 def swept_map(ref, grid, delay_s, at_s, wavelength_nm, rising=True):
@@ -290,8 +344,10 @@ def swept_map(ref, grid, delay_s, at_s, wavelength_nm, rising=True):
     fringe left at each end is read from the fringe's own shape, its crest and its trough
     (`_fringe_end`), so a sweep whose rate is changing there is still followed: measured
     0.02 of a fringe at worst with a ripple that moves the rate by 30 % inside the last
-    fringe (tests/test_swept.py). An anchor inside the first part fringe (`at_s=0`) rests on
-    that reading, and so does every sample."""
+    fringe; and with detector noise of 1 % and 2 % of the fringe's height on a rippled and
+    bowed sweep, 0.023 and 0.039, no worse than the whole fringes beside it
+    (tests/test_swept.py). An anchor inside the first part fringe (`at_s=0`) rests on that
+    reading, and so does every sample."""
     from scipy.signal import hilbert
     ref = np.asarray(voltage(ref, "swept_map"), float)
     n, fs = len(ref), grid.fs
@@ -375,6 +431,10 @@ def resonances(wavelength_nm, t, depth=0.1, level=None):
     narrow, so state `level` when it is known. A stated `level` the spectrum never comes
     half way up to from a dip is refused: it is the baseline of some other record (an
     insertion loss not divided out), and the width would have no crossing to be read from.
+    A SMALLER loss left in the record cannot be told from a ring of low finesse, whose
+    spectrum never comes back up to its baseline either (0.94 at a finesse of 10), so it
+    is read, and read wrong: 1 dB left in with `level=1.0` gives the width 30 % wide and
+    the extinction 1 dB too deep. `level` is a statement about the record; it is not checked.
     The free spectral range is the spacing of successive `wavelength_nm`. It needs several
     samples across a dip, and a dip clear of its neighbours at half depth."""
     from scipy.signal import find_peaks

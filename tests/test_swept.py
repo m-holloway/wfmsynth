@@ -637,6 +637,36 @@ def test_the_part_fringe_at_each_end_is_read_where_the_sweep_rate_is_changing(ri
     assert worst < 0.04
 
 
+@pytest.mark.parametrize("noise, bound", [(0.01, 0.05), (0.02, 0.08)])
+def test_the_part_fringe_is_read_through_detector_noise(noise, bound):
+    """A record that ends a few samples after a counted rise, still climbing: with noise on
+    it one of those samples is the highest, and read as a crest it put the last ones a
+    quarter of a fringe out (5 draws in 60 at 1 % of the fringe's height, 17 at 2 %). The
+    turn is taken of the samples averaged, so the ends are read as well as the whole
+    fringes are. Measured over 24 draws: 0.023 fringe at worst at 1 %, 0.039 at 2 %; the
+    same sweep without noise 0.013."""
+    g, tau = Grid(fs=1e6, n=1 << 15), 2e-9
+    las = Signal(seed=1, grid=g).laser(start_nm=1550.0051208875166, stop_nm=1548.991121344502,
+                                       ripple_nm=0.012982360639786781,
+                                       ripple_hz=88.40705818175192, bow_nm=0.054589788878561835)
+    truth = lam_of(las)
+    assert np.all(np.diff(truth) < 0)                              # it never reverses
+    ref, mid = pd(R.mzi(las, delay_s=tau)), g.n // 2
+
+    def worst_end(rec):
+        got = M.swept_map(rec, g, tau, at_s=mid / g.fs, wavelength_nm=float(truth[mid]),
+                          rising=False)
+        err = np.abs(C_NM / got - C_NM / truth) * tau              # in fringes
+        return float(max(err[:400].max(), err[-400:].max()))
+
+    clean = worst_end(ref)
+    ends = [worst_end(ref + np.random.default_rng(k).normal(0, noise, g.n) * np.ptp(ref))
+            for k in range(24)]
+    print(f"noise {noise:g} of the fringe: end error {max(ends):.4f} fringe at worst, "
+          f"{np.median(ends):.4f} median; without noise {clean:.4f}")
+    assert clean < 0.02 and max(ends) < bound
+
+
 def test_transmission_on_the_recovered_axis_gives_the_stated_ring():
     rec = bench(dict(start_nm=1549.0, stop_nm=1551.0, bow_nm=0.02, ripple_nm=3e-3,
                      ripple_hz=40.0))
@@ -764,7 +794,7 @@ def test_the_swept_measures_refuse_what_they_cannot_read():
         M.swept_map(np.cos(np.arange(1000.0)), G, 2e-9, at_s=1.0, wavelength_nm=1550.0)
     with pytest.raises(ValueError, match="one wavelength per sample"):
         M.transmission(np.ones(10), np.ones(9))
-    # a stated baseline the record never comes up to: 6 dB of insertion loss, level=1.0
+    # a stated baseline the record never comes half way up to: 6 dB of loss, level=1.0
     ring = R.ring(laser(start_nm=1549.9, stop_nm=1550.1), wavelength_nm=1550.0, q=1e5,
                   extinction_db=15.0)
     lam = lam_of(ring)
@@ -772,6 +802,14 @@ def test_the_swept_measures_refuse_what_they_cannot_read():
     with pytest.raises(ValueError, match=r"level=1.0 is the transmission away from resonance"
                                          r".*never rises above 0.2497.*power=.*leave level= out"):
         M.resonances(wl, t, level=1.0)
+    # a smaller loss is NOT refused (a ring of low finesse never comes up to its baseline
+    # either), and is read wrong by the stated amount: 1 dB left in, on the REFERENCE bench
+    g17 = Grid(fs=1e6, n=1 << 17)
+    wide = R.ring(laser(g17), wavelength_nm=1550.0, q=1e5, extinction_db=15.0)
+    left = M.resonances(*M.transmission(pd(wide) * 10 ** -0.1, lam_of(wide)), level=1.0)[0]
+    print(f"1 dB left in, level=1.0: Q {left['q']:.0f} for 1e5, "
+          f"{left['extinction_db']:.2f} dB for 15")
+    assert abs(1e5 / left["q"] - 1.31) < 0.02 and abs(left["extinction_db"] - 16.0) < 0.02
     own = M.resonances(wl, t)[0]                # its own median: 13 widths of span, 2 % narrow
     assert abs(own["q"] / 1e5 - 1) < 0.04 and abs(own["extinction_db"] - 15.0) < 0.2
     out = M.resonances(*M.transmission(pd(ring) * 10 ** -0.6, lam, power=10 ** -0.6),

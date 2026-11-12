@@ -1663,8 +1663,9 @@ bench does, without reading the recipe; `measure.transmission` puts a record on 
 true here, where a unit laser meets a unit detector and nothing else is in the path. With an
 insertion loss, a responsivity or another laser power, divide it out
 (`transmission(x, nm, power=<the detector's reading with no device>)`) or leave `level` out,
-and the spectrum's own median is the baseline; a `level` the record never comes up to is
-refused. `ring` converts Q, extinction and `fsr_nm` into the one `resonator` op
+and the spectrum's own median is the baseline. A stated `level` is not checked against the
+record, short of one it never comes half way up to (over 3 dB of loss), which is refused:
+1 dB left in reads the width 30 % wide. `ring` converts Q, extinction and `fsr_nm` into the one `resonator` op
 (`wavelength_nm`, `intrinsic_hz`, `coupling_hz`, `fsr_hz`), and `gas_cell` is one undercoupled
 resonator per absorption line: an absolute reference.
 
