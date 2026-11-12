@@ -11,6 +11,25 @@ import os
 # underscore is the annotation namespace and is also allowed through.
 STRUCTURAL = frozenset({"op"})
 
+# The word ANOTHER op uses for the same idea, where the nearest-spelling hint cannot
+# find it: (op, what was passed) -> what this op calls it.
+SAID_AS = {
+    ("carrier", "prbs"): "pattern='prbs7' (also 'prbs15', 'clock', ...), with seed= for its phase; prbs=<order> is how `iq` and `coded` say it",
+    ("combine", "by"): 'others= (the peer signals); by= is the one signal of gain / offset / gate / delay',
+    ("combine", "kind"): "how= ('sum' | 'product' | 'min' | 'max')",
+    ("delay", "delay_s"): 'by= (seconds: a number, or a sub-chain)',
+    ("delay", "t_s"): 'by= (seconds: a number, or a sub-chain)',
+    ("downconvert", "fs_hz"): 'fs_out= (the decimated rate, in Sa/s)',
+    ("downconvert", "fs_out_hz"): 'fs_out= (the decimated rate, in Sa/s)',
+    ("downconvert", "lpf_hz"): 'lpf= (a passband edge in Hz, or a dict of pass_hz, stop_hz, atten_db)',
+    ("gate", "level"): "threshold= (the crossing level; `trigger` calls it level=, a scope's word)",
+    ("iq", "pattern"): 'prbs=<order>, e.g. prbs=15 (with prbs_seed= / prbs_phase=); pattern= names a sequence on `carrier`',
+    ("iq", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
+    ("law", "level"): "threshold= (the crossing level; `trigger` calls it level=, a scope's word)",
+    ("switch", "level"): "threshold= (the crossing level; `trigger` calls it level=, a scope's word)",
+    ("trigger", "threshold"): "level= (a scope's word; `gate`, `switch` and law('comparator') call it threshold=)",
+}
+
 OP_KEYS = {
     "ac_couple": frozenset({"fc_frac", "fc_hz"}),
     "acquire": frozenset({"profile", "tap"}),
@@ -20,15 +39,15 @@ OP_KEYS = {
     "capture": frozenset({"annotations", "byteorder", "check", "columns", "dtype", "fc_hz", "format", "fs_hz", "n", "path", "resample", "scale", "sha256", "values", "variable"}),
     "carrier": frozenset({"amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "cycles", "decay", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hz", "fn", "jitter", "kind", "level", "method", "n", "n_ui", "offset", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "rms", "seed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "tr_frac", "tr_s", "v_hi", "v_lo", "width_frac", "width_s"}),
     "cascade": frozenset({"method", "node", "path"}),
-    "coded": frozenset({"bits", "block", "causal", "header", "jitter", "levels", "lsb_first", "n", "n_bits", "op", "pattern", "poly", "prbs", "prbs_phase", "prbs_seed", "rd", "scheme", "seed", "symbols", "sync", "tr_frac"}),
-    "combine": frozenset({"gains", "how", "op", "others"}),
+    "coded": frozenset({"bits", "block", "causal", "header", "jitter", "levels", "lsb_first", "n", "n_bits", "pattern", "poly", "prbs", "prbs_phase", "prbs_seed", "rd", "scheme", "seed", "symbols", "sync", "tr_frac"}),
+    "combine": frozenset({"gains", "how", "others"}),
     "crosstalk": frozenset({"aggressor", "amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "coupling", "cycles", "decay", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hz", "fn", "jitter", "kind", "level", "method", "n", "n_ui", "offset", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "rms", "seed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "td_frac", "tr_frac", "tr_s", "v_hi", "v_lo", "width_frac", "width_s"}),
     "crosstalk_matrix": frozenset({"aggressors", "baud_offsets", "couplings", "echo_db", "echo_f_hp_hz", "echo_td_ps", "fext_db", "kind", "next_db", "next_td_ps", "seeds", "synchronous"}),
     "ctle": frozenset({"dc_gain", "fp1_ghz", "fp2_ghz", "fz_ghz"}),
     "dac": frozenset({"bits", "clip", "full_scale", "headroom_pct"}),
     "dcd": frozenset({"frac_ui", "half_width", "plateau_ui", "ps", "threshold"}),
     "de_emphasis": frozenset({"db", "spb"}),
-    "delay": frozenset({"by", "max_rate", "op"}),
+    "delay": frozenset({"by", "max_rate"}),
     "dfe": frozenset({"causal", "cdr", "levels", "output", "scale", "taps"}),
     "digitize": frozenset({"bits", "enob", "full_scale", "interleave", "n_out", "noise_rms", "snr_db"}),
     "dispersion": frozenset({"strength"}),
@@ -36,12 +55,12 @@ OP_KEYS = {
     "drift": frozenset({"amount", "kind", "shape"}),
     "edfa": frozenset({"gain_db", "nf_db", "p_ase_scale"}),
     "eo": frozenset({"adiabatic", "alpha", "bias", "er_db", "kind", "linewidth_hz", "p_avg", "vpi"}),
-    "events": frozenset({"aggressor", "amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "count", "cycles", "decay", "depth", "df", "duty", "every", "f0_hz", "f1_hz", "f2_hz", "f_hz", "floor", "fn", "fraction", "hold_frac", "indices", "intervals", "jitter", "kind", "level", "method", "min_run", "motif", "n", "n_ui", "offset", "on", "op", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "polarity", "q", "rate_hz", "rms", "samples", "seed", "severity", "symbols", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "times", "tr_factor", "tr_frac", "tr_s", "transitions_only", "v_clamp", "v_hi", "v_lo", "which", "width", "width_frac", "width_s", "zeta"}),
+    "events": frozenset({"aggressor", "amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "count", "cycles", "decay", "depth", "df", "duty", "every", "f0_hz", "f1_hz", "f2_hz", "f_hz", "floor", "fn", "fraction", "hold_frac", "indices", "intervals", "jitter", "kind", "level", "method", "min_run", "motif", "n", "n_ui", "offset", "on", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "polarity", "q", "rate_hz", "rms", "samples", "seed", "severity", "symbols", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "times", "tr_factor", "tr_frac", "tr_s", "transitions_only", "v_clamp", "v_hi", "v_lo", "which", "width", "width_frac", "width_s", "zeta"}),
     "fiber": frozenset({"D_ps_nm_km", "atten_db_km", "gamma_per_w_km", "length_km", "wavelength_nm"}),
     "filter": frozenset({"baud", "beta", "btype", "f_hz", "gain", "kind", "order", "poles", "ripple_db", "sos", "span_ui", "stop_db", "taps", "tau_s", "zero_phase", "zeros"}),
     "freq_offset": frozenset({"drift_hz_per_s", "f_hz", "fold_db"}),
-    "gain": frozenset({"by", "op"}),
-    "gate": frozenset({"by", "off", "op", "threshold"}),
+    "gain": frozenset({"by"}),
+    "gate": frozenset({"by", "off", "threshold"}),
     "hybrid_echo": frozenset({"amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "cycles", "decay", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hp_frac", "f_hp_hz", "f_hz", "fn", "isolation_db", "jitter", "kind", "level", "method", "n", "n_ui", "offset", "own", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "rms", "seed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "td_ps", "td_samples", "tr_frac", "tr_s", "v_hi", "v_lo", "width_frac", "width_s"}),
     "intra_pair_skew": frozenset({"gain_imbalance", "skew_ps"}),
     "iq": frozenset({"amp", "beta", "bits", "constellation", "n", "n_bits", "prbs", "prbs_phase", "prbs_seed", "pulse", "span_ui", "symbols"}),
@@ -53,7 +72,7 @@ OP_KEYS = {
     "multipair": frozenset({"echo_db", "echo_f_hp_hz", "echo_td_ps", "fext_db", "levels", "local_seed", "n_ui", "next_db", "next_td_ps", "pattern", "remote_seed", "tr_frac"}),
     "net": frozenset({"agents", "drivers", "elements", "follow", "holds", "nodes", "on_when", "probe", "rails", "rest", "schedule"}),
     "nonlinearity": frozenset({"a_base", "compression", "level_noise", "rise_fall_ratio"}),
-    "offset": frozenset({"by", "op"}),
+    "offset": frozenset({"by"}),
     "open_drain": frozenset({"amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "c_bus_f", "causal", "center", "cycles", "decay", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hz", "fn", "jitter", "kind", "level", "method", "n", "n_ui", "offset", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "r_pullup_ohm", "r_sink_b_ohm", "r_sink_ohm", "rms", "second", "seed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "tr_frac", "tr_s", "v0", "v_dd", "v_hi", "v_lo", "width_frac", "width_s"}),
     "optical": frozenset({"bw_hz", "er_db", "p_avg", "photons_per_unit", "rin_db_per_hz", "shot"}),
     "optical_mpi": frozenset({"delay_samples", "reflectivity"}),
@@ -74,11 +93,11 @@ OP_KEYS = {
     "store": frozenset({"bits", "clip", "dither_lsb", "full_scale", "headroom"}),
     "supply_coupling": frozenset({"am_depth", "f_ripple_hz", "psij_ps", "supply"}),
     "switch": frozenset({"inputs", "select", "t_switch_s", "threshold"}),
-    "symbols": frozenset({"bits", "block", "causal", "header", "jitter", "levels", "lsb_first", "n", "n_bits", "op", "pattern", "poly", "prbs", "prbs_phase", "prbs_seed", "rd", "scheme", "seed", "symbols", "sync", "tr_frac"}),
+    "symbols": frozenset({"bits", "block", "causal", "header", "jitter", "levels", "lsb_first", "n", "n_bits", "pattern", "poly", "prbs", "prbs_phase", "prbs_seed", "rd", "scheme", "seed", "symbols", "sync", "tr_frac"}),
     "tia": frozenset({"bw_hz", "gain", "thermal_rms"}),
     "timebase": frozenset({"rms_ps"}),
     "timing": frozenset({"phase_noise", "pj", "rj_ps", "ssc", "wander"}),
-    "trigger": frozenset({"average", "condition", "holdoff_s", "hysteresis", "jitter_s", "level", "n_segments", "on", "op", "post_s", "pre_s", "runt_level", "slope", "width_s"}),
+    "trigger": frozenset({"average", "condition", "holdoff_s", "hysteresis", "jitter_s", "level", "n_segments", "on", "post_s", "pre_s", "runt_level", "slope", "width_s"}),
     "tx_ffe": frozenset({"pre", "spb", "taps"}),
     "upconvert": frozenset({"fc_hz", "fold_db", "phase_rad"}),
     "use": frozenset({"name"}),
@@ -115,7 +134,8 @@ def check(op, params):
     lines = []
     for k in sorted(unknown):
         near = difflib.get_close_matches(k, sorted(allowed), n=2, cutoff=0.6)
-        lines.append(f"  {k!r}" + (f" -- did you mean {' or '.join(repr(n) for n in near)}?"
+        lines.append(f"  {k!r}" + (f" -- {op} says {SAID_AS[op, k]}" if (op, k) in SAID_AS
+                                   else f" -- did you mean {' or '.join(repr(n) for n in near)}?"
                                    if near else ""))
     raise TypeError(
         f"op {op!r} does not take " + ", ".join(repr(k) for k in sorted(unknown)) + ".\n"

@@ -9,12 +9,12 @@ the parts share the record:
     pre  = Signal(grid=g).carrier("sine", f_hz=1e6)
     data = Signal(grid=g).carrier("nrz", n_ui=400).lossy(loss_db=3.0, loss_at_ghz=4.0)
 
-    Signal(seed=1, grid=g).sequence([{"chain": pre, "t_s": 2e-6}, {"chain": data}])
+    Signal(seed=1, grid=g).sequence([{"chain": pre, "duration_s": 2e-6}, {"chain": data}])
     Signal(seed=1, grid=g).switch(select=gate, inputs=[pre, data], threshold=0.5)
 
 Ops after either one act on the joined record: one channel, one scope, for all the parts.
 
-SEQUENCE. Segment k occupies `t_s` seconds, end to end; the last one may leave `t_s` off and
+SEQUENCE. Segment k occupies `duration_s` seconds, end to end; the last may leave it off and
 take the rest of the record. What a segment brings across its boundary is stated per segment:
 
     "state": "restart"    (default) the segment is its chain rendered alone, from the chain's
@@ -72,7 +72,7 @@ from .events import Event
 
 JOINS = ("cut", "crossfade", "hold")
 STATES = ("restart", "continue")
-_SEGMENT_KEYS = ("chain", "t_s", "state")
+_SEGMENT_KEYS = ("chain", "duration_s", "state")
 GRID_TOL = 1e-6           # samples: how far t * fs may be from a whole number and still be on it
 
 
@@ -129,7 +129,7 @@ def layout(segments, grid):
     """
     fs, n = _grid(grid, "sequence")
     if not isinstance(segments, (list, tuple)) or not segments:
-        raise ValueError("sequence: `segments` is a list of {'chain': <sub-chain>, 't_s': "
+        raise ValueError("sequence: `segments` is a list of {'chain': <sub-chain>, 'duration_s': "
                          "<seconds>}, one per segment, in order; got "
                          + ("an empty list." if isinstance(segments, (list, tuple))
                             else f"{type(segments).__name__}."))
@@ -138,19 +138,23 @@ def layout(segments, grid):
         who = f"sequence: segments[{k}]"
         if not isinstance(seg, dict) or seg.get("chain") is None:
             raise ValueError(f"{who} must be a dict with 'chain' (a Signal, {{'ops': [...]}} "
-                             f"or {{'from': <recipe>}}) and 't_s' (its duration, seconds).")
+                             f"or {{'from': <recipe>}}) and 'duration_s' (how long it lasts, seconds).")
         extra = sorted(set(seg) - set(_SEGMENT_KEYS))
         if extra:
-            raise ValueError(f"{who} has {extra}, which nothing reads; a segment takes "
-                             f"{list(_SEGMENT_KEYS)}. Parameters of the chain go on its ops.")
+            raise ValueError(
+                f"{who} has {extra}, which nothing reads; a segment takes "
+                f"{list(_SEGMENT_KEYS)}. "
+                + ("How long it lasts is 'duration_s'; `t_s` is an instant, on an event and "
+                   "in a `net` schedule." if "t_s" in extra
+                   else "Parameters of the chain go on its ops."))
         state = seg.get("state", "restart")
         if state not in STATES:
             raise ValueError(f"{who}: state is 'restart' (the chain from its own t=0) or "
                              f"'continue' (the chain as if it had been running since the "
                              f"record began), got {state!r}.")
-        if seg.get("t_s") is None:
+        if seg.get("duration_s") is None:
             if k != len(segments) - 1:
-                raise ValueError(f"{who} has no `t_s`. Only the LAST segment may leave it off, "
+                raise ValueError(f"{who} has no `duration_s`. Only the LAST segment may leave it off, "
                                  f"to take the rest of the record.")
             count = n - at
             if count < 1:
@@ -158,7 +162,7 @@ def layout(segments, grid):
                     f"{who} takes the rest of the record, but the segments before it already "
                     f"fill it ({at} of {n} samples, {at / fs!r} of {n / fs!r} s).")
         else:
-            count = _samples(seg["t_s"], fs, f"{who}: t_s")
+            count = _samples(seg["duration_s"], fs, f"{who}: duration_s")
         out.append({"segment": k, "start": at, "stop": at + count, "t_start_s": at / fs,
                     "t_stop_s": (at + count) / fs, "state": state})
         at += count
@@ -166,7 +170,7 @@ def layout(segments, grid):
         raise ValueError(
             f"sequence: the segments last {at / fs!r} s ({at} samples) and the record is "
             f"{n / fs!r} s ({n} samples). They must fill it exactly -- a record is never "
-            f"padded or cut to fit. Leave `t_s` off the last segment to give it the rest"
+            f"padded or cut to fit. Leave `duration_s` off the last segment to give it the rest"
             + (f" ({(n - at) / fs!r} s more)." if at < n else
                f", or shorten the segments by {(at - n) / fs!r} s."))
     return out

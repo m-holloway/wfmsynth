@@ -272,18 +272,41 @@ def _op_capture(x, p, streams, grid, idx):
 
 
 # --------------------------------------------------------------- complex baseband (wfmsynth.iq)
+def _iq_source(p):
+    """Which ONE of symbols= / bits= / prbs= an `iq` op takes its symbols from, refusing a
+    second source or a parameter that belongs to another: each would be recorded, change the
+    digest, and change nothing."""
+    given = [k for k in ("symbols", "bits", "prbs") if p.get(k) is not None]
+    if len(given) != 1:
+        raise ValueError(
+            "an 'iq' op needs its symbols from exactly one source: prbs=<order> (bits from a "
+            "PRBS, filling the record), bits=[...], or symbols=[...] (complex, any "
+            f"constellation); got {' and '.join(k + '=' for k in given) or 'none of them'}."
+            + (" One would win and the other be recorded and ignored." if given else ""))
+    src = given[0]
+    for k in ("prbs_seed", "prbs_phase", "n_bits"):
+        if k in p and src != "prbs":
+            does = ("sets how many PRBS bits are drawn" if k == "n_bits"
+                    else "sets where the PRBS starts")
+            raise ValueError(f"iq: {k}= goes with prbs= (it {does}), and this source is "
+                             f"{src}=, which states every "
+                             f"{'symbol' if src == 'symbols' else 'bit'} itself. Drop {k}=.")
+    if src == "symbols" and p.get("constellation") is not None:
+        raise ValueError("iq: pass a constellation (with bits= or prbs=) or symbols=, "
+                         "not both -- the symbols would win and the name would be a "
+                         "label on something it does not describe")
+    return src
+
+
 def _iq_symbols(p, grid):
     """The complex symbols an `iq` source transmits: a literal list, or bits mapped onto a
     constellation. This is the ground truth `Signal.transmitted()` hands back, resolved by the
     same function that renders, so the two cannot disagree."""
     from . import iq as IQ
-    if p.get("symbols") is not None:
+    if _iq_source(p) == "symbols":
         return IQ.as_complex(p["symbols"])
     con = p.get("constellation")
     k = IQ.bits_per_symbol(con)
-    if p.get("bits") is None and p.get("prbs") is None:
-        raise ValueError("an 'iq' op needs its symbols: prbs=<order> (bits from a PRBS, filling "
-                         "the record), bits=[...], or symbols=[...] (complex, any constellation)")
     q = p
     if p.get("bits") is None and "n_bits" not in p:
         # only what the caller passed is recorded; an unstated count is "fill the record"
@@ -1952,6 +1975,11 @@ class LeadPlan:
                 f"source's own {self.floor}-sample settling, quantised to {self.quantum} (1 UI)")
 
 
+def _stated(params):
+    """An op's parameters without its annotations (`_unit`, `_prov`)."""
+    return {k: v for k, v in params.items() if not k.startswith("_")}
+
+
 # --------------------------------------------------------------- the Signal builder
 @dataclass
 class Signal:
@@ -1966,7 +1994,7 @@ class Signal:
     lead_in: object = None
     lead_out: object = None
 
-    def _add(self, op, **params):
+    def _add(self, op, /, **params):
         """Append one op, rejecting a parameter this op does not read.
 
         An op takes its parameters as a dict, so an invented or misspelled name would otherwise
@@ -1977,6 +2005,9 @@ class Signal:
         shared and the rule is: `op` is reserved, anything beginning with an underscore is
         annotation, and everything else is a parameter this op has to read.
         """
+        if "op" in params:
+            raise TypeError(f"op {op!r} does not take 'op': that key is the op's own name in "
+                            f"the recipe, and the builder writes it.")
         params = SUB.flatten(op, params, self)                   # a sub-chain -> data
         params = TOL.resolve(len(self.ops), params, self.seed)   # a toleranced value -> its number
         OPKEYS.check(op, params)
@@ -1984,6 +2015,11 @@ class Signal:
         DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
         TRIG.check_chain(self.ops + [new])
         self.ops.append(new); return self
+
+    def _drawn(self, params):
+        """`params` with any toleranced value drawn, as `_add` will draw it for the op about to
+        be added -- for a builder that checks a design, which needs the unit's number."""
+        return TOL.resolve(len(self.ops), params, self.seed)
 
     def _rate_at(self, i):
         """The sample rate the record is at when op `i` runs: the grid's, unless an op before
@@ -2197,17 +2233,17 @@ class Signal:
 
         GROUND TRUTH is `Signal.transmitted()`: the symbols and their centre times."""
         from . import iq as IQ
+        OPKEYS.check("iq", params)
         if params.get("symbols") is not None:
-            if constellation is not None:
-                raise ValueError("iq: pass a constellation (with bits= or prbs=) or symbols=, "
-                                 "not both -- the symbols would win and the name would be a "
-                                 "label on something it does not describe")
-            return self._add("iq", **dict(params, symbols=IQ.as_pairs(params["symbols"])))
-        if constellation is None:
+            params = dict(params, symbols=IQ.as_pairs(params["symbols"]))
+        if constellation is not None:
+            params = dict(constellation=constellation, **params)
+        if params.get("symbols") is None and constellation is None:
             raise ValueError("iq needs a constellation ('bpsk'/'qpsk'/'qam16'/'qam64') with "
                              "prbs= or bits=, or literal symbols=[...]")
-        IQ.bits_per_symbol(constellation)
-        return self._add("iq", constellation=constellation, **params)
+        if _iq_source(params) != "symbols":
+            IQ.bits_per_symbol(constellation)
+        return self._add("iq", **params)
 
     def upconvert(self, **params):
         """Complex baseband -> a REAL PASSBAND record: ``Re{x * exp(j*2*pi*fc_hz*t)}``, on the
@@ -2237,7 +2273,17 @@ class Signal:
         a whole number (the same filter is the anti-alias filter); `phase_rad` is the local
         oscillator's phase at t = 0. A filter that would pass the mixing image, or alias on
         decimation, is refused -- see `wfmsynth.iq.downconvert`. It reads the rate the record
-        is ACTUALLY at, so it is correct after `acquire`."""
+        is ACTUALLY at, so it is correct after `acquire`. `fc_hz` may be left off on a chain
+        whose grid states the centre (`Grid(domain="iq", fc_hz=)`): it is then that one, and
+        is written into the recipe."""
+        from . import iq as IQ
+        if "fc_hz" not in params:
+            fc = getattr(self.grid, "fc_hz", None)
+            if fc is None:
+                raise ValueError("downconvert needs fc_hz=, the frequency the I/Q is centred "
+                                 "on: this chain's grid states no centre to take it from.")
+            params = dict(fc_hz=fc, **params)
+        IQ.lowpass_spec(_stated(self._drawn(params)).get("lpf"))   # refused where it is written
         return self._add("downconvert", **params)
 
     def transmitted(self):
@@ -2393,17 +2439,17 @@ class Signal:
         suspiciously perfect. params: compression, level_noise, rise_fall_ratio, a_base."""
         return self._add("nonlinearity", **params)
 
-    def sequence(self, segments, join="cut", t_join_s=None):
+    def sequence(self, segments, join="cut", t_join_s=None, **params):
         """Chains joined in TIME: a preamble then a payload, power-up then steady state.
 
             pre  = Signal(grid=g).carrier("sine", f_hz=1e6)
             data = Signal(grid=g).carrier("nrz", n_ui=400)
-            Signal(seed=1, grid=g).sequence([{"chain": pre, "t_s": 2e-6}, {"chain": data}])
+            Signal(seed=1, grid=g).sequence([{"chain": pre, "duration_s": 2e-6}, {"chain": data}])
 
-        segments: [{"chain": <sub-chain>, "t_s": <seconds>, "state": "restart"|"continue"}, ...]
-                  in order. A chain is a Signal, {"ops": [...]} or {"from": recipe} (see
+        segments: [{"chain": <sub-chain>, "duration_s": <seconds>,
+                    "state": "restart"|"continue"}, ...] in order. A chain is a Signal, {"ops": [...]} or {"from": recipe} (see
                   `crosstalk`). Durations must land on the grid and fill the record exactly;
-                  the last segment may leave `t_s` off to take the rest.
+                  the last segment may leave `duration_s` off to take the rest.
         state:    "restart" (default) -- the segment is its chain from the chain's own t=0;
                   nothing is carried in. "continue" -- the segment is the chain as it would be
                   at that time had it run since the record began: phase, pattern position and
@@ -2417,13 +2463,14 @@ class Signal:
         `event_list()` as a `segment` event; `wfmsynth.sequence.layout` gives every segment's
         samples. See `wfmsynth.sequence`."""
         from . import sequence as SEQ
+        OPKEYS.check("sequence", params)
         SEQ.refuse_after(self.ops, "sequence", "segments")
         if self.grid is not None:        # a chain of a `Channels` record is checked on ITS grid
             SEQ.check_sequence(segments, join, t_join_s, self.grid)
         return self._add("sequence", segments=segments, join=join,
                          **({} if t_join_s is None else {"t_join_s": t_join_s}))
 
-    def switch(self, select, inputs, threshold=0.5, t_switch_s=0.0):
+    def switch(self, select, inputs, threshold=0.5, t_switch_s=0.0, **params):
         """Chains selected by a SIGNAL, sample by sample: an analog multiplexer.
 
             Signal(seed=1, grid=g).switch(select=gate, inputs=[idle, data], threshold=0.5)
@@ -2440,6 +2487,7 @@ class Signal:
         the threshold, between two samples. There is no hysteresis: end a noisy `select` chain
         on `law("comparator", hysteresis=...)`. See `wfmsynth.sequence`."""
         from . import sequence as SEQ
+        OPKEYS.check("switch", params)
         SEQ.refuse_after(self.ops, "switch", "inputs")
         if not isinstance(inputs, (list, tuple)):
             raise ValueError("switch: `inputs` is a list of sub-chains to choose between.")
@@ -2464,8 +2512,9 @@ class Signal:
         one. `nonlinearity`, `digitize` and `pass_fet` stay the named ops for a transmitter,
         a converter and a switch; see `wfmsynth.stages` for each curve and which is which."""
         from . import stages as ST
-        ST.check_law(kind, **params)
-        return self._add("law", kind=kind, **ST.plain(params))
+        params = self._drawn(ST.plain(params))
+        ST.check_law(kind, **_stated(params))
+        return self._add("law", kind=kind, **params)
 
     def filter(self, kind, **params):
         """A stated LINEAR FILTER, for a response that has no op of its own.
@@ -2484,12 +2533,12 @@ class Signal:
         `scope`, `probe`, `ctle` and `ac_couple` stay the named ops for the instrument, the
         equaliser and a coupling capacitor; see `wfmsynth.stages`."""
         from . import stages as ST
-        params = ST.plain(params)
+        params = self._drawn(ST.plain(params))
         if self.grid is None:
-            ST.check_filter(kind, **params)
+            ST.check_filter(kind, **_stated(params))
         else:
             ST.design_filter(self._rate_at(len(self.ops)), kind, grid_baud=self.grid.baud,
-                             **params)
+                             **_stated(params))
         return self._add("filter", kind=kind, **params)
 
     def filter_delays(self):
@@ -2506,7 +2555,7 @@ class Signal:
                                                **{k: o[k] for k in _FILTER_KEYS if k in o})}
                 for i, o in enumerate(self.ops) if o["op"] == "filter"]
 
-    def combine(self, others, how="sum", gains=None):
+    def combine(self, others=None, how="sum", gains=None, **params):
         """Join this chain with other signals, sample by sample.
 
             hum = Signal(grid=g).carrier("sine", f_hz=50.0, amp=0.02)
@@ -2530,6 +2579,7 @@ class Signal:
         `modulate` (AM/OOK is a product) stay the named ops for those effects. See
         `wfmsynth.joins`."""
         from . import joins as JN
+        OPKEYS.check("combine", params)
         if SUB.is_subchain(others) or isinstance(others, Signal):
             others = [others]
         if isinstance(others, (str, bytes, dict, np.ndarray)) or not hasattr(others, "__len__"):
@@ -2547,7 +2597,7 @@ class Signal:
         return self._add("combine", others=list(others), how=how,
                          **({} if gains is None else {"gains": gains}))
 
-    def gain(self, by):
+    def gain(self, by=None, **params):
         """Multiply by `by`: a number, or a sub-chain for a gain that moves.
 
             ripple = Signal(grid=g).carrier("sine", f_hz=120.0, amp=0.03, offset=1.0)
@@ -2555,15 +2605,17 @@ class Signal:
 
         `by` is the factor itself, so 1 leaves the signal alone. `drift(kind="gain")` is this
         with a ramp or half-sine across the record. See `wfmsynth.joins`."""
+        OPKEYS.check("gain", params)
         return self._add("gain", by=_by_given("gain", by))
 
-    def offset(self, by):
+    def offset(self, by=None, **params):
         """Add `by`, in the waveform's own units: a number, or a sub-chain for a baseline that
         moves. `drift(kind="dc")` is this with a ramp scaled to the signal's swing; a second
         signal in its own right is `combine`. See `wfmsynth.joins`."""
+        OPKEYS.check("offset", params)
         return self._add("offset", by=_by_given("offset", by))
 
-    def gate(self, by, threshold=0.5, off="zero"):
+    def gate(self, by=None, threshold=0.5, off="zero", **params):
         """Let the signal through where `by > threshold`: an ideal switch on an enable.
 
             enable = Signal(grid=g).carrier("square", f_hz=1e3, amp=0.5, offset=0.5)
@@ -2574,10 +2626,11 @@ class Signal:
         sub-sample time `by` crossed the threshold. `burst` is the named op for a periodic
         cadence with ramped edges. See `wfmsynth.joins`."""
         from . import joins as JN
+        OPKEYS.check("gate", params)
         JN.check_gate(threshold, off)
         return self._add("gate", by=_by_given("gate", by), threshold=threshold, off=off)
 
-    def delay(self, by, max_rate=0.5):
+    def delay(self, by=None, max_rate=0.5, **params):
         """Delay by `by` SECONDS: a number, or a sub-chain for a delay that moves.
 
             wobble = Signal(grid=g).carrier("sine", f_hz=1e6, amp=5e-12, offset=20e-12)
@@ -2588,6 +2641,7 @@ class Signal:
         `delay_errors()`. Each of those is refused by name when it does not hold. `timing` is
         the named op for clock jitter about zero. See `wfmsynth.joins`."""
         from . import joins as JN
+        OPKEYS.check("delay", params)
         JN.check_delay(max_rate)
         return self._add("delay", by=_by_given("delay", by), max_rate=max_rate)
 
@@ -3466,8 +3520,18 @@ class Signal:
         factor bit-identical — a valid contrastive pair / clean ablation. `factors` are
         role names from `roles()`; `seed` makes the re-roll reproducible. `"unit/*"` is every
         toleranced parameter at once: another unit under the same noise (`unit(seed)` returns
-        that unit as a Signal, with its values in the recipe)."""
-        return self.waveform(streams=Streams(self.seed).reroll(*factors, seed=seed))
+        that unit as a Signal, with its values in the recipe).
+
+        A name that matches no randomness in this record is refused: re-rolling it would
+        return the record unchanged, which reads as "this factor does not matter"."""
+        st = Streams(self.seed).reroll(*factors, seed=seed)
+        x = self.waveform(streams=st)
+        idle = st.idle(self.roles())
+        if idle:
+            raise ValueError(f"contrast: {idle} names no randomness this record draws, so the "
+                             f"sibling would be this record again. roles() lists what can be "
+                             f"re-rolled: {self.roles()}")
+        return x
 
     def ground_truth(self, levels=None):
         """Ground-truth labels MEASURED from this signal's waveform (never read off the

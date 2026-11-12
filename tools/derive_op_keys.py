@@ -112,7 +112,8 @@ def derive() -> dict[str, frozenset[str]]:
             # `events` hands its surplus keywords to `place_events`, which stores them on each
             # event for `apply_events` to read, so the set spans two modules.
             ks |= placement | mech
-        table[op] = frozenset(k for k in ks if not k.startswith("_"))
+        # `p["op"]` is the op's own name being read back (for a message), not a parameter
+        table[op] = frozenset(k for k in ks if not k.startswith("_") and k != "op")
     return table
 
 
@@ -131,12 +132,41 @@ def render() -> str:
            "# underscore is the annotation namespace and is also allowed through.",
            'STRUCTURAL = frozenset({"op"})',
            "",
+           "# The word ANOTHER op uses for the same idea, where the nearest-spelling hint cannot",
+           "# find it: (op, what was passed) -> what this op calls it.",
+           "SAID_AS = {",
+           *[f'    ("{o}", "{k}"): {v!r},' for (o, k), v in sorted(SAID_AS.items())],
+           "}",
+           "",
            "OP_KEYS = {"]
     for op in sorted(table):
         ks = ", ".join(f'"{k}"' for k in sorted(table[op]))
         out.append(f'    "{op}": frozenset({{{ks}}}),')
     out += ["}", "", "", CHECK_SRC]
     return "\n".join(out) + "\n"
+
+
+_PRBS = ("prbs=<order>, e.g. prbs=15 (with prbs_seed= / prbs_phase=); pattern= names a "
+         "sequence on `carrier`")
+_LEVEL = "threshold= (the crossing level; `trigger` calls it level=, a scope's word)"
+SAID_AS = {
+    ("iq", "pattern"): _PRBS,
+    ("iq", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
+    ("carrier", "prbs"): "pattern='prbs7' (also 'prbs15', 'clock', ...), with seed= for its "
+                         "phase; prbs=<order> is how `iq` and `coded` say it",
+    ("trigger", "threshold"): "level= (a scope's word; `gate`, `switch` and "
+                              "law('comparator') call it threshold=)",
+    ("gate", "level"): _LEVEL, ("switch", "level"): _LEVEL, ("law", "level"): _LEVEL,
+    ("combine", "kind"): "how= ('sum' | 'product' | 'min' | 'max')",
+    ("combine", "by"): "others= (the peer signals); by= is the one signal of gain / offset / "
+                       "gate / delay",
+    ("delay", "delay_s"): "by= (seconds: a number, or a sub-chain)",
+    ("delay", "t_s"): "by= (seconds: a number, or a sub-chain)",
+    ("downconvert", "lpf_hz"): "lpf= (a passband edge in Hz, or a dict of pass_hz, stop_hz, "
+                               "atten_db)",
+    ("downconvert", "fs_out_hz"): "fs_out= (the decimated rate, in Sa/s)",
+    ("downconvert", "fs_hz"): "fs_out= (the decimated rate, in Sa/s)",
+}
 
 
 CHECK_SRC = '''def check(op, params):
@@ -169,7 +199,8 @@ CHECK_SRC = '''def check(op, params):
     lines = []
     for k in sorted(unknown):
         near = difflib.get_close_matches(k, sorted(allowed), n=2, cutoff=0.6)
-        lines.append(f"  {k!r}" + (f" -- did you mean {' or '.join(repr(n) for n in near)}?"
+        lines.append(f"  {k!r}" + (f" -- {op} says {SAID_AS[op, k]}" if (op, k) in SAID_AS
+                                   else f" -- did you mean {' or '.join(repr(n) for n in near)}?"
                                    if near else ""))
     raise TypeError(
         f"op {op!r} does not take " + ", ".join(repr(k) for k in sorted(unknown)) + ".\\n"

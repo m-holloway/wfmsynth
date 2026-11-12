@@ -101,7 +101,7 @@ def test_combine_adds_an_interferer_about_the_same_centre():
 def test_sequence_and_switch_join_iq_chains_and_keep_a_real_selector():
     pre = Signal(grid=G).iq(symbols=[1, -1] * 20)        # 40 symbols of BPSK alternation
     t_pre = 40 / BAUD
-    sig = Signal(seed=1, grid=G).sequence([{"chain": pre, "t_s": t_pre}, {"chain": env()}])
+    sig = Signal(seed=1, grid=G).sequence([{"chain": pre, "duration_s": t_pre}, {"chain": env()}])
     x, ev = sig.realize()
     n_pre = round(t_pre * FS)
     assert np.iscomplexobj(x)
@@ -159,7 +159,7 @@ def test_the_other_signal_is_refused_in_the_wrong_domain():
     with pytest.raises(ValueError, match="COMPLEX"):
         Signal(seed=1, grid=G).switch(select=env(), inputs=[env(), env(seed=5)]).waveform()
     # a Signal that STATES an I/Q grid is still held to it
-    with pytest.raises(ValueError, match="carrier.*complex baseband"):
+    with pytest.raises(ValueError, match="carrier.*I/Q grid.*starts with .iq"):
         Signal(grid=G).carrier("sine", f_hz=1e6)
 
 
@@ -238,7 +238,7 @@ def test_a_sequence_boundary_is_a_marker_on_an_iq_export(tmp_path):
     pre = Signal(grid=G).iq(symbols=[1, -1] * 20)
     t_pre = 40 / BAUD
     sig = Signal(seed=1, grid=G).sequence(
-        [{"chain": pre, "t_s": t_pre}, {"chain": env(), "t_s": 200 / BAUD}, {"chain": pre}],
+        [{"chain": pre, "duration_s": t_pre}, {"chain": env(), "duration_s": 200 / BAUD}, {"chain": pre}],
         join="crossfade", t_join_s=2 / BAUD)
     x, ev = sig.realize()
     out = ws.to_interleaved(str(tmp_path / "burst.iq"), x, dtype="float64", events=ev)

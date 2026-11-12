@@ -51,7 +51,7 @@ def two(join="cut", t_join_s=None, a=None, b=None, state_b="restart", seed=3):
     a = {"from": tone().recipe()} if a is None else a
     b = {"from": lane(seed=7).recipe()} if b is None else b
     return Signal(seed=seed, grid=G).sequence(
-        [{"chain": a, "t_s": T_A}, {"chain": b, "state": state_b}], join=join,
+        [{"chain": a, "duration_s": T_A}, {"chain": b, "state": state_b}], join=join,
         t_join_s=t_join_s)
 
 
@@ -69,7 +69,7 @@ def test_a_sequence_is_its_chains_rendered_alone_and_spliced():
 def test_a_signal_segment_is_the_chain_as_this_record_renders_it():
     """A Signal joins the record: its randomness is the record's, under the segment's
     namespace. `subchain()` returns that chain, which is not `lane().waveform()`."""
-    s = Signal(seed=3, grid=G).sequence([{"chain": tone(), "t_s": T_A}, {"chain": lane()}])
+    s = Signal(seed=3, grid=G).sequence([{"chain": tone(), "duration_s": T_A}, {"chain": lane()}])
     y = s.waveform()
     b = s.subchain("sequence/0/segments/1/chain")
     assert np.array_equal(y, np.concatenate([A[:N_A], b[:G.n - N_A]]))
@@ -79,9 +79,9 @@ def test_a_signal_segment_is_the_chain_as_this_record_renders_it():
 
 
 def test_three_segments_and_the_layout_that_says_where_they_are():
-    segs = [{"chain": {"from": tone().recipe()}, "t_s": 1e-6},
-            {"chain": {"from": lane(seed=7).recipe()}, "t_s": 4e-6},
-            {"chain": {"from": tone(2e6).recipe()}, "t_s": 3e-6}]
+    segs = [{"chain": {"from": tone().recipe()}, "duration_s": 1e-6},
+            {"chain": {"from": lane(seed=7).recipe()}, "duration_s": 4e-6},
+            {"chain": {"from": tone(2e6).recipe()}, "duration_s": 3e-6}]
     s = Signal(grid=G).sequence(segs)
     lay = SEQ.layout(s.ops[0]["segments"], G)
     assert [(d["start"], d["stop"]) for d in lay] == [(0, 1000), (1000, 5000), (5000, 8000)]
@@ -105,7 +105,7 @@ def test_continue_carries_phase_and_restart_does_not():
     w = t.waveform()
 
     def seq(state):
-        return Signal(grid=G).sequence([{"chain": t, "t_s": T_A},
+        return Signal(grid=G).sequence([{"chain": t, "duration_s": T_A},
                                         {"chain": t, "state": state}]).waveform()
 
     assert np.array_equal(seq("continue"), w)                      # one uninterrupted tone
@@ -159,7 +159,7 @@ def test_a_hold_keeps_the_last_value_then_the_next_segment_is_already_running():
 
 # ------------------------------------------------------------------------------ the events
 def test_boundary_events_are_at_the_requested_times_with_their_segment_index():
-    segs = [{"chain": tone(), "t_s": 1e-6}, {"chain": tone(2e6), "t_s": 4e-6, "state": "continue"},
+    segs = [{"chain": tone(), "duration_s": 1e-6}, {"chain": tone(2e6), "duration_s": 4e-6, "state": "continue"},
             {"chain": tone(3e6)}]
     _, ev = Signal(grid=G).sequence(segs, join="crossfade", t_join_s=T_J).realize()
     got = [(e.kind, e.sample, e.t_s, e.width, e.placement, e.params["segment"],
@@ -178,7 +178,7 @@ def test_a_restarted_segments_own_events_are_on_the_records_clock():
     """A 1 MHz tone's comparator fires every 500 ns of the CHAIN's time. Restarted at 2 us,
     the same transitions are 2 us later in the record; the ones past the segment are gone."""
     alone = comparator().event_list()
-    s = Signal(grid=G).sequence([{"chain": tone(), "t_s": T_A}, {"chain": comparator()}])
+    s = Signal(grid=G).sequence([{"chain": tone(), "duration_s": T_A}, {"chain": comparator()}])
     ev = [e for e in s.event_list() if e.kind == "transition"]
     keep = [e for e in alone if e.sample < G.n - N_A]
     assert len(keep) == len(ev) == 12 and len(alone) == 16
@@ -189,7 +189,7 @@ def test_a_restarted_segments_own_events_are_on_the_records_clock():
 
 def test_a_continued_segments_events_are_the_chains_inside_its_window():
     alone = comparator().event_list()
-    s = Signal(grid=G).sequence([{"chain": tone(), "t_s": T_A},
+    s = Signal(grid=G).sequence([{"chain": tone(), "duration_s": T_A},
                                  {"chain": comparator(), "state": "continue"}])
     ev = [e for e in s.event_list() if e.kind == "transition"]
     assert [(e.sample, e.t_s) for e in ev] == [(e.sample, e.t_s) for e in alone
@@ -198,8 +198,8 @@ def test_a_continued_segments_events_are_the_chains_inside_its_window():
 
 
 def test_a_sequence_inside_a_sequence_composes():
-    inner = Signal(grid=G).sequence([{"chain": tone(), "t_s": 1e-6}, {"chain": comparator()}])
-    s = Signal(grid=G).sequence([{"chain": dc(0.5), "t_s": T_A}, {"chain": inner}])
+    inner = Signal(grid=G).sequence([{"chain": tone(), "duration_s": 1e-6}, {"chain": comparator()}])
+    s = Signal(grid=G).sequence([{"chain": dc(0.5), "duration_s": T_A}, {"chain": inner}])
     y, ev = s.realize()
     assert np.array_equal(y[N_A:N_A + 1000], A[:1000])
     seg = [(e.sample, e.at) for e in ev if e.kind == "segment"]
@@ -230,7 +230,7 @@ def test_every_sequence_parameter_moves_the_samples_and_the_digest(change):
 
 def test_a_duration_moves_the_boundary():
     def at(t_s):
-        s = Signal(grid=G).sequence([{"chain": dc(0.0), "t_s": t_s}, {"chain": dc(1.0)}])
+        s = Signal(grid=G).sequence([{"chain": dc(0.0), "duration_s": t_s}, {"chain": dc(1.0)}])
         return int(np.argmax(s.waveform() > 0.5)), s.sha256()
 
     (i1, d1), (i2, d2) = at(2e-6), at(3e-6)
@@ -238,7 +238,7 @@ def test_a_duration_moves_the_boundary():
 
 
 def test_roles_reach_inside_and_contrast_rerolls_one_segment_only():
-    s = Signal(seed=3, grid=G).sequence([{"chain": lane(), "t_s": T_A}, {"chain": lane()}])
+    s = Signal(seed=3, grid=G).sequence([{"chain": lane(), "duration_s": T_A}, {"chain": lane()}])
     roles = s.roles()
     assert roles == ["sequence/0/segments/0/chain/jitter/0",
                      "sequence/0/segments/0/chain/rx_noise/2",
@@ -256,7 +256,7 @@ def test_roles_reach_inside_and_contrast_rerolls_one_segment_only():
 
 def test_a_tolerance_inside_a_segment_is_this_records_unit():
     part = Signal(grid=G).carrier("dc", level=ws.tol(1.0, 10))
-    s = Signal(seed=4, grid=G).sequence([{"chain": dc(0.0), "t_s": T_A}, {"chain": part}])
+    s = Signal(seed=4, grid=G).sequence([{"chain": dc(0.0), "duration_s": T_A}, {"chain": part}])
     assert s.roles() == ["unit/0/segments.1.chain.ops.0.level"]
     level = s.ops[0]["segments"][1]["chain"]["ops"][0]["level"]
     assert 0.9 <= level <= 1.1 and level != 1.0
@@ -289,30 +289,30 @@ def seq(segs, **kw):
 
 def test_durations_are_never_rounded_into_a_different_record():
     a, b = tone(), tone(2e6)
-    refused(lambda: seq([{"chain": a, "t_s": 2.0005e-6}, {"chain": b}]),
+    refused(lambda: seq([{"chain": a, "duration_s": 2.0005e-6}, {"chain": b}]),
             "segments[0]", "2000.5 samples", "not on the grid", "never rounded", "2001")
-    refused(lambda: seq([{"chain": a, "t_s": 2e-6}, {"chain": b, "t_s": 5e-6}]),
+    refused(lambda: seq([{"chain": a, "duration_s": 2e-6}, {"chain": b, "duration_s": 5e-6}]),
             "7000 samples", "8000 samples", "fill it exactly", "1e-06 s more")
-    refused(lambda: seq([{"chain": a, "t_s": 6e-6}, {"chain": b, "t_s": 5e-6}]),
+    refused(lambda: seq([{"chain": a, "duration_s": 6e-6}, {"chain": b, "duration_s": 5e-6}]),
             "11000 samples", "shorten")
-    refused(lambda: seq([{"chain": a, "t_s": 8e-6}, {"chain": b}]), "already", "fill")
-    refused(lambda: seq([{"chain": a}, {"chain": b, "t_s": 2e-6}]), "Only the LAST")
-    refused(lambda: seq([{"chain": a, "t_s": 0.0}, {"chain": b}]), "at least 1")
-    refused(lambda: seq([{"chain": a, "t_s": "2us"}, {"chain": b}]), "duration in seconds")
-    refused(lambda: seq([{"chain": a, "t_s": ws.tol(2e-6, 5)}, {"chain": b}]),
+    refused(lambda: seq([{"chain": a, "duration_s": 8e-6}, {"chain": b}]), "already", "fill")
+    refused(lambda: seq([{"chain": a}, {"chain": b, "duration_s": 2e-6}]), "Only the LAST")
+    refused(lambda: seq([{"chain": a, "duration_s": 0.0}, {"chain": b}]), "at least 1")
+    refused(lambda: seq([{"chain": a, "duration_s": "2us"}, {"chain": b}]), "duration in seconds")
+    refused(lambda: seq([{"chain": a, "duration_s": ws.tol(2e-6, 5)}, {"chain": b}]),
             "toleranced", "sample grid")
     # a duration that is on the grid to within float error is accepted, not refused
-    assert seq([{"chain": a, "t_s": 0.1 * 3 * 1e-5}, {"chain": b}]).waveform().shape == (G.n,)
+    assert seq([{"chain": a, "duration_s": 0.1 * 3 * 1e-5}, {"chain": b}]).waveform().shape == (G.n,)
 
 
 def test_a_join_that_says_nothing_is_refused():
     a, b = tone(), tone(2e6)
-    segs = [{"chain": a, "t_s": 2e-6}, {"chain": b}]
+    segs = [{"chain": a, "duration_s": 2e-6}, {"chain": b}]
     refused(lambda: seq(segs, t_join_s=1e-8), "join='cut'", "ignored", "crossfade")
     refused(lambda: seq(segs, join="crossfade"), "t_join_s=<seconds>")
     refused(lambda: seq(segs, join="fade", t_join_s=1e-8), "['cut', 'crossfade', 'hold']")
     refused(lambda: seq(segs, join="hold", t_join_s=1.5e-9), "t_join_s", "not on the grid")
-    refused(lambda: seq([{"chain": a, "t_s": 7.9e-6}, {"chain": b}], join="crossfade",
+    refused(lambda: seq([{"chain": a, "duration_s": 7.9e-6}, {"chain": b}], join="crossfade",
                         t_join_s=2e-7), "longer than segment 1", "100 samples")
 
 
@@ -320,12 +320,12 @@ def test_a_malformed_segment_is_refused_by_name():
     a = tone()
     refused(lambda: seq([]), "empty list")
     refused(lambda: seq({"chain": a}), "list of", "dict")
-    refused(lambda: seq([{"t_s": 1e-6}, {"chain": a}]), "segments[0]", "'chain'")
-    refused(lambda: seq([{"chain": a, "t_s": 2e-6, "phase": 0}, {"chain": a}]),
+    refused(lambda: seq([{"duration_s": 1e-6}, {"chain": a}]), "segments[0]", "'chain'")
+    refused(lambda: seq([{"chain": a, "duration_s": 2e-6, "phase": 0}, {"chain": a}]),
             "['phase']", "nothing reads")
-    refused(lambda: seq([{"chain": a, "t_s": 2e-6, "state": "resume"}, {"chain": a}]),
+    refused(lambda: seq([{"chain": a, "duration_s": 2e-6, "state": "resume"}, {"chain": a}]),
             "'restart'", "'continue'", "'resume'")
-    refused(lambda: seq([{"chain": np.zeros(8000), "t_s": 2e-6}, {"chain": a}]).waveform(),
+    refused(lambda: seq([{"chain": np.zeros(8000), "duration_s": 2e-6}, {"chain": a}]).waveform(),
             "segments[0]", "`chain`", "ndarray")
     # with no grid the durations cannot be checked where they are written (a chain of a
     # `Channels` record is written that way), so the refusal comes when it is rendered
@@ -336,11 +336,11 @@ def test_a_malformed_segment_is_refused_by_name():
 def test_a_segment_chain_is_never_resampled_or_fitted():
     other = Signal(grid=Grid(fs=2e9, baud=50e6, n=8000)).carrier("sine", f_hz=5e6)
     short = Signal(grid=Grid(fs=1e9, baud=50e6, n=2000)).carrier("sine", f_hz=5e6)
-    refused(lambda: seq([{"chain": other, "t_s": 2e-6}, {"chain": tone()}]),
+    refused(lambda: seq([{"chain": other, "duration_s": 2e-6}, {"chain": tone()}]),
             "`segments`[0]", "`chain`", "nothing is resampled")
-    refused(lambda: seq([{"chain": {"from": short.recipe()}, "t_s": 2e-6},
+    refused(lambda: seq([{"chain": {"from": short.recipe()}, "duration_s": 2e-6},
                          {"chain": tone()}]).waveform(), "segments[0]", "n=2000", "never")
-    refused(lambda: seq([{"chain": lane(seed=5), "t_s": 2e-6}, {"chain": tone()}]),
+    refused(lambda: seq([{"chain": lane(seed=5), "duration_s": 2e-6}, {"chain": tone()}]),
             "`segments`[0]", "seed=5", "{'from':")
 
 
@@ -501,7 +501,7 @@ def test_switch_refusals():
 def test_the_array_level_functions_agree_with_the_ops():
     y, changes = SEQ.mux(tone(1e6).waveform(), [A, B], threshold=0.0, m=0)
     assert np.array_equal(y, sw(tone(1e6), threshold=0.0).waveform()) and len(changes) == 16
-    plan = SEQ.layout([{"chain": {}, "t_s": T_A}, {"chain": {}}], G)
+    plan = SEQ.layout([{"chain": {}, "duration_s": T_A}, {"chain": {}}], G)
     assert np.array_equal(SEQ.splice([A, B], plan), two().waveform())
     r = SEQ.ramp(4)
     assert np.allclose(r + r[::-1], 1.0) and np.all(np.diff(r) > 0) and 0 < r[0] < r[-1] < 1

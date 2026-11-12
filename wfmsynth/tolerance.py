@@ -40,7 +40,8 @@ passed to a builder; `tol()` and `corners()` only build these dicts and check th
                                                      likely; add "pick": "slow" to state it
 
 A number drawn from a tolerance is a float. A corner keeps the value it was given, so a
-parameter that has to be an integer takes corners.
+parameter that has to be an integer takes corners, and a tolerance on one (`WHOLE_NUMBERS`:
+`n_ui`, `bits`, `order`, ...) is refused.
 
 ONE DRAW PER ROLE. Each toleranced parameter has a role, `unit/<op index>/<parameter>`, and its
 value is its distribution's quantile at one uniform number that is a pure function of
@@ -89,6 +90,11 @@ _TOL_KEYS = frozenset({"nom", "tol_pct", "tol_abs", "dist", "group"})
 _CORNER_KEYS = frozenset({"corners", "pick", "group"})
 _MARK = ("nom", "tol_pct", "tol_abs", "corners")      # any of these makes a dict a toleranced value
 ANY = "unit/*"                                        # every unit role at once
+# Parameters that are COUNTS. A tolerance draws a float, which each of these would truncate or
+# render as a different thing than was drawn (8.86 bits is 8); they take named corners.
+WHOLE_NUMBERS = frozenset({
+    "bits", "order", "n_ui", "n", "n_out", "n_bits", "n_segments", "average", "n_bounce", "prbs",
+    "pre", "count", "every", "m_cores", "record_length", "depth"})
 
 
 # ---- the two forms ----------------------------------------------------------------------------
@@ -115,6 +121,10 @@ def corners(values, pick=None, group=None):
     """A named corner set: `corners({"slow": 12.0, "typ": 10.0, "fast": 8.0})` is one of the
     three, equally likely. `pick="slow"` states the corner instead of drawing it; `group` names
     parameters that share one draw: sets with the same names take the SAME corner."""
+    if not isinstance(values, dict):
+        raise ValueError(f"corners(): takes {{name: value}}, e.g. corners({{'slow': 12.0, "
+                         f"'fast': 8.0}}), got {type(values).__name__}. The names are what the "
+                         f"recipe records as the corner each unit drew.")
     spec = {"corners": dict(values)}
     if pick is not None:
         spec["pick"] = pick
@@ -311,6 +321,11 @@ def resolve(i, params, seed, pre=""):
         name = ".".join(map(str, path))
         spec = _get(params, path)
         _check(spec, f"op {i}, parameter {name!r}")
+        if "corners" not in spec and path[-1] in WHOLE_NUMBERS:
+            raise ValueError(
+                f"op {i}, parameter {name!r}: {path[-1]} is a whole number, and a tolerance "
+                f"draws a fraction of one, which would be recorded and then truncated. Name "
+                f"the values it can take: ws.corners({{'lo': ..., 'hi': ...}}).")
         value, unit[name] = _draw(spec, seed, _role(i, name, spec, pre))
         params = _set(params, path, value)
     return {**params, "_unit": unit}
@@ -402,10 +417,25 @@ def unit_of(recipe):
 
 
 # ---- drawing a design again -------------------------------------------------------------------
+def redraw_ops(ops, seed_of, pre=""):
+    """An op list with each unit role in `seed_of` (role -> seed; `ANY` matches all) drawn
+    again. Only the toleranced values move. `pre` is the chain's name in a several-channel
+    record (see `_role`)."""
+    ops = list(ops)
+    for i, name, entry, role in list(_entries(ops, pre)):
+        seed = seed_of.get(role, seed_of.get(ANY))
+        if seed is None:
+            continue
+        spec = {k: v for k, v in entry.items() if k not in ("seed", "corner")}
+        value, new = _draw(spec, seed, role)
+        ops[i] = _set(ops[i], _split(name), value)
+        ops[i] = {**ops[i], "_unit": {**ops[i]["_unit"], name: new}}
+    return ops
+
+
 def _redraw(sig, seed_of, where):
-    """A sibling Signal with each unit role in `seed_of` (role -> seed; `ANY` matches all)
-    drawn again. Only the toleranced values move; every other parameter, the seed and the grid
-    are the same."""
+    """A sibling Signal with each unit role in `seed_of` drawn again (`redraw_ops`); every
+    other parameter, the seed and the grid are the same."""
     known = roles(sig.ops)
     if not known:
         raise ValueError(f"{where}: this record has no toleranced parameter, so there is no "
@@ -414,16 +444,7 @@ def _redraw(sig, seed_of, where):
     if unknown:
         raise ValueError(f"{where}: no unit role {unknown} in this record. It has: {known} "
                          f"(or '{ANY}' for all of them).")
-    ops = list(sig.ops)
-    for i, name, entry, role in list(_entries(sig.ops)):
-        seed = seed_of.get(role, seed_of.get(ANY))
-        if seed is None:
-            continue
-        spec = {k: v for k, v in entry.items() if k not in ("seed", "corner")}
-        value, new = _draw(spec, seed, role)
-        ops[i] = _set(ops[i], _split(name), value)
-        ops[i] = {**ops[i], "_unit": {**ops[i]["_unit"], name: new}}
-    return dataclasses.replace(sig, ops=ops)
+    return dataclasses.replace(sig, ops=redraw_ops(sig.ops, seed_of))
 
 
 def as_unit(sig, seed):

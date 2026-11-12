@@ -3153,7 +3153,7 @@ def _qlane():
 
 def _qseq(join="cut", t_join_s=None, state="restart"):
     return Signal(seed=3, grid=_qg).sequence(
-        [{"chain": {"from": _qtone().recipe()}, "t_s": _qna / _qg.fs},
+        [{"chain": {"from": _qtone().recipe()}, "duration_s": _qna / _qg.fs},
          {"chain": {"from": _qlane().recipe()}, "state": state}], join=join, t_join_s=t_join_s)
 
 
@@ -3182,7 +3182,7 @@ _qtw = _qt.waveform()
 
 
 def _qstate(state):
-    return Signal(grid=_qg).sequence([{"chain": _qt, "t_s": _qna / _qg.fs},
+    return Signal(grid=_qg).sequence([{"chain": _qt, "duration_s": _qna / _qg.fs},
                                       {"chain": _qt, "state": state}]).waveform()
 
 
@@ -3193,7 +3193,7 @@ check("'continue' carries a tone's phase across the boundary; 'restart' starts i
       f"5.3 MHz continued over a 2 us boundary is the uninterrupted tone (0 samples differ); "
       f"restarted it steps {_qjump:.3f} at the boundary")
 _qstep = Signal(grid=_qg).sequence(
-    [{"chain": Signal(grid=_qg).carrier("dc", level=0.0), "t_s": _qna / _qg.fs},
+    [{"chain": Signal(grid=_qg).carrier("dc", level=0.0), "duration_s": _qna / _qg.fs},
      {"chain": Signal(grid=_qg).carrier("dc", level=1.0)}],
     join="crossfade", t_join_s=_qm / _qg.fs).waveform()
 
@@ -3209,10 +3209,10 @@ check("a crossfade between two levels rises 10-90 % in 0.5903 of t_join_s",
       abs(_q1090 - _qan) < 0.01 / _qg.fs,
       f"measured {_q1090 * 1e9:.3f} ns, analytic {_qan * 1e9:.3f} ns (bound 0.01 sample)")
 for _qbad, _qword in (
-        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "t_s": 2.0005e-6}, {"chain": _qt}]),
+        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "duration_s": 2.0005e-6}, {"chain": _qt}]),
          "not on the grid"),
-        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "t_s": 2e-6},
-                                            {"chain": _qt, "t_s": 5e-6}]), "fill it exactly")):
+        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "duration_s": 2e-6},
+                                            {"chain": _qt, "duration_s": 5e-6}]), "fill it exactly")):
     try:
         _qbad()
         _qmsg = ""

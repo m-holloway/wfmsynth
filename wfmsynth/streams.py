@@ -38,14 +38,26 @@ class Streams:
 
     `overrides` re-seeds individual roles (used by `reroll`); every role not overridden
     stays bit-identical to the base. Streams are cached, so repeated `role(name)` calls
-    return the same generator (drawing continues where it left off)."""
+    return the same generator (drawing continues where it left off).
+
+    `asked` collects every role name a render requested, which is how `contrast()` tells a
+    re-rolled role that something drew from, from a name that matches nothing."""
 
     def __init__(self, seed: int = 0, overrides: dict | None = None):
         self.seed = int(seed)
         self._overrides = dict(overrides or {})
         self._cache: dict = {}
+        self.asked: set = set()
+
+    def idle(self, known=()):
+        """The re-rolled roles nothing asked for and `known` does not list: names that match
+        no randomness in the record, so re-rolling them changed nothing. (A `unit/` role is a
+        toleranced part, re-drawn into the recipe rather than asked for here.)"""
+        return sorted(k for k in self._overrides
+                      if k not in self.asked and k not in known and "unit/" not in k)
 
     def role(self, name: str) -> np.random.Generator:
+        self.asked.add(name)
         r = self._cache.get(name)
         if r is None:
             sub = self._overrides.get(name, self.seed)

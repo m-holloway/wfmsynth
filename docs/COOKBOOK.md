@@ -821,8 +821,8 @@ chains by a signal, and emits the instants it chose.
 ```python
 g2 = ws.Grid(fs=1e9, baud=50e6, n=8000)                # 8 us, 400 UI
 seq = (Signal(seed=1, grid=g2)
-       .sequence([{"chain": Signal().carrier("dc", level=-1.0), "t_s": 1e-6},
-                  {"chain": Signal().carrier("nrz", n_ui=400, pattern="clock"), "t_s": 2e-6},
+       .sequence([{"chain": Signal().carrier("dc", level=-1.0), "duration_s": 1e-6},
+                  {"chain": Signal().carrier("nrz", n_ui=400, pattern="clock"), "duration_s": 2e-6},
                   {"chain": Signal().carrier("nrz", n_ui=400, pattern="prbs7")}])
        .lossy(loss_db=3.0, loss_at_ghz=0.05))          # one channel, after the join
 x, events = seq.realize()
@@ -840,7 +840,7 @@ mux = Signal(seed=1, grid=g2).switch(
 len(mux.realize()[1])                                  # -> 7 changes, each a "switch" event
 ```
 
-Durations are whole samples and fill the record; the last segment may omit `t_s`. A segment
+Durations are whole samples and fill the record; the last segment may omit `duration_s`. A segment
 restarts its chain at its own t = 0 unless it says `"state": "continue"`, which takes the chain
 as if it had been running since the record began. `join="crossfade"` or `"hold"` with `t_join_s`
 shapes the boundary; the default is a cut. Each chain is rendered for the whole record, so the
@@ -1058,7 +1058,7 @@ converter's full scale from the record.
 applies. `downconvert` needs its low-pass stated, because that decides what the I/Q contains.
 
 ```python
-loop = source().upconvert().downconvert(fc_hz=1e9, lpf=20e6, fs_out=400e6)
+loop = source().upconvert().downconvert(lpf=20e6, fs_out=400e6)     # about the grid's fc_hz
 y = loop.waveform()
 gy = loop.stored_grid(y)                               # 400 MSa/s, 16384 samples, domain "iq"
 rf.evm(y, gy, sent, skip=8)["evm_pct"]                 # -> 0.32 %
@@ -1181,7 +1181,7 @@ Each general stage either means something on an envelope or is refused naming th
 
 | Stage | On I/Q | Meaning, or what to use |
 |---|---|---|
-| `filter` | yes | stated on the grid, about the centre frequency; `filter("rrc")` is the source's matched filter |
+| `filter` | yes | stated on the grid, about the centre frequency; `filter("rrc", beta=0.35)` is the source's matched filter (state the source's `beta`) |
 | `gain(by=)`, `gate(by=)` | yes | a REAL `by` acts on both rails: a supply, an AGC, a T/R switch |
 | `combine` (sum only) | yes | envelopes about the same centre add: an interferer, a blocker |
 | `sequence`, `switch` | yes | I/Q chains in time (preamble, then payload); `select` is real |
@@ -1193,7 +1193,7 @@ Each general stage either means something on an envelope or is refused naming th
 
 ```python
 frame = (Signal(seed=1, grid=gi)
-         .sequence([{"chain": Signal().iq("qpsk", prbs=9), "t_s": 256 / 25e6},    # preamble
+         .sequence([{"chain": Signal().iq("qpsk", prbs=9), "duration_s": 256 / 25e6},    # preamble
                     {"chain": Signal().iq("qam16", prbs=15)}])                    # payload
          .gain(by=Signal().carrier("sine", f_hz=40e3, amp=0.05, offset=1.0))      # a real supply
          .combine(Signal().iq("qpsk", prbs=11).freq_offset(f_hz=40e6), gains=[0.1]))

@@ -441,3 +441,19 @@ def test_an_executor_takes_a_sub_chain_in_one_line():
         SUB.signal({"op": "mixer", "lo": np.zeros(4)}, "lo", Streams(1), G, 3)
     with pytest.raises(ValueError, match="there is none"):
         SUB.signal(p, "lo", Streams(1), None, 3)
+
+
+def test_contrast_refuses_a_role_that_names_nothing():
+    """A typo in a nested role path used to return the record unchanged, which reads as "this
+    factor does not matter". Every listed role still moves the record."""
+    g = Grid(fs=64e9, baud=1e9, n=1 << 12)
+    s = (Signal(seed=1, grid=g).carrier("nrz", n_ui=64).rx_noise(rms=0.01)
+         .crosstalk(aggressor=Signal().carrier("nrz", n_ui=64).rx_noise(rms=0.1), coupling=0.1)
+         .combine({"from": Signal(seed=5, grid=g).carrier("sine", f_hz=1e9).rx_noise(rms=0.1)
+                   .recipe()}))
+    x = s.waveform()
+    for r in s.roles() + ["combine/3/others/0/rx_noise/1"]:      # a pinned record's role too
+        assert not np.array_equal(s.contrast(r), x), r
+    for bad in ("crosstalk/2/aggressor/rx_noise/9", "rx_noise/2", "noise"):
+        with pytest.raises(ValueError, match="names no randomness.*rx_noise/1"):
+            s.contrast(bad)

@@ -82,6 +82,7 @@ from scipy import signal as _sig
 from scipy import special as _special
 
 from . import iq as _iq
+from .opkeys import SAID_AS
 
 _REQ = object()            # a parameter with no honest default
 
@@ -166,7 +167,8 @@ def _resolve(table, what, kind, params):
             near = difflib.get_close_matches(k, list(spec), n=1, cutoff=0.6)
             raise TypeError(
                 f"{what}({kind!r}) does not read {k!r}"
-                + (f" ({_NOT_READ[k]})" if k in _NOT_READ
+                + (f" -- {what} says {SAID_AS[what, k]}" if (what, k) in SAID_AS
+                   else f" ({_NOT_READ[k]})" if k in _NOT_READ
                    else f" (that is a parameter of {', '.join(repr(o) for o in owners)})"
                    if owners else f" -- did you mean {near[0]!r}?" if near else "")
                 + f". {what}({kind!r}) takes: {', '.join(spec)}.")

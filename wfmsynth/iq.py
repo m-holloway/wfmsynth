@@ -269,8 +269,11 @@ def lowpass_spec(lpf):
             raise ValueError(f"downconvert: lpf takes pass_hz (required), stop_hz and atten_db"
                              + (f"; it does not take {extra}" if extra else ""))
         spec = dict(lpf)
-    else:
+    elif isinstance(lpf, (int, float, np.integer, np.floating)) and not isinstance(lpf, bool):
         spec = {"pass_hz": float(lpf)}
+    else:
+        raise ValueError(f"downconvert: lpf is a passband edge in Hz or a dict of pass_hz, "
+                         f"stop_hz, atten_db; got {lpf!r}")
     spec.setdefault("stop_hz", 2.0 * spec["pass_hz"])
     spec.setdefault("atten_db", LPF_ATTEN_DB)
     p, s, a = (float(spec[k]) for k in ("pass_hz", "stop_hz", "atten_db"))

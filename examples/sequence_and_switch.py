@@ -8,7 +8,7 @@ WHAT THIS IS AN EXAMPLE OF
 --------------------------
 Two SOURCE ops whose parts are ordinary chains (sub-chains, see examples/sub_chains.py):
 
-    .sequence([{"chain": idle, "t_s": 1e-6}, {"chain": preamble, "t_s": 1e-6}, {"chain": data}])
+    .sequence([{"chain": idle, "duration_s": 1e-6}, {"chain": preamble, "duration_s": 1e-6}, {"chain": data}])
     .switch(select=gate, inputs=[lane_a, lane_b], threshold=0.0, t_switch_s=20e-9)
 
 `sequence` joins chains in TIME: the durations are written in the recipe. `switch` selects
@@ -42,7 +42,7 @@ data = part().carrier("nrz", n_ui=400, jitter=dict(rj=0.02))  # the payload
 
 def burst(join="cut", t_join_s=None):
     return ws.Signal(seed=5, grid=g).sequence(
-        [{"chain": idle, "t_s": T_IDLE}, {"chain": preamble, "t_s": T_PRE}, {"chain": data}],
+        [{"chain": idle, "duration_s": T_IDLE}, {"chain": preamble, "duration_s": T_PRE}, {"chain": data}],
         join=join, t_join_s=t_join_s)
 
 
@@ -87,7 +87,7 @@ print(f"  through one channel: {rx.waveform().std():.3f} V rms, digest {rx.sha25
 tone = part().carrier("sine", f_hz=5.3e6)
 print("\nthe same tone on both sides of a boundary at 2 us")
 for state in ("continue", "restart"):
-    z = ws.Signal(grid=g).sequence([{"chain": tone, "t_s": 2e-6},
+    z = ws.Signal(grid=g).sequence([{"chain": tone, "duration_s": 2e-6},
                                     {"chain": tone, "state": state}]).waveform()
     same = np.array_equal(z, tone.waveform())
     print(f"  {state:8s}: step at the boundary {abs(z[2000] - z[1999]):.3f} V"

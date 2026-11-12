@@ -552,7 +552,14 @@ def read_iq(path, format, fs_hz=None, fc_hz=None, baud=None, seed=0, embed=False
 
 
 # --------------------------------------------------------------------------------- writing
-def _encode(x, dtype, byteorder, scale, who):
+def _iq_record(x, who):
+    """The samples a writer was handed, as a complex array -- or the refusal that says what
+    it was handed instead."""
+    if hasattr(x, "realize") and hasattr(x, "recipe"):
+        raise ValueError(f"{who}: got a {type(x).__name__}, and this writes SAMPLES. Render "
+                         f"it first: x, events = sig.realize(), then pass x"
+                         f"{', sig.stored_grid(x)' if who == 'to_sigmf' else ''} and "
+                         f"events=events.")
     x = np.asarray(x)
     if not np.iscomplexobj(x):
         raise ValueError(f"{who}: the record is real, and this writes I/Q. A real record is "
@@ -560,6 +567,11 @@ def _encode(x, dtype, byteorder, scale, who):
                          f"I/Q record of a passband one.")
     if x.ndim != 1 or x.size == 0:
         raise ValueError(f"{who}: needs a one-dimensional, non-empty record; got shape {x.shape}.")
+    return x
+
+
+def _encode(x, dtype, byteorder, scale, who):
+    x = _iq_record(x, who)
     dt, order = _np_dtype(dtype, byteorder, who)
     s = _scale(scale, dt.name, who)
     v = np.empty(2 * x.size)
@@ -629,6 +641,12 @@ def to_sigmf(path, x, grid, events=None, dtype="float32", scale=None, descriptio
     `core:sample_start` and `core:frequency`; annotations with `core:sample_start`,
     `core:sample_count`, `core:label`, `core:generator`. Returns ``{"meta", "data",
     "datatype", "scale", "n"}``."""
+    x = _iq_record(x, "to_sigmf")
+    if getattr(grid, "domain", "real") != "iq":
+        raise ValueError(
+            "to_sigmf: the grid is a real record's (domain 'real'), so it has no centre "
+            "frequency to write and the file would read back with none. Pass the grid of "
+            "THIS record, sig.stored_grid(x): after a downconvert it is not sig.grid.")
     if len(x) != int(grid.n):
         raise ValueError(f"to_sigmf: the record has {len(x)} samples and the grid describes "
                          f"{int(grid.n)}. Pass the grid of THIS record: sig.stored_grid(x).")

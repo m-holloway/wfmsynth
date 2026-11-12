@@ -818,12 +818,11 @@ blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbo
 5. A builder method mutates its `Signal` and returns it, so `base.a()` then `base.b()` is one
    chain. Composition makes reusing a base natural; a `copy()` or non-mutating builders would
    remove the trap. Documented as a gotcha for now.
-6. `filter` and `law` validate their design before a tolerance is drawn, so
-   `filter(f_hz=ws.tol(...))` raises a bare `TypeError`; and `ws.tol` on a whole-number
-   parameter draws a float that fails at render instead of being refused at build with
-   "use `ws.corners`".
-7. `downconvert(fs_out=)` has no unit suffix; `es_n0_db` and `ebn0_db` are spelled
-   inconsistently. Renaming is a Tier 1 deprecation cycle.
+6. (Ruled, 0.46.0.) `filter` and `law` draw a tolerance before they check their design, and
+   `ws.tol` on a count (`tolerance.WHOLE_NUMBERS`) is refused naming `ws.corners`.
+7. `es_n0_db` and `ebn0_db` are spelled inconsistently. (`downconvert(fs_out=, lpf=)` is
+   ruled to stay: `fs_out` is a rate as `Grid(fs=)` and `n_out` are, `lpf` is a filter spec and
+   not only a frequency, and `fs_out_hz=` / `lpf_hz=` are refused naming them.)
 8. `net`'s `{"ops": Signal}` drops that Signal's seed and grid silently (the generic sub-chain
    path refuses the same thing); `Signal.unit()` does not move a `{"from": recipe}` record.
 

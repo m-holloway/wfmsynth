@@ -165,8 +165,29 @@ def test_rerolling_a_private_role_moves_that_channel_alone():
 
 def test_contrast_refuses_a_role_that_names_no_chain():
     rec = _shared_record()
-    with pytest.raises(ValueError, match="names no chain.*pll/timing/0"):
+    with pytest.raises(ValueError, match="names no randomness.*pll/timing/0"):
         rec.contrast("timing/0")
+    with pytest.raises(ValueError, match="names no randomness.*pll/timing/0"):
+        rec.contrast("pll/timing/7")                # the chain exists; the role does not
+
+
+def test_every_role_roles_lists_is_accepted_by_contrast_and_moves_something():
+    """One rule for `Signal` and `Channels`: what `roles()` returns, `contrast()` takes."""
+    part = Signal().carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=25e6, tr_s=1e-9).probe(
+        r_source=ws.tol(1e3, 5), noise_rms=1e-3)
+    g = ws.Grid(fs=100e9, n=8000)
+    one = Signal(seed=3, grid=g)
+    one.ops = Signal(seed=3).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=25e6, tr_s=1e-9).probe(
+        r_source=ws.tol(1e3, 5), noise_rms=1e-3).ops
+    rec = ws.Channels({"a": part, "b": part}, seed=3, grid=g)
+    assert any("unit/" in r for r in one.roles()) and any("unit/" in r for r in rec.roles())
+    for r in one.roles():
+        assert not np.array_equal(one.contrast(r), one.waveform()), r
+    x = rec.waveforms()
+    for r in rec.roles():
+        y = rec.contrast(r)
+        moved = [k for k in x if not np.array_equal(x[k], y[k])]
+        assert moved == [r.split("/")[0]], (r, moved)   # exactly its own channel
 
 
 # ------------------------------------------------------------------ one signal, used twice
@@ -411,7 +432,7 @@ def test_a_named_chain_is_a_segment_a_mux_input_and_the_signal_a_join_takes():
     n, k = G.n, G.n // 4
     f = G.fs / 64                                           # a whole number of cycles in the record
     rec = ws.Channels(
-        {"line": Signal().sequence([{"chain": Signal().use("pre"), "t_s": k / G.fs},
+        {"line": Signal().sequence([{"chain": Signal().use("pre"), "duration_s": k / G.fs},
                                     {"chain": Signal().use("data")}]),
          "mux": Signal().switch(select=Signal().use("en"),
                                 inputs=[Signal().use("pre"), Signal().use("data")]),
@@ -605,8 +626,8 @@ def test_a_toleranced_part_is_drawn_per_chain_and_a_group_is_one_part_across_the
     y = other.waveforms()
     assert all(abs(rise(y[k]) / (np.log(9.0) * r2[k] * 2e-12) - 1) < 5e-3 for k in y)
     assert np.array_equal(rec.contrast("unit/*", seed=8)["a"], y["a"])
-    with pytest.raises(ValueError, match="another unit is another record"):
-        rec.contrast("a/unit/1/r_source")
+    one = rec.contrast("a/unit/1/r_source", seed=8)      # one part of the unit, as on a Signal
+    assert np.array_equal(one["a"], y["a"]) and all(np.array_equal(one[k], x[k]) for k in "bcd")
     with pytest.raises(ValueError, match="no toleranced parameter"):
         ws.Channels({"a": _data()}, grid=G).unit(3)
 
@@ -645,7 +666,7 @@ def test_a_units_noise_is_the_same_noise():
 
 def test_summary_reads_as_a_tree_with_segments_parts_and_short_numbers():
     tx = Signal().sequence([
-        {"chain": Signal().carrier("square", f_hz=5e9), "t_s": 64 / G.baud},
+        {"chain": Signal().carrier("square", f_hz=5e9), "duration_s": 64 / G.baud},
         {"chain": Signal().carrier("nrz", n_ui=N_UI), "state": "continue"}])
     rec = ws.Channels(
         {"data": Signal().use("tx").lossy(loss_db=ws.tol(6.0, 15, group="board"),
@@ -661,7 +682,7 @@ Channels  seed=1  fs=3.2e+11 Hz, baud=1e+10, n=16384
     2  use    name='scope'
   shared [tx]
     0  sequence  join='cut'
-         segments[0].chain  t_s=6.4e-09  [tx/sequence/0/segments/0/chain]
+         segments[0].chain  duration_s=6.4e-09  [tx/sequence/0/segments/0/chain]
            0  carrier  kind='square', f_hz=5e+09
          segments[1].chain  state='continue'  [tx/sequence/0/segments/1/chain]
            0  carrier  kind='nrz', n_ui=512

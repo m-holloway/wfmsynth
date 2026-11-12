@@ -141,8 +141,6 @@ None of these moves a rendered sample.
   64 GSa/s: 15.6 ps peak to peak). Fixing it moves existing records and needs a
   `NUMERIC_CHANGES` entry; until then a clock for timing work is
   `carrier("nrz", pattern="clock")`.
-- `filter(..., f_hz=ws.tol(...))` and `law("quantize", bits=ws.corners(...))` fail with a bare
-  `TypeError`, because those two builders check their design before the value is drawn.
 - Not exercised on Python 3.9 (the changed files parse at that grammar; the suite ran on 3.14).
 
 ## 0.45.0 — 2026-11-04

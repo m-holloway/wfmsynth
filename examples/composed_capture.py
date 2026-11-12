@@ -71,8 +71,8 @@ def link(loss_db=6.0, hum=0.03, ripple=0.04, noise_rms=0.01, pll_ps=PLL_PS, skew
     """The whole capture as one record. Every argument is one thing in it, so that a variant
     differs from the capture in exactly that."""
     tx = Signal().sequence([
-        {"chain": Signal().carrier("dc", level=-1.0), "t_s": T_IDLE},
-        {"chain": clock(), "t_s": T_PREAMBLE,
+        {"chain": Signal().carrier("dc", level=-1.0), "duration_s": T_IDLE},
+        {"chain": clock(), "duration_s": T_PREAMBLE,
          "state": "continue"},
         {"chain": Signal().carrier("nrz", n_ui=N_UI, pattern="prbs7"), "state": "continue"}])
     if ffe:

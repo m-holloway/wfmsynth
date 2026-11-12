@@ -87,16 +87,36 @@ ACCEPTS = {
     "use": BOTH,
 }
 
-# a real-only op that has an I/Q counterpart, or a reason: said in its refusal
+# an op refused in one domain that has a counterpart in the other, or a reason: said in its
+# refusal. Keyed by the domain the record is in.
 _INSTEAD = {
-    "offset": "On an envelope a real number is a leak on the I rail alone: "
-              "iq_offset(i=, q=) states both rails.",
-    "delay": "A delay of a passband signal also turns its carrier by -2*pi*fc*delay, which "
-             "shifting the envelope alone would leave out; delay the real passband record.",
-    "law": "The laws act on a voltage. dac(bits=) is the quantiser of an envelope, and an "
-           "amplifier's law acts on the passband record.",
-    "trigger": "A scope triggers on a voltage.",
+    IQ: {
+        "offset": "On an envelope a real number is a leak on the I rail alone: "
+                  "iq_offset(i=, q=) states both rails.",
+        "delay": "A delay of a passband signal also turns its carrier by -2*pi*fc*delay, "
+                 "which shifting the envelope alone would leave out; delay the real passband "
+                 "record.",
+        "law": "The laws act on a voltage. dac(bits=) is the quantiser of an envelope, and an "
+               "amplifier's law acts on the passband record.",
+        "trigger": "A scope triggers on a voltage.",
+        "rx_noise": "Noise on an envelope is awgn(snr_db= | es_n0_db= | ebn0_db=): circular, "
+                    "and stated against the signal's power.",
+        "digitize": "The converter of an envelope is dac(bits=), which quantises both rails.",
+        "store": "The converter of an envelope is dac(bits=), which quantises both rails.",
+        "agc": "A gain that follows a level is gain(by=<a real chain>), which scales both "
+               "rails alike.",
+        "timing": "An oscillator's jitter on an envelope is phase_noise(profile=), and a "
+                  "frequency error is freq_offset(f_hz=).",
+    },
+    REAL: {
+        "awgn": "Noise on a voltage is rx_noise(rms=).",
+        "iq_offset": "A DC term on a voltage is offset(by=).",
+        "dac": "The converter of a voltage is digitize(bits=).",
+        "phase_noise": "Clock jitter on a voltage is timing(rj_ps=, phase_noise=).",
+    },
 }
+# the ops that START a voltage chain: on an I/Q grid there is no record yet to convert
+_REAL_SOURCES = ("carrier", "symbols", "coded")
 
 # op -> the domain it converts the record TO. Absent means the op leaves the domain alone.
 EMITS = {"upconvert": REAL, "downconvert": IQ}
@@ -125,9 +145,16 @@ def refuse(op, dom, i=None):
     takes, and which op converts."""
     where = "" if i is None else f" (op {i})"
     want = " or ".join(repr(d) for d in accepts(op))
+    if dom == IQ and op in _REAL_SOURCES and not i:
+        return ValueError(
+            f"{op}{where}: this chain is on an I/Q grid (Grid(domain='iq')), and {op} is the "
+            f"source of a real voltage. An I/Q record starts with "
+            f".iq(<constellation>, prbs=<order>); a real one needs a Grid without "
+            f"domain='iq'.")
+    instead = _INSTEAD[dom].get(op)
     return ValueError(
         f"{op}{where}: the record is {_WHAT[dom]} at this point in the chain, and {op} takes "
-        f"domain {want} only. {_INSTEAD[op] + ' ' if dom == IQ and op in _INSTEAD else ''}"
+        f"domain {want} only. {instead + ' ' if instead else ''}"
         f"{_FIX[dom]} Nothing is converted implicitly: dropping or "
         f"inventing an imaginary part would be a different record under the same recipe.")
 

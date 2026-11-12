@@ -139,7 +139,8 @@ was asked for.
    recorded in the recipe and does not scale the output. Convert with `x * 0.5 * v_full`.
 3. **`Signal(seed=)` does not seed the pattern phase.** `Signal(seed=7)` and `Signal(seed=99)`
    give bit-identical waveforms unless you pass `carrier(..., seed=)`. A thousand records from
-   one template otherwise share one PRBS phase, and a model learns the position.
+   one template otherwise share one PRBS phase, and a model learns the position. The same
+   holds for `iq(..., prbs=)`: seeds 1 and 99 transmit identical symbols; vary `prbs_seed=`.
 4. **Below about 8 samples across the transition you are measuring the grid, not the signal.**
    The delivered 10–90 % rise time is the one requested to within 1.2 % at k = 8 and 0.04 % at
    k = 32. Under `tr_frac × samples_per_ui = 2` the library clamps to two samples and warns, and

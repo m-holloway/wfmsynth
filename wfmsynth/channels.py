@@ -302,21 +302,27 @@ class Channels:
     def contrast(self, *factors, seed=None):
         """Sibling waveforms with ONLY the named roles re-rolled -> ``{name: samples}``.
         Re-rolling a shared chain's role moves every channel that uses it; every channel that
-        does not is bit-identical."""
-        if any(f == TOL.ANY or f in self._unit_roles() for f in factors):
-            if factors != (TOL.ANY,):
-                raise ValueError(
-                    f"Channels.contrast: {list(factors)} re-rolls part of a unit. A toleranced "
-                    f"value is resolved into the recipe, so another unit is another record: "
-                    f"contrast('{TOL.ANY}') or rec.unit(seed) draws all of them, and "
-                    f"rec.unit(seed).recipe() says what they came out as.")
-            return self.unit(self.seed + 1 if seed is None else seed).waveforms()
-        for f in factors:
-            if str(f).split("/")[0] not in self.chains:
-                raise ValueError(f"Channels.contrast: {f!r} names no chain of this record. A "
-                                 f"role is `<chain name>/<role>`; roles() lists them: "
-                                 f"{self.roles()}")
-        return self.waveforms(streams=Streams(self.seed).reroll(*factors, seed=seed))
+        does not is bit-identical. A toleranced part's role (or `"unit/*"` for all of them)
+        draws that part again, as it does on a Signal; `unit(seed)` returns the other unit as
+        a record, with its values in the recipe. Every role `roles()` lists is accepted, and a
+        name that matches no randomness in the record is refused."""
+        st = Streams(self.seed).reroll(*factors, seed=seed)
+        units = self._unit_roles()
+        seed_of = {k: v for k, v in st._overrides.items() if k == TOL.ANY or k in units}
+        rec = self
+        if seed_of:
+            if not units:
+                self.unit(0)                              # the refusal: nothing is toleranced
+            rec = copy.copy(self)
+            rec.chains = {name: TOL.redraw_ops(ops, seed_of, name + "/")
+                          for name, ops in self.chains.items()}
+        out = rec.waveforms(streams=st)
+        idle = [k for k in st.idle(self.roles()) if k not in seed_of]
+        if idle:
+            raise ValueError(f"Channels.contrast: {idle} names no randomness this record "
+                             f"draws, so the sibling would be this record again. A role is "
+                             f"`<chain name>/<role>`; roles() lists them: {self.roles()}")
+        return out
 
     # ------------------------------------------------------------ the recipe
     def recipe(self):
@@ -395,12 +401,15 @@ class _Render:
         self.rec, self.collect = rec, collect
         self.seed = rec.seed if streams is None else streams.seed
         self.overrides = {} if streams is None else dict(streams._overrides)
+        self.asked = set() if streams is None else streams.asked    # one for the whole record
         self.done = {}
 
     def view(self, name, sink=None):
         # fresh streams per use: a role's draws are then a function of (seed, chain name,
         # role) alone, not of how many channels used the chain before this one
-        v = SUB.Namespaced(Streams(self.seed, self.overrides), name + "/", sink)
+        st = Streams(self.seed, self.overrides)
+        st.asked = self.asked
+        v = SUB.Namespaced(st, name + "/", sink)
         v.record = self
         return v
 

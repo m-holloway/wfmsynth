@@ -484,8 +484,8 @@ zero. A gate with a noisy enable chatters: end the enable's sub-chain in
 
 ```python
 tx = (Signal(seed=1, grid=g)
-      .sequence([{"chain": Signal().carrier("dc", level=-1.0), "t_s": 64e-9},
-                 {"chain": Signal().carrier("nrz", n_ui=N_UI, pattern="clock"), "t_s": 448e-9,
+      .sequence([{"chain": Signal().carrier("dc", level=-1.0), "duration_s": 64e-9},
+                 {"chain": Signal().carrier("nrz", n_ui=N_UI, pattern="clock"), "duration_s": 448e-9,
                   "state": "continue"},                           # as if running since t = 0
                  {"chain": Signal().carrier("nrz", n_ui=N_UI, pattern="prbs7"),
                   "state": "continue"}],                          # last one takes the rest
@@ -502,7 +502,7 @@ mux = Signal(seed=1, grid=g).switch(select=Signal().carrier("square", f_hz=2e6),
 ```
 
 Both are sources: first in the chain. Durations are whole samples and must fill the record; an
-off-grid `t_s` is refused naming the two nearest that fit. The default `"state": "restart"`
+off-grid `duration_s` is refused naming the two nearest that fit. The default `"state": "restart"`
 begins the chain at its own t = 0 (turn-on included). Nothing is carried from one segment's
 chain into the next; to share a filter put it after `sequence`.
 
@@ -622,9 +622,10 @@ group = np.array([ws.unit_of(q) for q in recipes])    # the key for a held-out-u
 `ws.tol(nom, tol_pct)` or `ws.tol(nom, tol_abs=)` (a percentage of a zero nominal is refused).
 `group="board"` makes several parameters one draw, in one chain or across the chains of a
 `Channels` record. A hand-written recipe may carry `{"nom": 1e3, "tol_pct": 5}` where a number
-goes; `from_recipe` draws it under the recipe's seed. Known gap: `filter(..., f_hz=ws.tol(...))`
-and `law("quantize", bits=ws.corners(...))` fail with a bare `TypeError`, because those two
-builders check their design before the value is drawn; draw the value yourself there.
+goes; `from_recipe` draws it under the recipe's seed. A COUNT (`bits`, `n_ui`, `order`,
+`n_segments`, ...) takes `ws.corners`: `ws.tol` on one is refused, because the fraction it
+draws would be truncated. `rec.contrast(role)` takes every role `rec.roles()` lists, a part's
+included, on a `Signal` and a `Channels` alike; a name that matches nothing is refused.
 
 ## I/Q and RF
 
@@ -636,6 +637,9 @@ g = ws.Grid(fs=6.4e9, baud=25e6, n=1 << 18, domain="iq", fc_hz=1e9)   # the grid
 
 def source():
     return Signal(seed=1, grid=g).iq("qam16", prbs=15, prbs_phase=100)   # or iq(symbols=[1+0j, 1j, ...])
+# ONE source: prbs=<order> (prbs_seed= is its starting state, 1 unless stated; prbs_phase= steps
+# it that many bits further), bits=[...], or symbols=[...]. Signal(seed=) does NOT move the
+# data: a dataset loop varies prbs_seed (or prbs_phase), as carrier(seed=) does for a voltage.
 
 sent, t_s = source().transmitted()                     # ground truth: complex symbols, centre times
 
@@ -643,7 +647,7 @@ rx = (source()
       .upconvert()                                     # iq -> real passband volts, same grid
       .law("tanh", sat=2.5)                            # an amplifier acts on the voltage
       .probe(bw_hz=3e9)                                # every real op applies here
-      .downconvert(fc_hz=1e9, lpf=dict(pass_hz=40e6, stop_hz=120e6, atten_db=80), fs_out=400e6))
+      .downconvert(lpf=dict(pass_hz=40e6, stop_hz=120e6, atten_db=80), fs_out=400e6))   # fc_hz: the grid's
 y = rx.waveform()                                      # complex128
 gy = rx.stored_grid(y)                                 # 400 MSa/s, domain "iq": measure with THIS
 

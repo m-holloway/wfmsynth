@@ -97,6 +97,19 @@ def _overrides(st, pre):
     return {k[len(pre):]: v for k, v in st._overrides.items() if k.startswith(pre)}
 
 
+class _Asked:
+    """The `asked` of a `{"from": recipe}` sub-chain's own `Streams`: each role it requests is
+    noted on the record's, under the sub-chain's namespace."""
+
+    def __init__(self, st, pre):
+        while isinstance(st, Namespaced):
+            st, pre = st._st, st._pre + pre
+        self._to, self._pre = st.asked, pre
+
+    def add(self, name):
+        self._to.add(self._pre + name)
+
+
 def is_subchain(v):
     """True for a value in the nested-signal form: `{"ops": [...]}` or `{"from": <recipe>}`."""
     return isinstance(v, dict) and (isinstance(v.get("ops"), (list, tuple))
@@ -164,7 +177,7 @@ def _flat(v, parent, who, level=0):
             return {**v, "from": r}
         if level == 1 and "ops" not in v and "from" not in v:
             # a list entry that HOLDS a sub-chain beside its own parameters: a `sequence`
-            # segment is {"chain": <sub-chain>, "t_s": ...}
+            # segment is {"chain": <sub-chain>, "duration_s": ...}
             new = {k: _flat(e, parent, f"{who}: `{k}`", 2) for k, e in v.items()}
             return new if any(new[k] is not v[k] for k in v) else v
         return v
@@ -222,7 +235,9 @@ def _chain(spec, streams, grid, at, who):
             f"re-render that record on this grid (same fs and n; its baud may differ), or "
             f"resample it yourself and bring it in with `capture`.")
     sub = Signal.from_recipe(r)
-    return sub, Streams(sub.seed, _overrides(streams, at + "/"))
+    own = Streams(sub.seed, _overrides(streams, at + "/"))
+    own.asked = _Asked(streams, at + "/")           # so the record knows what was drawn here
+    return sub, own
 
 
 def same_grid(y, n, who, sub=None, grid=None, domain=DOMAIN.REAL):
@@ -315,6 +330,15 @@ def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domai
                              f"has arrived. Put a carrier before it, or give it its own 'ops'.")
         return np.asarray(chain, float)
     sub, st = _chain(spec, streams, grid, at, who)
+    if domain == DOMAIN.IQ and grid is not None and sub.ops:
+        fc, own = getattr(grid, "fc_hz", None), DOMAIN.trace(sub.ops, sub.grid)[-1][1]
+        if fc is not None and own is not None and own != fc:
+            raise ValueError(
+                f"{who} is an envelope about {own:g} Hz and the record it joins is about "
+                f"{fc:g} Hz. Samples of two envelopes mean the same thing only about the SAME "
+                f"centre; joined as they are, this one would land co-channel. Render it "
+                f"about {fc:g} Hz and put freq_offset(f_hz={own - fc:g}) in its chain, which "
+                f"places it where it is and checks that the grid has room for it.")
     sink = getattr(streams, "sink", None)
     if sink is None:
         y = sub._run(st)

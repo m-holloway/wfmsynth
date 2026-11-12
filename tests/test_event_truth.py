@@ -29,7 +29,7 @@ def covered(ev, where, slack=0):
 def test_a_sequence_segments_defects_are_on_the_record():
     def record(chain):
         return Signal(seed=1, grid=G).sequence([
-            {"chain": Signal().carrier("dc", level=-1.0), "t_s": 8192 / G.fs}, {"chain": chain}])
+            {"chain": Signal().carrier("dc", level=-1.0), "duration_s": 8192 / G.fs}, {"chain": chain}])
     x, ev = record(Signal().carrier("nrz", **CLOCK).events("glitch", count=5, amp=3.0)).realize()
     d = differs(x, record(Signal().carrier("nrz", **CLOCK)).waveform())
     kept = [e for e in ev.on_record() if e.kind == "glitch"]

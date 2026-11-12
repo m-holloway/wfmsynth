@@ -451,8 +451,14 @@ def test_downconvert_refuses_a_filter_it_cannot_honour():
         up().downconvert(fc_hz=FC, lpf=dict(cutoff_hz=20e6)).waveform()
     with pytest.raises(ValueError, match="not below Nyquist"):
         up().downconvert(fc_hz=5e9, lpf=LPF).waveform()
-    with pytest.raises(ValueError, match="downconvert needs fc_hz"):
-        up().downconvert(lpf=LPF).waveform()
+    # the carrier the grid states is the one a round trip comes back about, and is recorded
+    back = up().downconvert(lpf=LPF)
+    assert back.ops[-1]["fc_hz"] == FC and back.stored_grid(back.waveform()).fc_hz == FC
+    assert np.array_equal(back.waveform(), up().downconvert(fc_hz=FC, lpf=LPF).waveform())
+    with pytest.raises(ValueError, match="downconvert needs fc_hz.*states no centre"):
+        Signal(seed=1, grid=Grid(fs=FS, n=1 << 12)).carrier("sine", f_hz=FC).downconvert(lpf=LPF)
+    with pytest.raises(ValueError, match="low-pass STATED"):
+        up().downconvert()                           # refused when the op is written
 
 
 def test_the_source_refuses_what_it_cannot_render_honestly():
