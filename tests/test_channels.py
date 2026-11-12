@@ -13,7 +13,7 @@ against things that do not go through it:
     aggressor equals the #75 sub-chain build of the same lane, sample for sample;
   * REPLAY -- the record replays bit-identically from its JSON, under one digest;
   * REFUSALS -- a cycle, an unknown name, a stage with nothing to act on, a signal that would
-    discard what arrived, a chain with its own seed/grid/lead-in/tolerance: each by name.
+    discard what arrived, a chain with its own seed/grid/lead-in: each by name.
 """
 from __future__ import annotations
 
@@ -361,11 +361,6 @@ def test_a_cycle_is_refused_naming_it():
     (lambda: ws.Channels({"a": Signal(grid=Grid(fs=1e9, n=64)).carrier("sine", f_hz=1e6)},
                          grid=G), "its own grid"),
     (lambda: ws.Channels({"a": _data().with_lead_in(64)}, grid=G), "lead-in"),
-    (lambda: ws.Channels({"a": _data().lossy(loss_db=ws.tol(6.0, 10), loss_at_ghz=5.0)},
-                         grid=G), "op 1 .lossy., has a toleranced parameter"),
-    (lambda: ws.Channels({"a": {"ops": [{"op": "carrier", "kind": "nrz"},
-                                        {"op": "lossy", "loss_db": {"nom": 6.0, "tol_pct": 5}}]}},
-                         grid=G), "toleranced parameter"),
     (lambda: ws.Channels({"a": {"ops": []}}, grid=G), "no ops"),
     (lambda: ws.Channels({"a": {"ops": [{"op": "carier"}]}}, grid=G), "'carier'.*does not exist"),
     (lambda: ws.Channels({"a": np.zeros(4)}, grid=G), "a chain is a Signal"),
@@ -568,3 +563,110 @@ def test_crosstalk_matrix_couples_the_real_neighbour_channels():
     assert not np.array_equal(y["lane0"], x["lane0"])
     assert np.array_equal(y["lane0"], P.crosstalk_matrix(
         rec.waveform("tx0"), G, couplings, aggressors=[x["lane1"], y["lane2"]]))
+
+
+def test_a_toleranced_part_is_drawn_per_chain_and_a_group_is_one_part_across_the_record():
+    """`ws.tol` in a chain of a record: the drawn value is in the recipe and in the waveform
+    (the RC rise it sets, measured), an ungrouped part is its chain's own, a `group` is one
+    draw for every chain that names it, and `unit(seed)` is another unit under the same
+    noise."""
+    g = Grid(fs=20e9, n=1 << 13)
+
+    def lane(group=None):
+        return (Signal().carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=5e6, tr_s=0.2e-9)
+                .probe(r_source=ws.tol(1e3, 20, group=group), c_load_f=2e-12))
+
+    def rise(x):                                   # 10-90 % of the first rising edge, seconds
+        lo, hi = 0.33, 2.97
+        a = np.flatnonzero((x[:-1] < lo) & (x[1:] >= lo))[0]
+        b = a + np.flatnonzero(x[a:] >= hi)[0]
+        ta = a + (lo - x[a]) / (x[a + 1] - x[a])
+        tb = b - 1 + (hi - x[b - 1]) / (x[b] - x[b - 1])
+        return (tb - ta) / g.fs
+
+    rec = ws.Channels({"a": lane(), "b": lane(), "c": lane("pack"), "d": lane("pack")},
+                      seed=7, grid=g)
+    assert rec.roles() == ["a/unit/1/r_source", "b/unit/1/r_source", "unit/pack"]
+    r = {k: rec.chains[k][1]["r_source"] for k in rec.names}
+    assert all(800.0 <= v <= 1200.0 for v in r.values())
+    assert r["a"] != r["b"] and r["c"] == r["d"] and r["c"] not in (r["a"], r["b"])
+    x = rec.waveforms()
+    for k in rec.names:                            # the drawn value is the one in the waveform
+        want = np.log(9.0) * r[k] * 2e-12
+        assert abs(rise(x[k]) / want - 1) < 5e-3, (k, rise(x[k]), want)
+
+    again = ws.Channels.from_recipe(json.loads(rec.to_json()))
+    assert again.sha256() == rec.sha256() and again.roles() == rec.roles()
+    assert all(np.array_equal(again.waveforms()[k], x[k]) for k in x)
+
+    other = rec.unit(8)
+    r2 = {k: other.chains[k][1]["r_source"] for k in rec.names}
+    assert all(r2[k] != r[k] for k in r) and r2["c"] == r2["d"] and other.seed == rec.seed
+    y = other.waveforms()
+    assert all(abs(rise(y[k]) / (np.log(9.0) * r2[k] * 2e-12) - 1) < 5e-3 for k in y)
+    assert np.array_equal(rec.contrast("unit/*", seed=8)["a"], y["a"])
+    with pytest.raises(ValueError, match="another unit is another record"):
+        rec.contrast("a/unit/1/r_source")
+    with pytest.raises(ValueError, match="no toleranced parameter"):
+        ws.Channels({"a": _data()}, grid=G).unit(3)
+
+    # the labels, from the recipe alone
+    rows = ws.tolerance.resolved(rec.recipe())
+    assert [(q["chain"], q["role"], q["value"]) for q in rows] == [
+        ("a", "a/unit/1/r_source", r["a"]), ("b", "b/unit/1/r_source", r["b"]),
+        ("c", "unit/pack", r["c"]), ("d", "unit/pack", r["d"])]
+    assert ws.unit_of(rec.recipe()) == 7 and ws.unit_of(other.recipe()) == 8
+
+    # a tolerance written in a recipe by hand is drawn the same way
+    by_hand = ws.Channels({"a": {"ops": [dict(o) for o in lane().ops[:1]] + [
+        {"op": "probe", "r_source": {"nom": 1e3, "tol_pct": 20}, "c_load_f": 2e-12}]}},
+        seed=7, grid=g)
+    assert by_hand.chains["a"][1]["r_source"] == r["a"]
+
+
+def test_a_units_noise_is_the_same_noise():
+    """`unit()` moves the part and nothing else: the receiver noise of the other unit is the
+    same record of noise, to rounding, although the edge under it moved."""
+    def build():
+        return ws.Channels(
+            {"a": Signal().carrier("nrz", n_ui=N_UI).lossy(loss_db=ws.tol(6.0, 30),
+                                                           loss_at_ghz=5.0).rx_noise(rms=0.02)},
+            seed=5, grid=G)
+    rec = build()
+    assert rec.roles() == ["a/rx_noise/2", "a/unit/1/loss_db"]
+    quiet = {s: ws.Channels({"a": {"ops": r.chains["a"][:2]}}, seed=5, grid=G).waveforms()["a"]
+             for s, r in (("this", rec), ("other", rec.unit(6)))}
+    n_this = rec.waveforms()["a"] - quiet["this"]
+    n_other = rec.unit(6).waveforms()["a"] - quiet["other"]
+    assert np.abs(quiet["this"] - quiet["other"]).max() > 0.01       # the unit moved
+    assert abs(n_this.std() / 0.02 - 1) < 0.05
+    assert np.abs(n_this - n_other).max() < 1e-12                    # its noise did not
+
+
+def test_summary_reads_as_a_tree_with_segments_parts_and_short_numbers():
+    tx = Signal().sequence([
+        {"chain": Signal().carrier("square", f_hz=5e9), "t_s": 64 / G.baud},
+        {"chain": Signal().carrier("nrz", n_ui=N_UI), "state": "continue"}])
+    rec = ws.Channels(
+        {"data": Signal().use("tx").lossy(loss_db=ws.tol(6.0, 15, group="board"),
+                                          loss_at_ghz=5.0).use("scope")},
+        shared={"tx": tx, "scope": Signal().trigger(pre_s=0.1e-9 + 0.2e-9, post_s=1e-9)},
+        seed=1, grid=G)
+    loss = rec.chains["data"][1]["loss_db"]
+    assert rec.summary() == f"""\
+Channels  seed=1  fs=3.2e+11 Hz, baud=1e+10, n=16384
+  channel [data]
+    0  use    name='tx'
+    1  lossy  loss_db={loss:.6g} (unit/board), loss_at_ghz=5.0
+    2  use    name='scope'
+  shared [tx]
+    0  sequence  join='cut'
+         segments[0].chain  t_s=6.4e-09  [tx/sequence/0/segments/0/chain]
+           0  carrier  kind='square', f_hz=5e+09
+         segments[1].chain  state='continue'  [tx/sequence/0/segments/1/chain]
+           0  carrier  kind='nrz', n_ui=512
+  shared [scope]
+    0  trigger  pre_s=3e-10, post_s=1e-09"""
+    one = Signal(seed=2, grid=G).carrier("nrz", n_ui=N_UI).lossy(loss_db=ws.tol(6.0, 15),
+                                                                loss_at_ghz=5.0)
+    assert "(unit/1/loss_db)" in one.summary()

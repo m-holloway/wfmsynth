@@ -3946,6 +3946,37 @@ check("on an I/Q record a `combine` sum and a `gain` by a real supply are what t
       f"max difference {_serr:.1e}; neighbour measured {_sratio:.2f} dB against the channel "
       f"(asked -20, bound 0.5 dB)")
 
+_sug = Grid(fs=20e9, n=1 << 13)
+
+
+def _slane(group=None):
+    return (Signal().carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=5e6, tr_s=0.2e-9)
+            .probe(r_source=_sws.tol(1e3, 20, group=group), c_load_f=2e-12))
+
+
+def _srise(x):
+    a = np.flatnonzero((x[:-1] < 0.33) & (x[1:] >= 0.33))[0]
+    b = a + np.flatnonzero(x[a:] >= 2.97)[0]
+    return ((b - 1 + (2.97 - x[b - 1]) / (x[b] - x[b - 1]))
+            - (a + (0.33 - x[a]) / (x[a + 1] - x[a]))) / _sug.fs
+
+
+_surec = _sws.Channels({"a": _slane(), "b": _slane(), "c": _slane("pack"), "d": _slane("pack")},
+                       seed=7, grid=_sug)
+_sur = {k: _surec.chains[k][1]["r_source"] for k in "abcd"}
+_suw = {u: r.waveforms() for u, r in (("this", _surec), ("other", _surec.unit(8)))}
+_sur2 = {k: _surec.unit(8).chains[k][1]["r_source"] for k in "abcd"}
+_suerr = max(abs(_srise(_suw[u][k]) / (np.log(9.0) * rr[k] * 2e-12) - 1)
+             for u, rr in (("this", _sur), ("other", _sur2)) for k in "abcd")
+check("a toleranced part in a several-channel record: the drawn resistor is the one in each "
+      "channel's edge, a group is ONE part across channels, and unit() draws them all again",
+      _suerr < 5e-3 and _sur["c"] == _sur["d"] and len({_sur["a"], _sur["b"], _sur["c"]}) == 3
+      and all(_sur2[k] != _sur[k] for k in "abcd") and _sur2["c"] == _sur2["d"],
+      f"10-90 % rise against ln(9) R C from the recipe, 4 channels x 2 units: worst "
+      f"{_suerr:.1e} (bound 5e-3); this unit {', '.join(f'{_sur[k]:.0f}' for k in 'abcd')} ohm "
+      f"(c and d share group 'pack'), the other "
+      f"{', '.join(f'{_sur2[k]:.0f}' for k in 'abcd')} ohm")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

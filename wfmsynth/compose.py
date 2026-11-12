@@ -3398,7 +3398,9 @@ class Signal:
                      1  lossy    loss_db=6.0, loss_at_ghz=8.0
 
         The namespace is the prefix of that sub-chain's role names in `roles()` and the argument
-        `subchain()` takes. A long value prints as its size; the recipe has the values."""
+        `subchain()` takes. A long value prints as its size and a long number to six figures;
+        the recipe has the values. A toleranced parameter (`ws.tol`) prints the value this unit
+        drew, followed by its role: `r_source=1043.7 (unit/1/r_source)`."""
         return SUB.tree(self)
 
     def subchains(self):

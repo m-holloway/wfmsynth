@@ -37,6 +37,11 @@ Names survive serialisation, where the identity of a Python object does not: the
 
 and `Channels.from_recipe` replays it bit-identically with no other file.
 
+A TOLERANCED PART (`ws.tol`, `ws.corners`) is drawn under the record's seed and its chain's
+name, so `data/unit/3/r_source` and `clk/unit/3/r_source` are two parts; give both the same
+`group=` and they are one (`unit/<group>`): the same resistor network, the same process
+corner. `rec.unit(seed)` is the same design as another unit, under the same noise.
+
 Two lanes that are EACH OTHER'S crosstalk cannot name each other -- that is a cycle, and it is
 refused naming it. Physically each couples what the other LAUNCHED, so declare the launched
 signals once and couple those:
@@ -48,6 +53,7 @@ signals once and couple those:
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import json
@@ -88,7 +94,7 @@ def _ops_of(v, name, rec):
             raise ValueError(f"{who} is a Signal on its own grid, but every chain of a record "
                              f"is rendered on the record's. Build it with no grid, "
                              f"Signal().carrier(...), and set Channels(grid=...).")
-        v = v.ops
+        v = TOL.stated(v.ops)                # its tolerances are drawn by the record it joins
     if not isinstance(v, (list, tuple)):
         raise ValueError(f"{who} is {type(v).__name__}; a chain is a Signal or "
                          f"{{'ops': [...]}}.")
@@ -99,13 +105,10 @@ def _ops_of(v, name, rec):
         if o.get("op") not in _EXEC:
             raise ValueError(f"{who} has op {o.get('op')!r} at {i}, which does not exist. "
                              f"Known ops: {sorted(_EXEC)}")
-        OPKEYS.check(o["op"], o)             # the same gate the builders go through
-        if "_unit" in o or TOL.resolve(i, o, 0) is not o:
-            raise ValueError(
-                f"{who}, op {i} ({o['op']}), has a toleranced parameter (ws.tol / "
-                f"ws.corners). A several-channel record does not draw units yet: which "
-                f"channels share a part is not something a tolerance states. Write the "
-                f"number, drawing it yourself where the record is built.")
+        # a toleranced value -> its number, drawn under the record's seed and this chain's
+        # name (a recipe's values are already numbers and pass through untouched)
+        ops[i] = TOL.resolve(i, o, rec.seed, pre=name + "/")
+        OPKEYS.check(o["op"], ops[i])        # the same gate the builders go through
     return ops
 
 
@@ -262,17 +265,52 @@ class Channels:
         s.ops = flat
         return s.stored_grid(x)
 
+    # ------------------------------------------------------------ units
+    def unit(self, seed):
+        """The same design as ANOTHER UNIT: every toleranced parameter (`ws.tol`,
+        `ws.corners`) of every chain drawn again under `seed`, and nothing else changed -- the
+        record's seed, so its noise and jitter, stays. As `Signal.unit`.
+
+        An ungrouped part belongs to its chain (`data/unit/3/r_source`); parts given the same
+        `group=` are ONE draw across the whole record (`unit/<group>`), which is how two
+        channels say they share a part or a process corner."""
+        if not self._unit_roles():
+            raise ValueError("Channels.unit(): this record has no toleranced parameter, so "
+                             "there is no unit to draw. Write one with ws.tol(...) or "
+                             "ws.corners(...).")
+        new = copy.copy(self)
+        new.chains = {name: [TOL.resolve(i, o, int(seed), pre=name + "/")
+                             for i, o in enumerate(TOL.stated(ops))]
+                      for name, ops in self.chains.items()}
+        return new
+
+    def _unit_roles(self):
+        out = []
+        for name, ops in self.chains.items():
+            out += [r for r in TOL.roles(ops, name + "/") if r not in out]
+        return out
+
     # ------------------------------------------------------------ roles
     def roles(self):
         """Every re-rollable factor in the record, as `<chain name>/<role>` -- the arguments
         `contrast()` takes. A shared chain's roles are listed once, under its own name,
-        however many channels use it."""
-        return [f"{name}/{r}" for name in self.chains for r in self._signal(name).roles()]
+        however many channels use it. Toleranced parts follow: `<chain name>/unit/...`, or
+        `unit/<group>` for a part several chains share (see `unit`)."""
+        return [f"{name}/{r}" for name in self.chains for r in self._signal(name).roles()
+                if not r.startswith("unit/")] + self._unit_roles()
 
     def contrast(self, *factors, seed=None):
         """Sibling waveforms with ONLY the named roles re-rolled -> ``{name: samples}``.
         Re-rolling a shared chain's role moves every channel that uses it; every channel that
         does not is bit-identical."""
+        if any(f == TOL.ANY or f in self._unit_roles() for f in factors):
+            if factors != (TOL.ANY,):
+                raise ValueError(
+                    f"Channels.contrast: {list(factors)} re-rolls part of a unit. A toleranced "
+                    f"value is resolved into the recipe, so another unit is another record: "
+                    f"contrast('{TOL.ANY}') or rec.unit(seed) draws all of them, and "
+                    f"rec.unit(seed).recipe() says what they came out as.")
+            return self.unit(self.seed + 1 if seed is None else seed).waveforms()
         for f in factors:
             if str(f).split("/")[0] not in self.chains:
                 raise ValueError(f"Channels.contrast: {f!r} names no chain of this record. A "

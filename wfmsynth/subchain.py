@@ -391,7 +391,10 @@ def walk(ops):
                     elif isinstance(e, dict):        # an entry holding one beside parameters
                         for kk, ee in e.items():
                             if is_subchain(ee):
-                                yield i, f"{o['op']}/{i}/{k}/{j}/{kk}", f"{k}[{j}].{kk}", ee
+                                own = ", ".join(f"{a}={_short(b)}" for a, b in e.items()
+                                                if a != kk and not is_subchain(b))
+                                yield (i, f"{o['op']}/{i}/{k}/{j}/{kk}",
+                                       f"{k}[{j}].{kk}" + (f"  {own}" if own else ""), ee)
 
 
 def child(spec, grid):
@@ -455,6 +458,8 @@ def _short(v):
     if hasattr(v, "item") and getattr(v, "ndim", 1) == 0:
         v = v.item()
     r = repr(v)
+    if isinstance(v, float) and len(r) > 8:
+        return f"{v:.6g}"        # 500000000.0, 3.0000000000000004e-09: six figures read better
     if len(r) <= 48:
         return r
     if isinstance(v, dict):
@@ -478,7 +483,9 @@ def _tree(sig, pre, indent):
     wo = max((len(str(o.get("op"))) for o in sig.ops), default=0)
     lines = []
     for i, o in enumerate(sig.ops):
-        shown = ", ".join(f"{k}={_short(v)}" for k, v in o.items()
+        part = {k: TOL._role(i, k, e, pre) for k, e in o.get("_unit", {}).items()}
+        shown = ", ".join(f"{k}={_short(v)}" + (f" ({part[k]})" if k in part else "")
+                          for k, v in o.items()
                           if k != "op" and not k.startswith("_") and not _held(v))
         lines.append(f"{indent}{i:>{wi}}  {str(o.get('op')):<{wo}}  {shown}".rstrip())
         for at, label, spec in subs.get(i, ()):

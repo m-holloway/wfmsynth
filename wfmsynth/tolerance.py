@@ -227,9 +227,12 @@ def quantile(spec, u):
     return nom + (half / NORMAL_SIGMAS) * z, None
 
 
-def _role(i, path, spec):
+def _role(i, path, spec, pre=""):
+    """`pre` is the chain's name in a several-channel record (`clk/`): an ungrouped part
+    belongs to its chain, a GROUP to the whole record -- that is how two channels say they
+    share a part."""
     g = spec.get("group")
-    return f"unit/{g}" if g is not None else f"unit/{i}/{path}"
+    return f"unit/{g}" if g is not None else f"{pre}unit/{i}/{path}"
 
 
 def _draw(spec, seed, role):
@@ -288,10 +291,11 @@ def _split(path):
     return tuple(int(k) if k.isdigit() else k for k in path.split("."))
 
 
-def resolve(i, params, seed):
+def resolve(i, params, seed, pre=""):
     """An op's parameters with every toleranced value drawn -- called on the way INTO a recipe.
 
-    `i` is the op's index (it names the role), `seed` the record's. With no toleranced value
+    `i` is the op's index (it names the role), `seed` the record's, `pre` the chain's name in
+    a several-channel record (see `_role`). With no toleranced value
     the SAME dict comes back untouched, so a record that uses none is byte-identical to what it
     always was. Otherwise each is replaced by its number and described under `_unit`."""
     paths = []
@@ -307,7 +311,7 @@ def resolve(i, params, seed):
         name = ".".join(map(str, path))
         spec = _get(params, path)
         _check(spec, f"op {i}, parameter {name!r}")
-        value, unit[name] = _draw(spec, seed, _role(i, name, spec))
+        value, unit[name] = _draw(spec, seed, _role(i, name, spec, pre))
         params = _set(params, path, value)
     return {**params, "_unit": unit}
 
@@ -337,19 +341,28 @@ def resolve_ops(ops, seed):
 
 
 # ---- reading them back ------------------------------------------------------------------------
-def _entries(ops):
+def _entries(ops, pre=""):
     for i, op in enumerate(ops):
         for name, entry in op.get("_unit", {}).items():
-            yield i, name, entry, _role(i, name, entry)
+            yield i, name, entry, _role(i, name, entry, pre)
 
 
-def roles(ops):
+def roles(ops, pre=""):
     """The unit roles in an op list, in order, each once -- what `Signal.roles()` appends."""
     out = []
-    for _i, _name, _entry, role in _entries(ops):
+    for _i, _name, _entry, role in _entries(ops, pre):
         if role not in out:
             out.append(role)
     return out
+
+
+def _chains(recipe):
+    """``(chain name or None, role prefix, ops)`` for each chain of a recipe: the one of a
+    Signal's, or every named chain of a `Channels` record's."""
+    if "channels" not in recipe:
+        return [(None, "", recipe["ops"])]
+    named = {**recipe["channels"], **recipe.get("shared", {})}
+    return [(name, name + "/", c["ops"]) for name, c in named.items()]
 
 
 def resolved(recipe):
@@ -358,12 +371,14 @@ def resolved(recipe):
         {"role", "op", "index", "param", "value", "seed", <the stated tolerance>, ["corner"]}
 
     `value` is read from the parameter itself, so this is the ground truth and not a copy of it.
-    The labelling route for a unit dataset: `[r["value"] for r in resolved(recipe)]`."""
+    The labelling route for a unit dataset: `[r["value"] for r in resolved(recipe)]`. For a
+    several-channel recipe each also says which `chain` it is in."""
     out = []
-    ops = recipe["ops"]
-    for i, name, entry, role in _entries(ops):
-        out.append({"role": role, "op": ops[i]["op"], "index": i, "param": name,
-                    "value": _get(ops[i], _split(name)), **entry})
+    for chain, pre, ops in _chains(recipe):
+        for i, name, entry, role in _entries(ops, pre):
+            out.append({"role": role, **({} if chain is None else {"chain": chain}),
+                        "op": ops[i]["op"], "index": i, "param": name,
+                        "value": _get(ops[i], _split(name)), **entry})
     return out
 
 
@@ -374,7 +389,8 @@ def unit_of(recipe):
     Raises when the record has no toleranced parameter (it is not a unit of anything) or when
     its parameters were drawn under different seeds (a partial re-roll: it is a mixture of two
     units, and filing it under either would leak one into the other's split)."""
-    seeds = sorted({e["seed"] for _i, _n, e, _r in _entries(recipe["ops"])})
+    seeds = sorted({e["seed"] for _c, _pre, ops in _chains(recipe)
+                    for _i, _n, e, _r in _entries(ops)})
     if not seeds:
         raise ValueError("unit_of: this recipe has no toleranced parameter, so it is not a "
                          "unit of a population. Write one with ws.tol(...) or ws.corners(...).")
