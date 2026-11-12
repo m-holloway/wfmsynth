@@ -12,7 +12,7 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
-## 0.46.0 — unreleased
+## 0.46.0 — 2026-11-12
 
 Chains can meet, and a record can be complex baseband. Until now a chain was a line with one
 source, and signals met only inside a few special ops, each with its own nested format. This
@@ -274,7 +274,7 @@ None of these moves a rendered sample.
   carriers. Before the `square` / `cmos` change the same comparison, on the tool's then 28
   chains, was 28 of 28 and 238 of 238. `tests/test_byte_identity.py` pins the default path in the tree.
 - **Each effect is asserted against an analytic result or an independent method**, in
-  `wfmsynth.validate` (485 checks) and the test suite (2890 tests): a sub-chain against
+  `wfmsynth.validate` (485 checks) and the test suite (2891 tests): a sub-chain against
   the same chain rendered alone and coupled by hand (equal); Bessel-4 `filter` against the
   scope front end (equal); a product `combine` against `modulate` OOK (equal); the delay's
   error against the exact trigonometric interpolant; trigger instants against an independent
