@@ -236,7 +236,11 @@ def _chain(spec, streams, grid, at, who):
             f"resample it yourself and bring it in with `capture`.")
     sub = Signal.from_recipe(r)
     own = Streams(sub.seed, _overrides(streams, at + "/"))
-    own.asked = _Asked(streams, at + "/")           # so the record knows what was drawn here
+    own.asked = _Asked(streams, at + "/")           # so the record knows what was asked here
+    top, pre = streams, at + "/"
+    while isinstance(top, Namespaced):
+        top, pre = top._st, top._pre + pre
+    own.made = top.made.under(pre)                  # ... and what was drawn
     return sub, own
 
 

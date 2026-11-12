@@ -65,7 +65,7 @@ from . import opkeys as OPKEYS
 from . import subchain as SUB
 from . import tolerance as TOL
 from .grid import Grid
-from .streams import Streams
+from .streams import Made, Streams
 
 
 def _name_ok(name, what):
@@ -347,6 +347,8 @@ class Channels:
             raise ValueError(f"Channels.contrast: {idle} names no randomness this record "
                              f"draws, so the sibling would be this record again. A role is "
                              f"`<chain name>/<role>`; roles() lists them: {self.roles()}")
+        from .compose import _warn_undrawn
+        _warn_undrawn("Channels.contrast", st, self.roles())
         return out
 
     # ------------------------------------------------------------ the recipe
@@ -427,6 +429,7 @@ class _Render:
         self.seed = rec.seed if streams is None else streams.seed
         self.overrides = {} if streams is None else dict(streams._overrides)
         self.asked = set() if streams is None else streams.asked    # one for the whole record
+        self.made = Made() if streams is None else streams.made
         self.done = {}
 
     def view(self, name, sink=None):
@@ -434,6 +437,7 @@ class _Render:
         # role) alone, not of how many channels used the chain before this one
         st = Streams(self.seed, self.overrides)
         st.asked = self.asked
+        st.made = self.made
         v = SUB.Namespaced(st, name + "/", sink)
         v.record = self
         return v

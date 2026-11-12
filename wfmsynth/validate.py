@@ -4050,6 +4050,26 @@ check("a square and a CMOS clock that do not fit the grid carry no jitter of the
       f"{(_eduty.mean() + 1) / 2:.12f}; 10 MHz at 10 GSa/s is bit-identical to the old "
       f"construction")
 
+# ---- roles(): the list is what the record draws from, in both directions (0.46.0)
+from wfmsynth.streams import Streams as _RSt
+from wfmsynth.acquire import AcquisitionProfile as _RAP
+_rchain = (Signal(seed=3, grid=Grid(fs=64e9, baud=16e9, n=4096))
+           .carrier("nrz", n_ui=1024, jitter=dict(rj=0.4)).nonlinearity(level_noise=0.05)
+           .crosstalk(coupling=0.1)                          # default aggressor: draws nothing
+           .acquire(_RAP(sample_rate_hz=32e9, record_length=2048, input_bandwidth_hz=13e9,
+                         noise_floor=dict(rms=0.01)))
+           .store(bits=8, dither_lsb=0.5).store(bits=8))     # the second has no dither
+_rst = _RSt(_rchain.seed)
+_rx = _rchain.waveform(streams=_rst)
+_rmoved = [r for r in _rchain.roles() if not np.array_equal(_rx, _rchain.contrast(r, seed=9))]
+check("roles() lists exactly what the record draws from: every listed role was drawn from and "
+      "moves samples when re-rolled, and nothing was drawn under a name that is not listed",
+      _rchain.roles() == ["jitter/0", "nl_noise/1", "acquire/3", "store/4"]
+      and _rst.drawn() == set(_rchain.roles()) and _rmoved == _rchain.roles(),
+      f"listed {_rchain.roles()}; drawn (generators that moved) {sorted(_rst.drawn())}; "
+      f"asked for and not drawn {sorted(_rst.asked - _rst.drawn())}; "
+      f"{len(_rmoved)} of {len(_rchain.roles())} re-rolls changed samples")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

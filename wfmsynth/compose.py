@@ -121,6 +121,111 @@ def _carrier(p, streams, grid, idx):
                      f"one of {P.ANALOG_KINDS}, one of {P.VOLTS_ANALOG_KINDS}, or 'arbitrary')")
 
 
+# ------------------------------------------------------------------ which roles an op draws
+# `Signal.roles()` is this table. It has to say exactly what the executors above and below do:
+# a role listed here that nothing draws makes `contrast()` return the record unchanged, which
+# reads as "this factor does not matter"; a draw under a role not listed here is randomness
+# that cannot be held or re-rolled by name. `tests/test_roles_complete.py` checks both
+# directions against the generators themselves, on a chain per role.
+def _warn_undrawn(who, st, listed):
+    """A re-rolled role that an op was handed and drew nothing from. It was always accepted
+    (the name is real), so it still is -- but the sibling is the record again, and that is
+    said rather than left to read as "this factor does not matter"."""
+    undrawn = st.undrawn()
+    if undrawn:
+        warnings.warn(
+            f"{who}: {undrawn} is handed to its op, but with these parameters the op draws "
+            f"nothing from it, so re-rolling it changed nothing and the sibling is this record "
+            f"again. roles() lists what this record draws: {listed}",
+            RuntimeWarning, stacklevel=3)
+
+
+def _spec_roles(spec, tag, default_kind="nrz"):
+    """The roles a BARE carrier spec draws (`aggressor=dict(n_ui=..., jitter=...)`), which is
+    rendered by `_carrier` under `tag`. A sub-chain lists its own, under its namespace."""
+    if not isinstance(spec, dict) or SUB.is_subchain(spec):
+        return []
+    kind = str(spec.get("kind", default_kind))
+    out = []
+    if (kind == "nrz" or re.fullmatch(r"pam\d+", kind)) and _rj(spec.get("jitter")):
+        out.append(f"jitter/{tag}")
+    if kind == "noise":
+        out.append(f"carrier_noise/{tag}")
+    return out
+
+
+def _rj(jitter):
+    """True when a `jitter=` dict draws: only `rj` is random (`pj` and `dcd` are stated)."""
+    return isinstance(jitter, dict) and float(jitter.get("rj") or 0.0) > 0.0
+
+
+def _op_roles(op, i):
+    """The role names op `op` at index `i` draws from, in a fixed order."""
+    name = op["op"]
+    if name == "carrier":
+        return _spec_roles(op, i)
+    if name in ("symbols", "coded"):
+        return [f"jitter/{i}"] if _rj(op.get("jitter")) else []
+    if name == "crosstalk":
+        return _spec_roles(op.get("aggressor", {"n_ui": 32, "seed": 7}), f"xtalk{i}")
+    if name == "modulate":
+        return _spec_roles(op.get("message"), f"modulate_msg{i}", "sine")
+    if name == "hybrid_echo":
+        return _spec_roles(op.get("own", {"n_ui": 32, "seed": 7}), f"echo{i}")
+    if name == "open_drain":
+        return _spec_roles(op.get("second"), f"open_drain_second{i}")
+    if name == "pass_fet":
+        return _spec_roles(op.get("gate", {}), f"pass_fet_gate{i}", "square")
+    if name == "net":
+        return [r for d in op.get("drivers") or () if isinstance(d, dict)
+                for r in _spec_roles(d.get("source"), f"net/{i}/{d.get('id')}/carrier", "")]
+    if name == "trigger":
+        return [f"trigger/{i}"] if op.get("jitter_s") else []
+    if name == "digitize":
+        out = [f"noise/{i}"] if ("snr_db" in op or op.get("noise_rms")) else []
+        return out + ([f"interleave/{i}"] if op.get("interleave") else [])
+    if name == "events":
+        out = []
+        if op.get("on", "symbols") not in ("times", "intervals") and op.get("indices") is None:
+            out.append(f"events/{i}")
+        if op.get("on") == "aggressor":
+            out += _spec_roles(op.get("aggressor"), f"events_aggr{i}")
+        return out
+    if name == "probe":
+        return [f"probe/{i}"] if op.get("noise_rms") else []
+    if name == "timing":
+        return [f"timing/{i}"] if (op.get("rj_ps") or op.get("phase_noise")) else []
+    if name == "rx_noise":
+        return [] if op.get("rms") == 0.0 else [f"rx_noise/{i}"]
+    if name == "timebase":
+        return [f"timebase/{i}"] if op.get("rms_ps", 0.5) else []
+    if name in ("phase_noise", "awgn"):
+        return [f"{name}/{i}"]
+    if name == "nonlinearity":
+        return [f"nl_noise/{i}"] if float(op.get("level_noise") or 0.0) > 0.0 else []
+    if name == "optical":
+        return ([f"rin/{i}"] if "rin_db_per_hz" in op else []) + \
+               ([f"shot/{i}"] if op.get("shot") else [])
+    if name == "eo":
+        return [f"linewidth/{i}"] if op.get("linewidth_hz") else []
+    if name == "edfa":
+        return [f"ase/{i}"]
+    if name == "photodetect":
+        return [f"shot/{i}"] if op.get("shot", True) else []
+    if name == "tia":
+        return [f"tia/{i}"] if op.get("thermal_rms") else []
+    if name == "store":
+        return [f"store/{i}"] if op.get("dither_lsb") else []
+    if name == "acquire":
+        prof = op.get("profile") or {}
+        converter = (prof.get("bits") is not None and prof.get("enob") is not None
+                     and prof.get("clip_full_scale") is not None)
+        draws = (prof.get("sample_clock_jitter_rms_s") or prof.get("noise_floor")
+                 or converter or prof.get("interleave"))
+        return [f"acquire/{i}"] if draws else []
+    return []
+
+
 def _op_carrier(x, p, streams, grid, idx):
     _warn_default_n_ui(p, grid)
     return _carrier(p, streams, grid, idx)
@@ -3566,30 +3671,16 @@ class Signal:
         """The re-rollable random factors in this signal, as role names — the valid
         arguments to `contrast()`. Deterministic channel/reflection ops draw no
         randomness and so contribute none. A toleranced parameter (`ws.tol`, `ws.corners`)
-        contributes `unit/<op index>/<parameter>`, or `unit/<group>` when it is grouped."""
+        contributes `unit/<op index>/<parameter>`, or `unit/<group>` when it is grouped.
+
+        The list is EXACTLY what this record draws from: a role is listed only when the op's
+        parameters make it draw (`store` with a `dither_lsb`, `acquire` with a noise floor,
+        clock jitter or interleave, `tia` with a `thermal_rms`, a carrier with `rj` jitter),
+        so every name here moves samples when re-rolled and nothing is drawn under a name that
+        is not here."""
         out = []
         for i, op in enumerate(self.ops):
-            if op["op"] == "carrier" and op.get("jitter"):
-                out.append(f"jitter/{i}")
-            elif op["op"] == "crosstalk" and not SUB.is_subchain(op.get("aggressor")):
-                out.append(f"jitter/xtalk{i}")
-            elif op["op"] == "trigger" and op.get("jitter_s"):
-                out.append(f"trigger/{i}")
-            elif op["op"] == "digitize":
-                if "snr_db" in op or "noise_rms" in op:
-                    out.append(f"noise/{i}")
-                if op.get("interleave"):
-                    out.append(f"interleave/{i}")
-            elif op["op"] == "events":
-                out.append(f"events/{i}")
-            elif op["op"] == "probe" and op.get("noise_rms"):
-                out.append(f"probe/{i}")
-            elif op["op"] == "timing" and (op.get("rj_ps") or op.get("phase_noise")):
-                out.append(f"timing/{i}")
-            elif op["op"] in ("rx_noise", "timebase"):
-                out.append(f"{op['op']}/{i}")
-            elif op["op"] in ("phase_noise", "awgn"):
-                out.append(f"{op['op']}/{i}")
+            out.extend(_op_roles(op, i))
         return out + SUB.roles(self) + TOL.roles(self.ops)
 
     def summary(self):
@@ -3629,7 +3720,10 @@ class Signal:
         that unit as a Signal, with its values in the recipe).
 
         A name that matches no randomness in this record is refused: re-rolling it would
-        return the record unchanged, which reads as "this factor does not matter"."""
+        return the record unchanged, which reads as "this factor does not matter". A name
+        that IS an op's role, on an op whose parameters draw nothing from it (`jitter/0` on a
+        carrier with no `rj`, `store/2` without dither), is accepted as it always was and
+        warns that the sibling is the record again; `roles()` does not list it."""
         self._alone("contrast()", "Re-roll through the record: rec.contrast('<chain>/<role>').")
         st = Streams(self.seed).reroll(*factors, seed=seed)
         x = self.waveform(streams=st)
@@ -3638,6 +3732,7 @@ class Signal:
             raise ValueError(f"contrast: {idle} names no randomness this record draws, so the "
                              f"sibling would be this record again. roles() lists what can be "
                              f"re-rolled: {self.roles()}")
+        _warn_undrawn("contrast", st, self.roles())
         return x
 
     def ground_truth(self, levels=None):

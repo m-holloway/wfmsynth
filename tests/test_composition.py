@@ -546,4 +546,6 @@ def test_roles_lists_the_receiver_noise_and_the_timebase_jitter_an_op_draws():
     d = quiet.contrast("rx_noise/1") - quiet.waveform()
     assert abs(d.std() / (np.sqrt(2) * 0.02) - 1) < 0.05, d.std()   # 16384 samples: 0.6 %
     assert not np.array_equal(sig.contrast("timebase/2"), x)
-    assert np.array_equal(sig.contrast("jitter/0"), x)              # a role nothing draws from
+    import pytest
+    with pytest.warns(RuntimeWarning, match="draws nothing from it"):   # a real role, no draw
+        assert np.array_equal(sig.contrast("jitter/0"), x)
