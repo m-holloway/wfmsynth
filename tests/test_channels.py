@@ -670,3 +670,12 @@ Channels  seed=1  fs=3.2e+11 Hz, baud=1e+10, n=16384
     one = Signal(seed=2, grid=G).carrier("nrz", n_ui=N_UI).lossy(loss_db=ws.tol(6.0, 15),
                                                                 loss_at_ghz=5.0)
     assert "(unit/1/loss_db)" in one.summary()
+
+
+def test_summary_names_a_chain_used_as_a_parameter_on_one_line():
+    rec = ws.Channels({"a": _data().gain(by=Signal().use("vdd"))},
+                      shared={"vdd": Signal().carrier("sine", f_hz=1e6, amp=0.1, offset=1.0)},
+                      seed=1, grid=G)
+    lines = rec.summary().splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.split()[:2] == ["1", "gain"])
+    assert lines[at + 1].strip() == "by  = [vdd]" and lines[at + 2].strip() == "shared [vdd]"

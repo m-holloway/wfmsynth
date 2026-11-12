@@ -30,6 +30,7 @@ DEMOS = [
     "analog_instrument.py",
     "clock_and_data.py",
     "clock_recovery.py",
+    "composed_capture.py",
     "confounder_sweep.py",
     "events.py",
     "ground_truth.py",

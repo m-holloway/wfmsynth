@@ -489,6 +489,11 @@ def _tree(sig, pre, indent):
                           if k != "op" and not k.startswith("_") and not _held(v))
         lines.append(f"{indent}{i:>{wi}}  {str(o.get('op')):<{wo}}  {shown}".rstrip())
         for at, label, spec in subs.get(i, ()):
+            ops = spec.get("ops") or ()
+            if len(ops) == 1 and ops[0].get("op") == "use":
+                # a named chain of the record, as it stands: its ops are under its own name
+                lines.append(f"{indent}{'':>{wi}}    {label}  = [{ops[0].get('name')}]")
+                continue
             sub = child(spec, sig.grid)
             own = (f"  its own record: seed={sub.seed}" + (
                 f", {_grid_words(sub.grid)}" if sub.grid is not None else "")
