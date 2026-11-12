@@ -3773,6 +3773,106 @@ check("the whole impaired chain replays bit-identically from its recipe, and its
       and np.array_equal(_rall.contrast("awgn/7", seed=5), _ra),
       f"roles {_rall.roles()}; re-rolling the oscillator moved the record by "
       f"{np.abs(_ra - _rbb).max():.3f}")
+print("== RF measures against ground truth: spectrum, CCDF, ACLR and an EVM that hides "
+      "nothing (GitHub #84) ==")
+from wfmsynth import rf as _RF                                              # noqa: E402
+_wg = Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
+_wt = np.arange(_wg.n) / _wg.fs
+_wsig = Signal(seed=1, grid=_wg).iq("qam16", prbs=15, prbs_phase=100)
+_wx, _wsent = _wsig.waveform(), _wsig.transmitted()[0]
+_wrng = np.random.default_rng(84)
+
+
+def _wnoise(n, var):
+    return np.sqrt(var / 2) * (_wrng.standard_normal(n) + 1j * _wrng.standard_normal(n))
+
+
+_wa, _wf0 = 0.7, 12.3456e6
+_wsp = _RF.spectrum(_wa * np.exp(2j * np.pi * _wf0 * _wt), _wg, rbw_hz=100e3, window="flattop")
+_wk = int(np.argmax(_wsp["psd_per_hz"]))
+_wpk = _wsp["psd_per_hz"][_wk] * _wsp["rbw_hz"] / _wa ** 2
+_wbp = _RF.band_power(_wsp, _wf0 - 1e6, _wf0 + 1e6) / _wa ** 2
+check("a tone's spectrum peaks at its frequency, and its power is its amplitude squared -- "
+      "integrated over a band, and read off the peak as density times resolution bandwidth",
+      abs(_wsp["f_hz"][_wk] - _wf0) <= _wsp["bin_hz"] and abs(_wbp - 1) < 1e-6
+      and abs(_wpk - 1) < 2e-3,
+      f"peak at {_wsp['f_hz'][_wk] / 1e6:.4f} MHz (tone {_wf0 / 1e6:.4f}, bin "
+      f"{_wsp['bin_hz'] / 1e3:.1f} kHz); band power / A^2 = 1{_wbp - 1:+.1e} (bound 1e-6); "
+      f"peak x rbw / A^2 = {_wpk:.4f} (bound 2e-3, flat-top, rbw {_wsp['rbw_hz'] / 1e3:.1f} kHz)")
+_wlv = np.array([0.0, 3.0, 6.0, 8.0])
+_wcc = _RF.ccdf(_wnoise(1 << 20, 1.0), levels_db=_wlv)
+_wlaw = np.exp(-10 ** (_wlv / 10))
+_wse = np.sqrt(_wlaw * (1 - _wlaw) / _wcc["n"])            # a count's own standard error
+_wce = float((np.abs(_wcc["probability"] - _wlaw) / _wse).max())
+check("the CCDF of complex Gaussian noise is the exponential law, P(power > r x mean) = exp(-r)",
+      _wce < 4.0,
+      f"at +0/3/6/8 dB: measured {np.array2string(_wcc['probability'], precision=5)} against "
+      f"{np.array2string(_wlaw, precision=5)}; worst miss {_wce:.2f} standard errors of the "
+      f"count (bound 4; 2^20 samples, so {100 * _wse[-1] / _wlaw[-1]:.1f} % at +8 dB)")
+_wother = Signal(seed=1, grid=_wg).iq("qam16", prbs=15, prbs_phase=5000).waveform()
+_winj = 10 ** (-40 / 20) * _wother * np.exp(2j * np.pi * 40e6 * _wt)
+_wwant = 10 * np.log10(np.mean(np.abs(_wx) ** 2) / np.mean(np.abs(_winj) ** 2))
+_wac = _RF.aclr(_wx + _winj, _wg, channel_bw_hz=1.35 * 25e6, offsets_hz=[-40e6, 40e6])
+check("ACLR reads a neighbour injected at a known level, and the empty side reads the source's "
+      "own skirt", abs(_wac["aclr_db"][1] - _wwant) < 0.1 and _wac["aclr_db"][0] > 55,
+      f"injected {_wwant:.2f} dB below the channel, measured {_wac['aclr_db'][1]:.2f} dB "
+      f"(bound 0.1 dB); the other side {_wac['aclr_db'][0]:.1f} dB; rbw "
+      f"{_wac['rbw_hz'] / 1e3:.0f} kHz")
+_wclean = _RF.evm(_wx, _wg, _wsent)
+check("EVM of a clean record against the transmitted symbols is below the stated floor, with "
+      "nothing fitted and no symbol left out",
+      _wclean["evm"] < 0.005 and _wclean["removed"] == {} and _wclean["skip"] == 0,
+      f"{_wclean['evm_pct']:.3f} % over {_wclean['n_symbols']} symbols (floor 0.5 %: the "
+      f"16-symbol truncation of the pulse, and the burst's two ends)")
+_wawgn = []
+for _wdb in (30.0, 20.0, 10.0):
+    _wn = _wnoise(_wg.n, _wg.fs / (_wg.baud * 10 ** (_wdb / 10)))
+    _wawgn.append((_wdb, _RF.evm(_wx + _wn, _wg, _wsent, skip=8),
+                   _RF.evm(_wx + _wn, _wg, _wsent, skip=8, reference="decided",
+                           constellation="qam16")))
+check("EVM against truth in white noise is the analytic 10^(-EsN0/20), at 30, 20 and 10 dB",
+      all(abs(_t["evm"] / 10 ** (-_d / 20) - 1) < 0.04 for _d, _t, _ in _wawgn),
+      "; ".join(f"{_d:.0f} dB: {_t['evm_pct']:.2f} % against {100 * 10 ** (-_d / 20):.2f} %"
+                for _d, _t, _ in _wawgn) + " (bound 4 %, 4080 symbols)")
+_wd10, _wt10, _wb10 = _wawgn[-1]
+check("  ... and a DECIDED reference reads low once decisions fail, by an amount only the "
+      "truth can state", _wb10["decision_errors"] > 500 and _wb10["evm"] < 0.9 * _wt10["evm"]
+      and _wawgn[0][2]["decision_errors"] == 0
+      and abs(_wawgn[0][2]["evm"] - _wawgn[0][1]["evm"]) < 1e-12,
+      f"at 10 dB: decided {_wb10['evm_pct']:.2f} % against truth {_wt10['evm_pct']:.2f} %, "
+      f"{_wb10['decision_errors']} of {_wb10['n_symbols']} decisions wrong; at 30 dB none, and "
+      f"the two agree")
+_wimp = 0.8 * np.exp(0.3j) * _wx
+_wraw = _RF.evm(_wimp, _wg, _wsent, skip=8)
+_wfit = _RF.evm(_wimp, _wg, _wsent, skip=8, correct=("gain", "phase"))
+check("EVM does not hide an impairment: a gain of 0.8 and a 0.3 rad rotation count in full "
+      "unless named, and naming them returns what was removed",
+      abs(_wraw["evm"] / abs(0.8 * np.exp(0.3j) - 1) - 1) < 0.01 and _wraw["removed"] == {}
+      and _wfit["evm"] < 0.005 and abs(_wfit["removed"]["gain_db"] - 20 * np.log10(0.8)) < 1e-3
+      and abs(_wfit["removed"]["phase_rad"] - 0.3) < 1e-4,
+      f"raw {_wraw['evm_pct']:.2f} % (|0.8 e^(0.3j) - 1| = "
+      f"{100 * abs(0.8 * np.exp(0.3j) - 1):.2f} %); corrected {_wfit['evm_pct']:.3f} % with "
+      f"removed gain {_wfit['removed']['gain_db']:+.4f} dB and phase "
+      f"{_wfit['removed']['phase_rad']:+.5f} rad")
+_wtau = 0.23 / _wg.baud
+_wlate = np.fft.ifft(np.fft.fft(_wx) * np.exp(-2j * np.pi * np.fft.fftfreq(_wg.n, 1 / _wg.fs)
+                                              * _wtau))
+_wtim = _RF.evm(_wlate, _wg, _wsent, skip=8, correct=("timing",))
+_wtraw = _RF.evm(_wlate, _wg, _wsent, skip=8)
+check("  ... and a record 0.23 symbol late is found late by that much",
+      _wtraw["evm"] > 0.25 and _wtim["evm"] < 0.005
+      and abs(_wtim["removed"]["timing_s"] - _wtau) * _wg.baud < 1e-3,
+      f"raw {_wtraw['evm_pct']:.1f} %; with timing named {_wtim['evm_pct']:.3f} %, removed "
+      f"{_wtim['removed']['timing_s'] * 1e9:.4f} ns of {_wtau * 1e9:.4f} ns (bound 1e-3 symbol)")
+_wpg = Grid(fs=8e9, baud=25e6, n=1 << 18, domain="iq", fc_hz=1e9)
+_wps = (Signal(seed=1, grid=_wpg).iq("qam16", prbs=15, prbs_phase=100).upconvert()
+        .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out=250e6))
+_wpx = _wps.waveform()
+_wpe = _RF.evm(_wpx, _wps.stored_grid(_wpx), _wps.transmitted()[0], skip=8)
+check("the same EVM on a real passband record, through downconvert at a decimated rate",
+      _wpe["evm"] < 0.005 and _wpe["removed"] == {},
+      f"{_wpe['evm_pct']:.3f} % over {_wpe['n_symbols']} symbols at "
+      f"{_wps.stored_grid(_wpx).fs / 1e6:.0f} MSa/s, nothing fitted (floor 0.5 %)")
 
 print()
 if fails:

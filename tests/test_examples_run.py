@@ -46,6 +46,7 @@ DEMOS = [
     "provenance.py",
     "quickstart.py",
     "realistic_scenario.py",
+    "rf_measures.py",
     "sim_to_real.py",
     "sub_chains.py",
     "touchstone_channel.py",

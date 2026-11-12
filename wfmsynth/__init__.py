@@ -17,6 +17,9 @@ Modules / public API:
   domain        which domain ('real' | 'iq') each op accepts -- ACCEPTS is where an op opts in
   rf            what a transmitter, an oscillator and a channel do to an I/Q record, one op
                 per effect: iq_imbalance, iq_offset, freq_offset, phase_noise, awgn, spur, dac
+                -- and the measures that read a radio record back: spectrum / band_power /
+                aclr, ccdf, and evm against the transmitted symbols (corrections opt-in, what
+                they removed returned)
   capture       Signal.capture()'s file backend — load_values (.npy/.npz/.csv) and digest
                 (a sha256 over sample VALUES, not file bytes)
   iqfile        I/Q recordings in open formats: read_iq() / capture(format=...) for

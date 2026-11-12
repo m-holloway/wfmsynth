@@ -1,5 +1,10 @@
-"""wfmsynth.rf -- what a real transmitter, oscillator and channel do to an I/Q record, one op
-per effect, each stated so that it can be measured back off the record.
+"""wfmsynth.rf -- radio records: what a real transmitter, oscillator and channel do to an I/Q
+record, one op per effect and each stated so that it can be measured back off the record; and
+the measures that do the reading -- where the power is in frequency (`spectrum`, `band_power`,
+`aclr`), how the envelope's power is distributed (`ccdf`), and how far the symbols are from the
+ones that were sent (`evm`, `constellation_density`).
+
+THE IMPAIRMENTS
 
     g = Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=2.4e9)
     s = (Signal(seed=1, grid=g).iq("qam16", prbs=15)
@@ -61,12 +66,62 @@ the `stages` law "quantize"; `freq_offset` measures what it would wrap past Nyqu
 measurement `upconvert` uses (`iq.outside_db`). `timing(phase_noise=...)` is NOT this op: it
 moves a baseband waveform in TIME by a one-slope process scaled to an rms, where an
 oscillator's phase noise ROTATES an envelope by a process with a stated spectrum.
+
+THE MEASURES
+
+    x = sig.waveform()                              # complex baseband, from iq(...) or downconvert
+    g = sig.stored_grid(x)                          # the grid that describes x
+    sent, _ = sig.transmitted()                     # the ground truth
+    rf.evm(x, g, sent)["evm_pct"]                   # nothing fitted: the record as it stands
+    rf.evm(x, g, sent, correct=("gain", "phase"))   # ...and what was removed is in ["removed"]
+    rf.ccdf(x)["papr_db"]
+    rf.aclr(x, g, channel_bw_hz=33.75e6, offsets_hz=[40e6])["aclr_db"]
+    s = rf.spectrum(x, g, rbw_hz=1e6)               # s["f_hz"], s["psd_per_hz"], s["rbw_hz"]
+
+WHY THIS IS NOT IN `measure`. `measure` and `eye` fold a REAL record at the symbol period and
+cluster what they find, deliberately without the transmitted data. These work in the frequency
+domain or on a complex envelope, and `evm` is defined against the symbols the source sent. The
+two families share no code and no argument beyond ``(x, grid)``; one module holding both would
+need the reader to know which half applies to the record in hand.
+
+THE CONVENTIONS
+
+  * POWER is the mean of ``|x|**2`` in the record's own units squared. For a complex envelope
+    that is the envelope's power, which is TWICE the power of the passband voltage it stands
+    for (``Re{x*exp(j*w*t)}`` has mean square ``|x|**2 / 2``). Ratios -- ACLR, PAPR, EVM -- do
+    not care; an absolute level does, so a spectrum of the upconverted record reads 3.01 dB
+    below a spectrum of its envelope.
+  * A complex record's spectrum is two-sided and its frequencies are OFFSETS from the centre
+    frequency (`fc_hz` is returned beside them). A real record's is one-sided, 0 to fs/2, with
+    both halves' power in it, so either way ``sum(psd_per_hz) * bin_hz`` is the record's power.
+  * The RESOLUTION BANDWIDTH is the window's equivalent noise bandwidth: the width of the
+    ideal filter that would pass the same noise power. With that definition a tone's power is
+    its peak density times `rbw_hz` (to the window's scalloping loss), and a noise floor reads
+    the same density at any resolution.
+  * EVM is RMS error over RMS REFERENCE, as a fraction. `reference="truth"` compares with the
+    symbols that were sent; `reference="decided"` with the nearest constellation point, which
+    is all a receiver without the data can do and which reads LOW as soon as a decision is
+    wrong.
+
+WHAT EVM DOES NOT DO UNLESS ASKED. Nothing is fitted by default: a level error, a rotation, an
+offset, a frequency error or a timing error counts as error in full. Each correction is named
+in `correct=`, and the amount it took out is returned in ``["removed"]`` with its unit, so the
+figure can never be read without the impairment that was hidden to get it.
+
+The receiver is always the source's own: a root-raised-cosine matched filter sampled at the
+symbol centres (`iq.demodulate`). A record that was already matched-filtered, or whose pulse is
+not a root-raised-cosine, needs its own receiver and `iq.evm` on the symbols.
+
+On a REAL passband record `spectrum`, `band_power` and `aclr` apply as they are (pass
+`center_hz`); `ccdf` and `evm` are about the envelope and say to `downconvert` first.
 """
 from __future__ import annotations
 
 import dataclasses
 
 import numpy as np
+from scipy.optimize import minimize_scalar
+from scipy.signal import get_window, welch
 
 from . import iq as IQ
 from . import rx as RX
@@ -471,3 +526,464 @@ def lo_phase(sig, streams=None):
               else lo_ramp(n, fs, op.get("f_hz") or 0.0, op.get("drift_hz_per_s") or 0.0))
         total = ph if total is None else total + ph
     return total
+
+# =============================================================================================
+# THE MEASURES. Functions of (x, grid): no op, no recipe key.
+# =============================================================================================
+WINDOWS = ("hann", "hamming", "blackman", "blackmanharris", "flattop", "boxcar")
+CORRECTIONS = ("timing", "frequency", "offset", "gain", "phase", "equalizer")
+MIN_SEGMENT = 16          # samples: the shortest Welch segment `spectrum` will use
+DECIDED_PASSES = 3        # decide, fit, correct -- this many times -- for reference="decided"
+
+
+def _record(x, who):
+    a = np.asarray(x)
+    if a.ndim != 1 or a.size == 0:
+        raise ValueError(f"{who}: expected one record (a 1-D array), got shape {a.shape}")
+    return a
+
+
+def _fs(grid, who):
+    fs = getattr(grid, "fs", None)
+    if fs is None:
+        raise ValueError(f"{who}: needs the sample rate of the record -- pass the grid that "
+                         f"describes it (sig.stored_grid(x), or Grid(fs=...))")
+    return float(fs)
+
+
+def _measured_envelope(x, who):
+    a = _record(x, who)
+    if not np.iscomplexobj(a):
+        raise ValueError(
+            f"{who}: the record is real, and this is a measure of the complex envelope. "
+            f"downconvert(fc_hz=..., lpf=...) a passband record first; the envelope of a "
+            f"record is not its samples.")
+    return a
+
+
+# ------------------------------------------------------------------ spectrum
+def spectrum(x, grid, rbw_hz=None, window="hann", overlap=0.5):
+    """Power spectral density by Welch's method: the record cut into overlapping segments,
+    each windowed and transformed, the squared magnitudes averaged.
+
+    Returns a dict:
+
+      ``f_hz``         frequencies, ascending. Complex record: offsets from the centre
+                       frequency, -fs/2 .. fs/2. Real record: 0 .. fs/2.
+      ``psd_per_hz``   power per hertz at each (record units squared per Hz); a real record's
+                       is one-sided, so both add up to the record's power
+      ``rbw_hz``       the resolution bandwidth actually used (the window's noise bandwidth)
+      ``bin_hz``       spacing of `f_hz`
+      ``window``, ``segment``, ``segments``, ``overlap``   what produced it
+      ``fc_hz``        the record's centre frequency if its grid has one, else None
+      ``two_sided``    True for a complex record
+
+    `rbw_hz` picks the segment length; the realised value is returned, since a segment is a
+    whole number of samples. Unstated, an eighth of the record is used. A resolution the record
+    is too short for is refused with the finest it can give. Nothing is detrended: a DC term or
+    a carrier leak is part of the record."""
+    a = _record(x, "spectrum")
+    fs = _fs(grid, "spectrum")
+    if window not in WINDOWS:
+        raise ValueError(f"spectrum: unknown window {window!r} (use one of {list(WINDOWS)})")
+    if not 0.0 <= overlap < 1.0:
+        raise ValueError(f"spectrum: overlap is a fraction of a segment in [0, 1), got "
+                         f"{overlap!r}")
+
+    def enbw_bins(m):
+        w = get_window(window, m)
+        return m * float(np.sum(w * w)) / float(np.sum(w)) ** 2
+
+    n = a.size
+    if rbw_hz is None:
+        seg = max(min(n, MIN_SEGMENT), n // 8)
+    else:
+        if not rbw_hz > 0:
+            raise ValueError(f"spectrum: rbw_hz must be positive, got {rbw_hz!r}")
+        seg = int(round(enbw_bins(4096) * fs / rbw_hz))
+    if seg > n:
+        raise ValueError(
+            f"spectrum: rbw_hz={rbw_hz:g} needs a {seg}-sample segment and the record has {n}. "
+            f"The finest a {window!r} window resolves here is {enbw_bins(n) * fs / n:.6g} Hz; "
+            f"lengthen the record or ask for a wider resolution.")
+    if seg < MIN_SEGMENT:
+        raise ValueError(
+            f"spectrum: that resolution leaves a {seg}-sample segment (fs={fs:g}), too short "
+            f"to be a spectrum. Ask for rbw_hz below {enbw_bins(MIN_SEGMENT) * fs / MIN_SEGMENT:.6g}"
+            f" Hz, or use a longer record.")
+    step = seg - int(overlap * seg)
+    two = bool(np.iscomplexobj(a))
+    f, p = welch(a, fs=fs, window=window, nperseg=seg, noverlap=seg - step, detrend=False,
+                 return_onesided=not two, scaling="density")
+    if two:
+        f, p = np.fft.fftshift(f), np.fft.fftshift(p)
+    return {"f_hz": f, "psd_per_hz": p, "rbw_hz": enbw_bins(seg) * fs / seg, "bin_hz": fs / seg,
+            "window": window, "segment": seg, "segments": 1 + (n - seg) // step,
+            "overlap": float(overlap), "fc_hz": getattr(grid, "fc_hz", None), "two_sided": two}
+
+
+def _weights(spec, lo_hz, hi_hz, who):
+    """The fraction of each spectrum bin that lies inside ``[lo_hz, hi_hz]`` -- a bin is the
+    interval of width `bin_hz` about its frequency, so a band edge between two bins takes the
+    right share of each."""
+    f, df = spec["f_hz"], spec["bin_hz"]
+    if not lo_hz < hi_hz:
+        raise ValueError(f"{who}: the band needs lo < hi, got {lo_hz:g} and {hi_hz:g} Hz")
+    lo_f, hi_f = f[0] - 0.5 * df, f[-1] + 0.5 * df
+    if lo_hz < lo_f - 1e-9 * df or hi_hz > hi_f + 1e-9 * df:
+        raise ValueError(
+            f"{who}: the band {lo_hz:g} .. {hi_hz:g} Hz reaches outside the spectrum, which "
+            f"covers {lo_f:g} .. {hi_f:g} Hz"
+            + (" as offsets from the centre frequency" if spec["two_sided"] else "")
+            + ". Nothing outside it was measured.")
+    return np.clip((np.minimum(f + 0.5 * df, hi_hz) - np.maximum(f - 0.5 * df, lo_hz)) / df,
+                   0.0, 1.0)
+
+
+def band_power(spec, lo_hz, hi_hz):
+    """The power between two frequencies of a `spectrum` result: its density integrated over
+    the band, in record units squared. Frequencies are in the spectrum's own terms (offsets
+    from the centre for a complex record). A band reaching past the spectrum is refused."""
+    w = _weights(spec, lo_hz, hi_hz, "band_power")
+    return float(np.sum(spec["psd_per_hz"] * w) * spec["bin_hz"])
+
+
+def _rrc_power_response(f_hz, bw_hz, beta):
+    """``|H(f)|**2`` of a root-raised-cosine receive filter of symbol rate `bw_hz`: a raised
+    cosine, 1 in the middle, whose noise bandwidth is exactly `bw_hz`."""
+    af = np.abs(f_hz) / bw_hz
+    out = np.zeros_like(af)
+    out[af <= 0.5 * (1 - beta)] = 1.0
+    roll = (af > 0.5 * (1 - beta)) & (af < 0.5 * (1 + beta))
+    if beta > 0:
+        out[roll] = 0.5 * (1.0 + np.cos(np.pi / beta * (af[roll] - 0.5 * (1 - beta))))
+    return out
+
+
+def aclr(x, grid, channel_bw_hz, offsets_hz, center_hz=None, filter="rect", beta=None,
+         rbw_hz=None, window="hann"):
+    """Adjacent-channel leakage ratio: the power in the wanted channel over the power in a
+    channel of the same width centred `offsets_hz` away, in dB. POSITIVE is good (the
+    neighbour is that far below the channel).
+
+    `filter` is the measuring filter, applied alike to the channel and to each neighbour:
+    ``"rect"`` integrates the density across `channel_bw_hz`; ``"rrc"`` weights it with a
+    root-raised-cosine of symbol rate `channel_bw_hz` and roll-off `beta` (the receive filter
+    some standards specify; it reaches ``(1 + beta) / 2`` of the width either side). Both pass
+    the same power of a flat spectrum.
+
+    `center_hz` is where the wanted channel sits: an offset from the centre frequency for a
+    complex record (default 0), an absolute frequency for a real passband record (required).
+
+    Returns ``{"aclr_db": [...], "offsets_hz": [...], "channel_power", "adjacent_power": [...],
+    "channel_bw_hz", "center_hz", "filter", "beta", "rbw_hz", "window"}``. The spectrum behind
+    it is `spectrum(x, grid, rbw_hz, window)`, `rbw_hz` defaulting to a fiftieth of the channel;
+    a resolution coarser than a tenth of the channel is refused, because the window would then
+    smear the channel into its neighbour and the ratio would be the window's."""
+    a = _record(x, "aclr")
+    if not channel_bw_hz > 0:
+        raise ValueError(f"aclr: channel_bw_hz must be positive, got {channel_bw_hz!r}")
+    if filter not in ("rect", "rrc"):
+        raise ValueError(f"aclr: unknown filter {filter!r} (use 'rect' or 'rrc')")
+    if filter == "rrc" and (beta is None or not 0.0 <= beta <= 1.0):
+        raise ValueError("aclr: filter='rrc' needs its roll-off stated, beta= in [0, 1]")
+    if filter == "rect" and beta is not None:
+        raise ValueError("aclr: beta is the roll-off of filter='rrc'; filter='rect' has none")
+    if center_hz is None:
+        if not np.iscomplexobj(a):
+            raise ValueError("aclr: a real passband record needs center_hz=, the carrier "
+                             "frequency the wanted channel sits on")
+        center_hz = 0.0
+    offs = np.atleast_1d(np.asarray(offsets_hz, float))
+    if offs.size == 0 or np.any(offs == 0):
+        raise ValueError("aclr: offsets_hz are the neighbours' centres relative to the "
+                         "channel's, at least one and none of them 0")
+    if rbw_hz is None:
+        rbw_hz = channel_bw_hz / 50.0
+    elif rbw_hz > channel_bw_hz / 10.0:
+        raise ValueError(
+            f"aclr: rbw_hz={rbw_hz:g} is more than a tenth of the {channel_bw_hz:g} Hz channel, "
+            f"so the window's own skirt would set the ratio. Use rbw_hz <= "
+            f"{channel_bw_hz / 10.0:g}.")
+    spec = spectrum(a, grid, rbw_hz=rbw_hz, window=window)
+    half = 0.5 * channel_bw_hz * (1.0 + beta if filter == "rrc" else 1.0)
+
+    def power(c):
+        w = _weights(spec, c - half, c + half, "aclr")
+        if filter == "rrc":
+            w = w * _rrc_power_response(spec["f_hz"] - c, channel_bw_hz, beta)
+        return float(np.sum(spec["psd_per_hz"] * w) * spec["bin_hz"])
+
+    main = power(float(center_hz))
+    if not main > 0:
+        raise ValueError("aclr: there is no power in the wanted channel; check center_hz and "
+                         "channel_bw_hz against the record")
+    adj = [power(float(center_hz) + o) for o in offs]
+    return {"aclr_db": [float(10 * np.log10(main / p)) if p > 0 else float("inf") for p in adj],
+            "offsets_hz": [float(o) for o in offs], "channel_power": main,
+            "adjacent_power": adj, "channel_bw_hz": float(channel_bw_hz),
+            "center_hz": float(center_hz), "filter": filter, "beta": beta,
+            "rbw_hz": spec["rbw_hz"], "window": window}
+
+
+# ------------------------------------------------------------------ envelope statistics
+def ccdf(x, levels_db=None):
+    """How often the envelope's instantaneous power exceeds a level above its average.
+
+    Returns ``{"papr_db", "avg_power", "peak_power", "levels_db", "probability", "n"}``:
+    ``probability[i]`` is the fraction of samples whose ``|x|**2`` is above the average by more
+    than ``levels_db[i]``. `levels_db` defaults to 0 .. the peak in 0.25 dB steps. For complex
+    Gaussian noise the law is ``exp(-10**(level_db / 10))``.
+
+    A probability is a count over `n` samples, so nothing below ``1/n`` is resolved and the
+    peak-to-average ratio is the largest of THIS record, not a bound. The whole record counts:
+    slice off a burst's turn-on before calling if it is not what you are measuring."""
+    p = np.abs(_measured_envelope(x, "ccdf")) ** 2
+    avg = float(p.mean())
+    if not avg > 0:
+        raise ValueError("ccdf: the record is all zero; it has no average power to refer to")
+    peak = float(p.max())
+    papr = 10 * np.log10(peak / avg)
+    lv = (np.arange(0.0, papr + 0.25, 0.25) if levels_db is None
+          else np.atleast_1d(np.asarray(levels_db, float)))
+    ratio = np.sort(p) / avg
+    prob = 1.0 - np.searchsorted(ratio, 10 ** (lv / 10), side="right") / p.size
+    return {"papr_db": float(papr), "avg_power": avg, "peak_power": peak, "levels_db": lv,
+            "probability": prob, "n": int(p.size)}
+
+
+def constellation_density(symbols, bins=64, extent=None):
+    """A 2-D histogram of complex points, for plotting a constellation (or a whole envelope's
+    trajectory) as a density rather than a scatter.
+
+    Returns ``{"density", "i_edges", "q_edges"}``: ``density[q, i]`` is the COUNT of points in
+    that cell -- rows are Q, columns are I, so ``imshow(density, origin="lower")`` is the right
+    way up. `extent` is the half-width of the square about the origin; unstated it is 1.1 times
+    the largest |I| or |Q|. A point outside a stated extent is refused, not dropped."""
+    s = np.asarray(symbols)
+    if s.ndim != 1 or s.size == 0 or not np.iscomplexobj(s):
+        raise ValueError("constellation_density: expected a 1-D complex array (symbols from "
+                         "evm(...)['received'] or iq.demodulate, or an envelope)")
+    reach = float(max(np.abs(s.real).max(), np.abs(s.imag).max()))
+    if extent is None:
+        extent = 1.1 * reach if reach > 0 else 1.0
+    elif reach > extent:
+        raise ValueError(f"constellation_density: a point reaches {reach:g} and extent={extent:g}"
+                         f" would leave it out of the picture; widen extent")
+    edges = np.linspace(-extent, extent, int(bins) + 1)
+    h, _, _ = np.histogram2d(s.imag, s.real, bins=(edges, edges))
+    return {"density": h, "i_edges": edges, "q_edges": edges}
+
+
+# ------------------------------------------------------------------ EVM
+def constellation_points(constellation):
+    """The points of a named constellation (`iq.CONSTELLATIONS`), or a given alphabet as a
+    complex array."""
+    if isinstance(constellation, str):
+        k = IQ.bits_per_symbol(constellation)
+        bits = (np.arange(2 ** k)[:, None] >> np.arange(k - 1, -1, -1)) & 1
+        return IQ.map_bits(constellation, bits.ravel())
+    pts = IQ.as_complex(constellation)
+    if pts.size < 2:
+        raise ValueError("evm: a constellation needs at least two points")
+    return pts
+
+
+def decide(received, constellation):
+    """The nearest constellation point to each received symbol."""
+    pts = constellation_points(constellation)
+    r = np.asarray(received, complex)
+    return pts[np.argmin(np.abs(r[:, None] - pts[None, :]), axis=1)]
+
+
+def _frequency(r, s, t):
+    """The frequency that best explains a steady rotation of `r` against `s`: the peak of
+    ``|sum r * conj(s) * exp(-j*2*pi*f*t)|``, found on a fine FFT grid and then refined."""
+    z = r * np.conj(s)
+    dt = float(t[1] - t[0])
+    nfft = 1 << int(np.ceil(np.log2(8 * len(z))))
+    f = np.fft.fftfreq(nfft, dt)
+    f0 = float(f[int(np.argmax(np.abs(np.fft.fft(z, nfft))))])
+    step = 1.0 / (nfft * dt)
+    tt = t - t[0]
+    best = minimize_scalar(lambda v: -abs(np.sum(z * np.exp(-2j * np.pi * v * tt))),
+                           bounds=(f0 - step, f0 + step), method="bounded",
+                           options={"xatol": 1e-9 * step})
+    return float(best.x)
+
+
+def _equalizer(y, s, keep, taps):
+    """Least-squares symbol-spaced FIR: the `taps` weights that best turn `y` into `s` over the
+    kept symbols. Returns ``(weights, equalised y)``; the centre weight multiplies the symbol
+    itself, and neighbours beyond the record's ends are taken as zero."""
+    h = taps // 2
+    pad = np.concatenate([np.zeros(h, complex), y, np.zeros(h, complex)])
+    A = np.stack([pad[j:j + len(y)] for j in range(taps)], axis=1)   # column j: y[k + j - h]
+    w = np.linalg.lstsq(A[keep], s[keep], rcond=None)[0]
+    return w, A @ w
+
+
+def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), skip=0,
+        delay_s=0.0, equalizer_taps=None, beta=IQ.RRC_BETA, span_ui=IQ.RRC_SPAN_UI):
+    """Error-vector magnitude of a complex baseband record: RMS distance between the received
+    symbols and the reference, over the RMS of the reference.
+
+        rf.evm(x, grid, sent)                                   # against the truth, as it stands
+        rf.evm(x, grid, sent, correct=("gain", "phase"))        # after one complex gain
+        rf.evm(x, grid, reference="decided", constellation="qam16")
+
+    The receiver is a root-raised-cosine matched filter (`beta`, `span_ui`) sampled at the
+    symbol centres, `delay_s` later than the transmitter's (a known group delay; whole symbols
+    of delay go here). `skip` leaves that many symbols out at EACH end -- a burst's first and
+    last symbols lack their neighbours' tails -- and is 0 unless stated.
+
+    `reference`:
+      ``"truth"``    `sent`, the transmitted symbols (`Signal.transmitted()[0]`)
+      ``"decided"``  the nearest point of `constellation` (a name or an alphabet). When `sent`
+                     is given as well it is used ONLY to count ``decision_errors``, the number
+                     of symbols where the decided reference is wrong -- every one of which
+                     makes the decided figure read lower than the truth.
+
+    `correct` names what to take out before measuring, and nothing is taken out otherwise:
+      ``"timing"``     the sampling instant, searched within +/- half a symbol of `delay_s`
+      ``"frequency"``  a steady rotation: a residual carrier-frequency offset, turned back
+                       about the first counted symbol (so the phase there is left for
+                       ``"phase"``)
+      ``"offset"``     a constant added to every symbol: carrier leak, a DC offset. Fitted
+                       AFTER the frequency correction, so it is a constant in the
+                       transmitter's frame; an offset added after a frequency error rotates
+                       against the symbols and is not removed by this
+      ``"gain"``       one real scale factor
+      ``"phase"``      one rotation
+      ``"equalizer"``  a symbol-spaced linear equaliser of `equalizer_taps` taps (odd, stated)
+    They are estimated in that order, each by least squares against the reference. With
+    `reference="decided"` the reference depends on the correction, so decide / fit / correct
+    is run three times; it pulls in only from a record whose decisions are mostly right
+    already.
+
+    Returns a dict:
+      ``evm``, ``evm_pct``, ``evm_db``   RMS, as a fraction, a percentage and 20*log10
+      ``evm_peak``                       the worst symbol, same normalisation
+      ``n_symbols``, ``skip``, ``reference``, ``receiver``, ``delay_s``
+      ``removed``                        what each named correction took out: ``timing_s``,
+                                         ``frequency_hz``, ``offset`` (complex, symbol units),
+                                         ``gain_db``, ``phase_rad``, ``equalizer_taps``
+      ``received``, ``reference_symbols``  the corrected symbols and what they were compared
+                                           with (after `skip`), for a plot or a bit count
+      ``decision_errors``                only for "decided" with `sent` given
+    """
+    a = _measured_envelope(x, "evm")
+    fs, baud = IQ._rate(grid, "evm")
+    if reference not in ("truth", "decided"):
+        raise ValueError(f"evm: reference is 'truth' (against sent=) or 'decided' (against the "
+                         f"nearest point of constellation=), got {reference!r}")
+    if reference == "truth":
+        if sent is None:
+            raise ValueError("evm: reference='truth' needs the transmitted symbols, "
+                             "sent=sig.transmitted()[0]. Without them use reference='decided' "
+                             "with constellation=.")
+        if constellation is not None:
+            raise ValueError("evm: constellation= is what reference='decided' decides onto; "
+                             "reference='truth' compares with sent= and does not use it")
+    elif constellation is None:
+        raise ValueError("evm: reference='decided' needs constellation= (a name such as "
+                         "'qam16', or the alphabet as a complex array)")
+    correct = (correct,) if isinstance(correct, str) else tuple(correct)
+    bad = [c for c in correct if c not in CORRECTIONS]
+    if bad or len(set(correct)) != len(correct):
+        raise ValueError(f"evm: correct= takes each of {list(CORRECTIONS)} at most once, got "
+                         f"{list(correct)}")
+    if ("equalizer" in correct) != (equalizer_taps is not None):
+        raise ValueError("evm: an equaliser is asked for with BOTH correct=('equalizer', ...) "
+                         "and equalizer_taps=<odd count>; one without the other does nothing")
+    if equalizer_taps is not None and (int(equalizer_taps) != equalizer_taps
+                                       or equalizer_taps < 1 or equalizer_taps % 2 == 0):
+        raise ValueError(f"evm: equalizer_taps must be a positive odd count (the centre tap "
+                         f"is the symbol itself), got {equalizer_taps!r}")
+    fit = IQ.symbols_in_record(grid, a.size)
+    truth = None if sent is None else np.asarray(sent, complex).ravel()
+    n_sym = fit if truth is None else truth.size
+    if n_sym > fit:
+        raise ValueError(f"evm: {n_sym} sent symbols against a record that holds {fit} at "
+                         f"{fs / baud:.4g} samples per symbol. Is `grid` the one that describes "
+                         f"this record (sig.stored_grid(x))?")
+    skip = int(skip)
+    if skip < 0 or n_sym - 2 * skip < 2:
+        raise ValueError(f"evm: skip={skip} at each end leaves {n_sym - 2 * skip} of {n_sym} "
+                         f"symbols; nothing to measure")
+    keep = slice(skip, n_sym - skip)
+    pts = None if reference == "truth" else constellation_points(constellation)
+
+    def receive(d):
+        return IQ.demodulate(a, grid, n_sym=n_sym, beta=beta, span_ui=span_ui, delay_s=d)
+
+    removed = {}
+    if "timing" in correct:
+        # with the truth: the instant at which the symbols correlate best with what was sent.
+        # without it: the instant of greatest symbol power, which a root-raised-cosine pair
+        # (zero ISI at the right instant, ISI either side) puts at the same place.
+        def score(d):
+            r = receive(delay_s + d)[keep]
+            return -(abs(np.vdot(truth[keep], r)) if reference == "truth"
+                     else float(np.mean(np.abs(r) ** 2)))
+        ui = 1.0 / baud
+        coarse = np.linspace(-0.5, 0.5, 33) * ui
+        d0 = float(coarse[int(np.argmin([score(d) for d in coarse]))])
+        best = minimize_scalar(score, bounds=(d0 - ui / 32, d0 + ui / 32), method="bounded",
+                               options={"xatol": 1e-6 * ui})
+        removed["timing_s"] = float(best.x)
+        delay_s = delay_s + removed["timing_s"]
+    raw = receive(delay_s)
+    t = IQ.symbol_times(n_sym, grid)
+
+    def corrected(ref):
+        """`raw` with every named correction estimated against `ref` and taken out."""
+        y, out = raw.copy(), {}
+        if "frequency" in correct:
+            out["frequency_hz"] = _frequency(y[keep], ref[keep], t[keep])
+            y = y * np.exp(-2j * np.pi * out["frequency_hz"] * (t - t[keep][0]))
+        if {"offset", "gain", "phase"} & set(correct):
+            cols = [ref[keep]] + ([np.ones(n_sym - 2 * skip, complex)] if "offset" in correct
+                                  else [])
+            sol = np.linalg.lstsq(np.stack(cols, axis=1), y[keep], rcond=None)[0]
+            if "offset" in correct:
+                out["offset"] = complex(sol[1])
+                y = y - sol[1]
+            if "gain" in correct:
+                out["gain_db"] = float(20 * np.log10(abs(sol[0])))
+                y = y / abs(sol[0])
+            if "phase" in correct:
+                out["phase_rad"] = float(np.angle(sol[0]))
+                y = y * np.exp(-1j * out["phase_rad"])
+        if "equalizer" in correct:
+            out["equalizer_taps"], y = _equalizer(y, ref, keep, int(equalizer_taps))
+        return y, out
+
+    if reference == "truth":
+        ref = truth
+        y, fitted = corrected(ref)
+    else:
+        y = raw
+        if "gain" in correct:            # a level to decide at; the fit below states the gain
+            y = raw * np.sqrt(np.mean(np.abs(pts) ** 2) / np.mean(np.abs(raw[keep]) ** 2))
+        fitted = {}
+        for _ in range(DECIDED_PASSES if correct else 0):
+            y, fitted = corrected(decide(y, pts))
+        ref = decide(y, pts)
+    removed.update(fitted)
+    err = y[keep] - ref[keep]
+    scale = float(np.sqrt(np.mean(np.abs(ref[keep]) ** 2)))
+    if not scale > 0:
+        raise ValueError("evm: the reference symbols are all zero; there is nothing to "
+                         "normalise the error by")
+    val = float(np.sqrt(np.mean(np.abs(err) ** 2))) / scale
+    out = {"evm": val, "evm_pct": 100.0 * val,
+           "evm_db": float(20 * np.log10(val)) if val > 0 else float("-inf"),
+           "evm_peak": float(np.abs(err).max()) / scale,
+           "n_symbols": n_sym - 2 * skip, "skip": skip, "reference": reference,
+           "receiver": f"rrc matched filter, beta={beta:g}, span_ui={span_ui:g}",
+           "delay_s": float(delay_s), "removed": removed,
+           "received": y[keep], "reference_symbols": ref[keep]}
+    if reference == "decided" and truth is not None:
+        out["decision_errors"] = int(np.sum(~np.isclose(ref[keep], truth[keep])))
+    return out
