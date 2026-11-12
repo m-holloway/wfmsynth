@@ -3346,6 +3346,204 @@ except ValueError as _ce:
     _cmsg = str(_ce)
 check("two channels that name each other are refused naming the cycle",
       "a -> b -> a is a cycle" in _cmsg, _cmsg[:34])
+# ===================================================================================================
+print("== a triggered acquisition: render long, find the condition, keep the window (#85) ==")
+# ===================================================================================================
+# A trigger cuts the window a scope would out of a long render. Each claim is measured against
+# something the trigger did not compute: the long render itself, the transitions `stages`'
+# comparator reports for it (a separate implementation), a brute-force arming loop, and 1/sqrt(n).
+import re as _trg_re                                                          # noqa: E402
+from wfmsynth import trigger as _TRG, stages as _trg_stages                   # noqa: E402
+
+_trg_g = Grid(fs=2e9, baud=2e9 / 128, n=2048 * 128)
+_trg_prof = dict(sample_rate_hz=500e6, record_length=_trg_g.n // 4, input_bandwidth_hz=150e6)
+
+
+def _trg_link():
+    return (Signal(seed=3, grid=_trg_g).carrier("nrz", n_ui=2048, pattern="prbs7",
+                                                jitter=dict(rj=1.0))
+            .lossy(loss_db=3.0, loss_at_ghz=0.02).rx_noise(rms=0.02).acquire(_trg_prof))
+
+
+def _trg_cross(y, level, near, rising=True):
+    """Sub-sample crossing of `level` nearest sample `near`, by np.interp on the local edge."""
+    k = np.arange(near - 3, near + 3)
+    seg = y[k] if rising else y[k][::-1]
+    return float(np.interp(level, seg, k if rising else k[::-1]))
+
+
+_trg_fs = 500e6
+_trg_long = _trg_link().waveform()
+_trg_sig = _trg_link().trigger(pre_s=200e-9, post_s=600e-9, level=0.0, hysteresis=0.2)
+_trg_x, _trg_ev = _trg_sig.realize()
+_trg_e = _trg_ev.events[-1]
+_trg_meas = _trg_cross(_trg_x, 0.0, _trg_e.sample) / _trg_fs
+check("the window is a slice of the long render and the triggering edge sits at pre_s to "
+      "half a sample, where the event says",
+      np.array_equal(_trg_x, _trg_long[_trg_e.params["start"]:][:len(_trg_x)])
+      and abs(_trg_meas - 200e-9) * _trg_fs <= 0.5 and abs(_trg_meas - _trg_e.t_s) * _trg_fs < 1e-6
+      and _trg_sig.stored_grid(_trg_x).fs == _trg_fs,
+      f"edge measured at {_trg_meas * 1e9:.4f} ns, event {_trg_e.t_s * 1e9:.4f} ns, pre_s 200 ns, "
+      f"half a sample {0.5 / _trg_fs * 1e9:.1f} ns")
+
+_trg_sj = 3e-9
+_trg_xs, _trg_evs = _trg_link().trigger(pre_s=200e-9, post_s=200e-9, level=0.0, hysteresis=0.2,
+                                        jitter_s=_trg_sj, n_segments=180).realize()
+_trg_rows = _trg_xs.reshape(180, -1)
+_trg_pos = np.array([_trg_cross(_trg_rows[k], 0.0, e.sample - k * 200) / _trg_fs
+                     for k, e in enumerate(_trg_evs)])
+_trg_jit = np.array([e.params["jitter_s"] for e in _trg_evs])
+_trg_want = float(np.sqrt(_trg_sj ** 2 + (1 / _trg_fs) ** 2 / 12))
+check("with trigger jitter the edge sits at pre_s - jitter to half a sample in every segment, "
+      "and its spread is the stated rms",
+      np.abs(_trg_pos - (200e-9 - _trg_jit)).max() * _trg_fs <= 0.5 + 1e-6
+      and abs(_trg_pos.std() / _trg_want - 1) < 0.15,
+      f"180 segments: position rms {_trg_pos.std() * 1e9:.3f} ns against "
+      f"sqrt(jitter^2 + dt^2/12) = {_trg_want * 1e9:.3f} ns (bound 15 %), "
+      f"worst residual "
+      f"{np.abs(_trg_pos - (200e-9 - _trg_jit)).max() * _trg_fs:.3f} samples")
+
+# holdoff and timestamps: the comparator's rising transitions ARE the event times in the long
+# render, and a loop written out here is the scope's arming
+_trg_seen = []
+_trg_stages.apply_law(_trg_long, "comparator", fs=_trg_fs, events=_trg_seen, threshold=0.0,
+                      hysteresis=0.2)
+# the comparator trips at the band's edge; the instant the same edge crossed 0 is found here
+_trg_edges = np.array([_trg_cross(_trg_long, 0.0, e.sample - 1) / _trg_fs
+                       for e in _trg_seen if e.direction > 0 and e.sample > 3])
+_trg_pre, _trg_post, _trg_hold = 200e-9, 600e-9, 5e-6
+_trg_take, _trg_ready = [], _trg_pre
+for _trg_t in _trg_edges:
+    if _trg_t >= _trg_ready:
+        _trg_take.append(_trg_t)
+        _trg_ready = _trg_t + max(_trg_hold, _trg_pre + _trg_post)
+_, _trg_evh = _trg_link().trigger(pre_s=_trg_pre, post_s=_trg_post, level=0.0, hysteresis=0.2,
+                                  holdoff_s=_trg_hold, n_segments=20).realize()
+_trg_stamps = np.array([e.params["timestamp_s"] for e in _trg_evh])
+_trg_skipped = int(np.searchsorted(_trg_edges, _trg_stamps[-1] + 1e-12)) - 20
+_trg_dt = float(np.abs(_trg_stamps - np.array(_trg_take[:20])).max())
+check("holdoff skips exactly the edges it should, and every segment's timestamp is that "
+      "edge's time in the long render",
+      _trg_dt * _trg_fs < 1e-6 and np.diff(_trg_stamps).min() >= _trg_hold and _trg_skipped > 20,
+      f"20 segments, {_trg_skipped} edges passed over, timestamps against the independent "
+      f"edge list: worst {_trg_dt * _trg_fs:.1e} samples, closest pair "
+      f"{np.diff(_trg_stamps).min() * 1e6:.3f} us (holdoff 5 us)")
+
+# averaging: a clock, so every trigger sees the same waveform and only the noise differs
+_trg_cg = Grid(fs=1e9, n=1000 * 300)
+_trg_n, _trg_rms = 64, 0.05
+
+
+def _trg_clock(**kw):
+    return (Signal(seed=7, grid=_trg_cg).carrier("cmos", v_lo=0.0, v_hi=1.0, f_hz=1e6,
+                                                 tr_s=5e-9).rx_noise(rms=_trg_rms)
+            .trigger(pre_s=50e-9, post_s=400e-9, level=0.5, hysteresis=0.4, **kw))
+
+
+_trg_one = _trg_clock(n_segments=_trg_n).waveform().reshape(_trg_n, -1)
+_trg_avg = _trg_clock(average=_trg_n).waveform()
+_trg_flat = slice(100, 440)                                   # the settled high level
+_trg_s1 = float(_trg_one[:, _trg_flat].std(1).mean())
+_trg_sn = float(_trg_avg[_trg_flat].std())
+check("averaging n triggers is the mean of those n windows and cuts uncorrelated noise by "
+      "sqrt(n)",
+      np.allclose(_trg_avg, _trg_one.mean(0), rtol=0, atol=1e-15)
+      and abs(_trg_s1 / _trg_rms - 1) < 0.05
+      and abs(_trg_sn / (_trg_rms / np.sqrt(_trg_n)) - 1) < 0.15,
+      f"noise {_trg_s1 * 1e3:.2f} mV single, {_trg_sn * 1e3:.3f} mV after {_trg_n} "
+      f"(sqrt(n) predicts {_trg_rms / np.sqrt(_trg_n) * 1e3:.3f} mV, bound 15 %)")
+
+# trigger jitter MOVES a record and does not smear it; only averaging smears (BACKLOG #50)
+_trg_tr, _trg_sig_j = 20e-9, 6e-9
+_trg_pg = Grid(fs=1e9, n=1000 * 300)
+
+
+def _trg_edge(**kw):
+    return (Signal(seed=1, grid=_trg_pg).carrier("cmos", v_lo=0.0, v_hi=1.0, f_hz=1e6,
+                                                 tr_s=_trg_tr)
+            .trigger(pre_s=100e-9, post_s=100e-9, level=0.5, jitter_s=_trg_sig_j, **kw))
+
+
+def _trg_rise(y):
+    k = np.arange(len(y))
+    m = (k > 20) & (k < 180)
+    return float(np.interp(0.9, y[m], k[m]) - np.interp(0.1, y[m], k[m])) / 1e9
+
+
+_trg_src = Signal(seed=1, grid=_trg_pg).carrier("cmos", v_lo=0.0, v_hi=1.0, f_hz=1e6,
+                                               tr_s=_trg_tr).waveform()
+_trg_i0 = 200 + int(np.argmax((_trg_src[200:-1] < 0.5) & (_trg_src[201:] >= 0.5)))
+_trg_r0 = _trg_rise(_trg_src[_trg_i0 - 100:_trg_i0 + 100])     # a rising edge of the source
+_trg_r1 = _trg_rise(_trg_edge().waveform())
+_trg_shots = _trg_edge(n_segments=256).waveform().reshape(256, -1)
+_trg_ra = _trg_rise(_trg_edge(average=256).waveform())
+# the average is the single edge convolved with the jitter's Gaussian (and the half-sample
+# rounding): do that convolution numerically on the first shot
+_trg_u = np.linspace(-6, 6, 2401)
+_trg_w = np.exp(-_trg_u ** 2 / 2); _trg_w /= _trg_w.sum()
+_trg_k = np.arange(200.0)
+_trg_pred = np.array([(_trg_w * np.interp(_trg_k[i] - _trg_u * _trg_sig_j * 1e9, _trg_k,
+                                          _trg_shots[0])).sum() for i in range(200)])
+_trg_rp = _trg_rise(_trg_pred)
+check("trigger jitter moves the window without smearing the record; averaging jittered "
+      "triggers smears the edge by the jitter's Gaussian",
+      abs(_trg_r1 / _trg_r0 - 1) < 1e-9 and _trg_rp > 1.15 * _trg_r0
+      and abs(_trg_ra / _trg_rp - 1) < 0.10,
+      f"10-90 % rise: source {_trg_r0 * 1e9:.2f} ns, one jittered record {_trg_r1 * 1e9:.2f} ns, "
+      f"average of 256 {_trg_ra * 1e9:.2f} ns against {_trg_rp * 1e9:.2f} ns predicted "
+      f"(bound 10 %)")
+
+# no silent untriggered record: the refusal's render length is enough, and one period less is not
+_trg_ck = Signal(grid=Grid(fs=1e9, n=20000)).carrier("sine", f_hz=5e6).waveform()
+try:
+    _TRG.apply(_trg_ck, 1e9, pre_s=100e-9, post_s=300e-9, level=0.0, n_segments=60)
+    _trg_msg = ""
+except ValueError as _trg_err:
+    _trg_msg = str(_trg_err)
+_trg_m = _trg_re.search(r"needs about (\d+) samples", _trg_msg)
+_trg_need = int(_trg_m.group(1)) if _trg_m else 0
+_trg_more = Signal(grid=Grid(fs=1e9, n=max(_trg_need, 1))).carrier("sine", f_hz=5e6).waveform()
+_trg_ok = len(_TRG.apply(_trg_more, 1e9, pre_s=100e-9, post_s=300e-9, level=0.0,
+                         n_segments=60)) == 60 * 400 if _trg_need else False
+try:
+    _TRG.apply(_trg_more[:_trg_need - 400], 1e9, pre_s=100e-9, post_s=300e-9, level=0.0,
+               n_segments=60)
+    _trg_tight = False
+except ValueError:
+    _trg_tight = True
+check("too few triggers is refused with a render length, and that length is enough and "
+      "not generous",
+      _trg_ok and _trg_tight,
+      f"20000 samples held 50 of 60; the refusal asked for {_trg_need}, which triggers 60, "
+      f"and {_trg_need - 400} does not")
+
+# events of the long render are re-timed into the window; the rest are dropped and counted
+_trg_evg = Grid(fs=2e9, baud=2e9 / 128, n=1024 * 128)
+
+
+def _trg_marked():
+    return (Signal(seed=3, grid=_trg_evg).carrier("nrz", n_ui=1024, pattern="prbs7")
+            .events("glitch", on="symbols", count=12).lossy(loss_db=3.0, loss_at_ghz=0.02))
+
+
+_trg_lx, _trg_lev = _trg_marked().realize()
+_trg_wx, _trg_wev = _trg_marked().trigger(pre_s=2e-6, post_s=6e-6, level=0.0,
+                                          n_segments=3, holdoff_s=20e-6).realize()
+_trg_tr_ev = [e for e in _trg_wev if e.kind == "trigger"]
+_trg_kept = [e for e in _trg_wev if e.kind == "glitch"]
+_trg_nw = len(_trg_wx) // 3
+_trg_want_ev = sorted((t.params["segment"] * _trg_nw + e.sample - t.params["start"])
+                      for e in _trg_lev for t in _trg_tr_ev
+                      if t.params["start"] <= e.sample < t.params["start"] + _trg_nw)
+check("an event of the long render is re-timed into the window that holds it, and those in "
+      "no window are dropped and counted rather than left pointing past the record",
+      sorted(e.sample for e in _trg_kept) == _trg_want_ev and len(_trg_kept) >= 1
+      and _trg_tr_ev[0].params["dropped"] == len(_trg_lev) - len(_trg_kept) >= 1
+      and all(0 <= e.sample < len(_trg_wx) for e in _trg_wev)
+      and float(_trg_wev.mask().sum()) == float(sum(
+          min(e.sample + e.width, len(_trg_wx)) - e.sample for e in _trg_kept)),
+      f"{len(_trg_lev)} glitches in the long render: {len(_trg_kept)} inside the 3 windows, "
+      f"{_trg_tr_ev[0].params['dropped']} dropped; the 3 trigger events mark no samples")
 
 print()
 if fails:

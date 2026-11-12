@@ -42,6 +42,8 @@ Modules / public API:
                 and the `use(name)` op by which one chain refers to another
   tolerance     unit-to-unit variation: tol() / corners() written where a number would go,
                 Signal.unit(), unit_dataset(), unit_of()
+  trigger       a triggered acquisition behind Signal.trigger(): render long, find an edge,
+                pulse-width or runt condition, keep the window (or segments, or an average)
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 
 A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM
@@ -83,7 +85,7 @@ __version__ = _read_version()
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
-               tolerance, subchain, joins, sequence, channels)
+               tolerance, subchain, joins, sequence, channels, trigger)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -155,6 +157,7 @@ __all__ = [
     # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
     # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
     "capture", "hdf5", "resample", "net", "scenario", "stages", "iq", "domain", "joins",
+    "trigger",
     "LAW_KINDS", "FILTER_KINDS",
     "Hold", "Agent", "merge_holds", "hold_windows",
     "AcquisitionProfile", "acquire_record", "record_decimation",

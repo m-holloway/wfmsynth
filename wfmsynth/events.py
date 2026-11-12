@@ -75,6 +75,8 @@ class Event:
     # "" for an event on the record itself. For one placed inside a SUB-CHAIN this is that
     # sub-chain's namespace (`crosstalk/2/aggressor`): the event happened to the aggressor, at
     # this sample of the shared grid, and reached the record only through the op that holds it.
+    # A `trigger` event carries `trigger/<op index>`: it is an observation of the record, not a
+    # change to its samples.
     at: str = ""
 
     def span(self, n=None):

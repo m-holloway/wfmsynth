@@ -506,7 +506,11 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                "sequence", "switch",
                # `use` is another chain of a several-channel record, so it has no knob and no
                # meaning in a lone carrier chain; tests/test_channels.py checks what it does.
-               "use"}
+               "use",
+               # `trigger` SHORTENS the record to its window, so this sweep's same-length
+               # comparison does not apply. tests/test_trigger.py moves every knob and checks
+               # each one moves the samples and the recipe's content address.
+               "trigger"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

@@ -13,7 +13,7 @@ STRUCTURAL = frozenset({"op"})
 
 OP_KEYS = {
     "ac_couple": frozenset({"fc_frac", "fc_hz"}),
-    "acquire": frozenset({"op", "profile", "tap"}),
+    "acquire": frozenset({"profile", "tap"}),
     "agc": frozenset({"gain_limits", "metric", "on_limit", "q", "target", "tau_s"}),
     "burst": frozenset({"edge_frac", "fs", "off", "phase_s", "t_off_s", "t_on_s"}),
     "capture": frozenset({"fs_hz", "n", "path", "resample", "sha256", "values"}),
@@ -71,6 +71,7 @@ OP_KEYS = {
     "tia": frozenset({"bw_hz", "gain", "thermal_rms"}),
     "timebase": frozenset({"rms_ps"}),
     "timing": frozenset({"phase_noise", "pj", "rj_ps", "ssc", "wander"}),
+    "trigger": frozenset({"average", "condition", "holdoff_s", "hysteresis", "jitter_s", "level", "n_segments", "op", "post_s", "pre_s", "runt_level", "slope", "width_s"}),
     "tx_ffe": frozenset({"pre", "spb", "taps"}),
     "upconvert": frozenset({"fc_hz", "fold_db", "phase_rad"}),
     "use": frozenset({"name"}),

@@ -46,6 +46,7 @@ from . import tolerance as TOL
 from . import channels as CH
 from . import instrument as INST
 from . import domain as DOMAIN
+from . import trigger as TRIG
 from .grid import Grid
 from .streams import Streams
 from .stages import LAW_KEYS as _LAW_KEYS, FILTER_KEYS as _FILTER_KEYS
@@ -686,6 +687,20 @@ def _op_acquire(x, p, streams, grid, idx):
     return taps[p.get("tap", "stored")]
 
 
+def _op_trigger(x, p, streams, grid, idx, sink=None, event_scale=1.0):
+    """Cut the triggered window(s) out of the long render. `grid` is the grid the record is on
+    NOW (after an `acquire`, the acquisition's)."""
+    kw = {k: p[k] for k in ("pre_s", "post_s", "condition", "level", "slope", "hysteresis",
+                            "width_s", "runt_level", "holdoff_s", "jitter_s", "n_segments",
+                            "average") if k in p}
+    # THE SEAM for a trigger on another channel (#78): the condition is looked for on `on`,
+    # which is `x` today. A sub-chain parameter resolved here through `subchain.signal` (the
+    # one-line form in that module's docstring, with n=len(x)) and passed as `on` is the
+    # whole change; `trigger.apply(on=)` is already tested at the function level.
+    return TRIG.apply(x, grid.fs, on=None, rng=streams.role(f"trigger/{idx}"), events=sink,
+                      placement=f"trigger/{idx}", event_scale=event_scale, **kw)
+
+
 _EVENT_SKIP = {"op"}
 
 
@@ -1322,7 +1337,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert,
          "combine": _op_combine, "gain": _op_gain, "offset": _op_offset, "gate": _op_gate,
          "delay": _op_delay,
-         "sequence": _op_sequence, "switch": _op_switch, "use": _op_use}
+         "sequence": _op_sequence, "switch": _op_switch, "use": _op_use,
+         "trigger": _op_trigger}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1361,6 +1377,7 @@ OP_KIND = {
     "delay": "general",
     "sequence": "source", "switch": "source",
     "use": "general",
+    "trigger": "instrument",
 }
 # `use` is whatever the named chain is -- a source, a timing source, a supply -- so, like the
 # general stages, where it sits is its meaning and it has no home kind.
@@ -1580,6 +1597,10 @@ _LEAD_REJECT = {
                 "{'from': recipe}",
     "switch": "its selector and inputs are sub-chains on the record's own grid, which a "
               "lead-in lengthens without extending them",
+    "trigger": "it already cuts its window out of a longer render, so the record it returns is "
+               "not the extended render's length and a second window cannot be sliced out of "
+               "it. It does not need one: a trigger past the turn-on leaves the turn-on in the "
+               "part it discards",
     "acquire": "it resamples the record onto a second rate, so the guard's sample count is not the "
                "record's and the window cannot be sliced back out",
     "events": "it places a localized mechanism at an absolute position in the record, and a lead-in "
@@ -1788,6 +1809,8 @@ def _stored_rate(ops, fs, n):
         elif name == "downconvert" and op.get("fs_out"):
             step = int(round(fs / float(op["fs_out"])))   # keeps every step-th sample
             fs, n = float(op["fs_out"]), len(range(0, n, step))
+        elif name == "trigger":
+            n = TRIG.record_length(op, fs)                # the window(s), at the rate it is on
     return fs, n
 
 
@@ -1861,6 +1884,7 @@ class Signal:
         OPKEYS.check(op, params)
         new = {"op": op, **params}
         DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
+        TRIG.check_chain(self.ops + [new])
         self.ops.append(new); return self
 
     def unit(self, seed):
@@ -2849,6 +2873,32 @@ class Signal:
         real capture its noise floor -- see `instrument.store_record`."""
         return self._add("store", **params)
 
+    def trigger(self, **params):
+        """A triggered acquisition: find a condition on the record so far and keep the window a
+        scope would, `pre_s` before the trigger to `post_s` after it.
+
+            Signal(seed=1, grid=long_grid).carrier("nrz").lossy(loss_db=6).trigger(
+                pre_s=1e-9, post_s=4e-9)
+
+        The grid is the LONG render; this op shortens the record to the window. Each window is
+        a slice of the long render, unresampled, so the crossing sits at `pre_s` to within half
+        a sample and `realize()` reports exactly where.
+
+        params: pre_s, post_s (required, seconds);
+                condition "edge" (default) | "width" | "runt";
+                level (default: midway between the record's extremes), slope "rising" |
+                "falling" | "either", hysteresis;
+                width_s=[min, max] for "width"; runt_level for "runt";
+                holdoff_s; jitter_s (rms trigger jitter, role `trigger/<i>`);
+                n_segments (windows laid end to end: `x.reshape(n_segments, -1)`);
+                average (triggers averaged into each window).
+
+        Refused, with the render length that would do: no trigger found, or too few for
+        `n_segments * average`. After an `acquire` it triggers on the acquired record, as a
+        digital-trigger scope does. See `wfmsynth.trigger` for the arming rules and the ground
+        truth each trigger emits."""
+        return self._add("trigger", **params)       # checked there, by `TRIG.check_chain`
+
     def events(self, kind, on="symbols", **params):
         """Place a localized mechanism on the current waveform (a needle, not a
         systemic LTI stage). ``kind`` is the mechanism, ``on`` is the targeting
@@ -2989,11 +3039,15 @@ class Signal:
         if collect_events:
             st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
         doms = DOMAIN.trace(ops, grid)
+        TRIG.check_chain(ops)
         for i, op in enumerate(ops):
             if op["op"] in DOMAIN.EMITS:
                 # a mixer needs the rate the record is at NOW, which after an `acquire` or a
                 # resample is not the synthesis grid's
                 x = _EXEC[op["op"]](x, op, st, _grid_now(ops[:i], grid, x), i)
+            elif op["op"] == "trigger":
+                now = _grid_now(ops[:i], grid, x)         # after an `acquire`, its rate
+                x = _op_trigger(x, op, st, now, i, sink=sink, event_scale=now.fs / grid.fs)
             elif collect_events and op["op"] in ("events", "law", "gate"):
                 x = _EXEC[op["op"]](x, op, st, grid, i, sink=sink)
             elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
@@ -3082,6 +3136,8 @@ class Signal:
                 out.append(f"jitter/{i}")
             elif op["op"] == "crosstalk" and not SUB.is_subchain(op.get("aggressor")):
                 out.append(f"jitter/xtalk{i}")
+            elif op["op"] == "trigger" and op.get("jitter_s"):
+                out.append(f"trigger/{i}")
             elif op["op"] == "digitize":
                 if "snr_db" in op or "noise_rms" in op:
                     out.append(f"noise/{i}")

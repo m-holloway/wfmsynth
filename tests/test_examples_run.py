@@ -47,6 +47,7 @@ DEMOS = [
     "sim_to_real.py",
     "sub_chains.py",
     "touchstone_channel.py",
+    "triggered_capture.py",
     "two_rate_acquisition.py",
     "unit_variation.py",
 ]
