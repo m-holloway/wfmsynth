@@ -816,7 +816,8 @@ delivered in 0.46.0 with the test named).
    to the next sample, and an edge exactly on a sample was decided by the rounding of
    `f * t % 1.0` (1 GHz at 64 GSa/s: 35 of 510 periods were 63 or 65 samples). Measured
    edge-time error at 0.997 GHz on 64 GSa/s, by polynomial crossing: 15.58 ps peak to peak
-   before, 3.0e-5 ps after. Edges on samples and rightly placed are bit-identical.
+   before; after, 3.0e-5 ps with a 9.6-sample edge, 1.1e-2 ps at `square`'s default
+   3.2-sample edge and 5.2e-2 ps for a 2.2-sample `cmos` edge. Edges on samples and rightly placed are bit-identical.
    `NUMERIC_CHANGES`: `carrier/square`, `carrier/cmos`. `tests/test_edge_placement.py`.
 2. *`n_ui` defaults to 32 whatever `Grid(baud=)` says.* The default is unchanged. One
    RuntimeWarning when the grid states a baud the 32 symbols do not come out at, naming both

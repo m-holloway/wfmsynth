@@ -144,8 +144,9 @@ matters because the echo's phase within the eye is what decides whether it lands
 in the middle.
 
 The SOURCE's own edges are a separate matter. `square` and `cmos` place each edge at its own
-time between samples (measured at 0.997 GHz on 64 GSa/s: 3e-5 ps of edge-time error, where
-snapping to the next sample gave 15.6 ps). An `nrz` / `pam<N>` / `symbols` carrier places its
+time between samples (measured at 0.997 GHz on 64 GSa/s, where snapping to the next sample gave
+15.6 ps of edge-time error: 3e-5 ps with a 9.6-sample edge, 0.011 ps at `square`'s default
+3.2-sample edge, 0.052 ps for a 2.2-sample `cmos` edge). An `nrz` / `pam<N>` / `symbols` carrier places its
 edges ON samples, so its clock is clean only when samples per UI is a whole number: choose `n`
 and `n_ui` so `n / n_ui` is whole. `carrier(jitter=)` displaces edges by whole samples for the
 same reason; jitter that means what it says is `timing(rj_ps=)`. `carrier` warns once when
@@ -718,7 +719,9 @@ symbol of `delay_s`), `"frequency"`, `"offset"`, `"gain"`, `"phase"`, `"equalize
 `equalizer_taps=`). `skip=` drops symbols at each end, which lack their neighbours' tails.
 With `reference="decided"` the carrier is acquired blind before any decision (the line in the
 4th power of the symbols for QPSK and QAM): an offset within +/- baud/8 is found at any phase,
-and a record it cannot lock to is refused instead of measured. Measured, QAM-16 2 kHz off at
+and a record it cannot lock to is refused instead of measured. Past that range the estimate
+is an alias (it repeats every baud/4): `["acquisition"]` gives `pull_in_hz` and
+`alias_spacing_hz`, and passing `sent` makes a wrong alias a refusal. Measured, QAM-16 2 kHz off at
 Es/N0 24 dB: 6.29 % decided against 6.29 % truth.
 `rf.evm` is THE EVM of a record: it applies the RRC matched filter itself and returns percent, dB
 and a fraction. `ws.iq.evm(received, sent)` is only its last step, a fraction, for symbols you

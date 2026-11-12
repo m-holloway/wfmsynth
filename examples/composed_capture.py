@@ -59,10 +59,11 @@ SEGMENTS, HOLDOFF_S = 192, 20 * UI
 
 
 def clock():
-    """A clock as a 1010 PATTERN, so its edges sit on the symbol clock exactly. The analog
-    `square` and `cmos` carriers put each edge on the nearest sample, which at this rate is
-    15.6 ps peak to peak of jitter that is the grid's and not the link's -- more than anything
-    this example is trying to measure."""
+    """A clock as a 1010 PATTERN: at this grid's whole number of samples per UI its edges
+    sit on the symbol clock exactly, the same clock the preamble and the payload are on.
+    (`carrier("square")` would serve too: since 0.46.0 it places each edge at its own time
+    between samples. Before that it put each on the next sample, 15.6 ps peak to peak at
+    this rate, which is more than anything this example measures.)"""
     return Signal().carrier("nrz", n_ui=N_UI, pattern="clock")
 
 

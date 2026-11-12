@@ -110,7 +110,8 @@ not.
   no longer decided by floating-point rounding of the phase. A record with an edge between
   samples, or one that rounding had put a sample late, moves by up to one sample at that
   edge: it had up to one sample peak to peak of timing error that was the grid's (15.58 ps
-  at 64 GSa/s, now 3.0e-5 ps). A record whose edges were all on samples and rightly placed
+  at 64 GSa/s for a 0.997 GHz clock; now 3.0e-5 ps where the edge spans 9.6 samples, 1.1e-2
+  ps at `square`'s default 3.2-sample edge and 5.2e-2 ps for a 2.2-sample `cmos` edge). A record whose edges were all on samples and rightly placed
   is unchanged bit for bit. The entries are keyed `carrier/square` and `carrier/cmos` and
   match that kind of carrier anywhere in a recipe, so a recipe holding only `nrz` or `sine`
   carriers is not warned. To reproduce an old record exactly, render it with 0.45.x.

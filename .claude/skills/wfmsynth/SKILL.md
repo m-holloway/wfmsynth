@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); and a record can be complex baseband (I/Q) with RF impairments and measures. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
-version: 8
+version: 9
 ---
 
 # wfmsynth

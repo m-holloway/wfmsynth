@@ -4055,6 +4055,12 @@ _ebefore = _etie(P._shape_edges(_eold, _ek), 0.0)
 _esq = _etie(Signal(seed=1, grid=_eg).carrier("square", f_hz=_ef, tr_frac=0.15).waveform(), 0.0)
 _ecm = _etie(Signal(seed=1, grid=_eg).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=_ef,
                                               tr_s=_ek / _efs).waveform(), 1.65)
+# the same train with SHORT edges, where the interpolator has less to work with: `square`'s
+# default tr_frac=0.05 is 3.2 samples here, and a 35 ps CMOS edge is 2.2
+_esq3 = _etie(Signal(seed=1, grid=_eg).carrier("square", f_hz=_ef).waveform(), 0.0)
+_ecm2 = _etie(Signal(seed=1, grid=_eg).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=_ef,
+                                               tr_s=35e-12).waveform(), 1.65)
+_eb3 = _etie(P._shape_edges(_eold, 0.05 * _espp), 0.0)
 _eduty = P.square(f_hz=1e9, duty=0.3, phase_rad=1.5 * np.pi, tr_frac=0.05, n=8192, fs=256e9)
 _eon = P.square(f_hz=10e6, n=4096, fs=10e9)
 _eon_old = P._shape_edges(np.where((10e6 * np.arange(4096) / 10e9) % 1.0 < 0.5, 1.0, -1.0),
@@ -4062,13 +4068,16 @@ _eon_old = P._shape_edges(np.where((10e6 * np.arange(4096) / 10e9) % 1.0 < 0.5, 
 check("a square and a CMOS clock that do not fit the grid carry no jitter of the grid's: each "
       "edge is at its own time between samples, the duty is the one asked for, and a clock "
       "whose edges are on samples is the record it was",
-      14.0 < _ebefore < 16.5 and _esq < 1e-3 and _ecm < 1e-3
+      14.0 < _ebefore < 16.5 and 14.0 < _eb3 < 16.5 and _esq < 1e-3 and _ecm < 1e-3
+      and _esq3 < 2e-2 and _ecm2 < 1e-1
       and abs(_eduty.mean() + 0.4) < 1e-9 and np.array_equal(_eon, _eon_old),
-      f"0.997 GHz at 64 GSa/s, edge-time error peak to peak by polynomial crossing: "
-      f"{_ebefore:.2f} ps as built before 0.46.0 (one sample is 15.63), square {_esq:.1e} ps, "
-      f"cmos {_ecm:.1e} ps (bound 1e-3); duty 0.3 over 32 periods reads "
-      f"{(_eduty.mean() + 1) / 2:.12f}; 10 MHz at 10 GSa/s is bit-identical to the old "
-      f"construction")
+      f"0.997 GHz at 64 GSa/s, edge-time error peak to peak by polynomial crossing. With a "
+      f"{_ek:.1f}-sample edge: {_ebefore:.2f} ps as built before 0.46.0 (one sample is "
+      f"15.63), square {_esq:.1e} ps, cmos {_ecm:.1e} ps (bound 1e-3). With short edges, "
+      f"where it was {_eb3:.2f} ps: square at its default {0.05 * _espp:.1f}-sample edge "
+      f"{_esq3:.1e} ps (bound 2e-2), cmos at a {35e-12 * _efs:.1f}-sample edge {_ecm2:.1e} ps "
+      f"(bound 1e-1); duty 0.3 over 32 periods reads {(_eduty.mean() + 1) / 2:.12f}; 10 MHz "
+      f"at 10 GSa/s is bit-identical to the old construction")
 
 # ---- roles(): the list is what the record draws from, in both directions (0.46.0)
 from wfmsynth.streams import Streams as _RSt

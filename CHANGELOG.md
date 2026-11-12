@@ -137,7 +137,10 @@ The rule that decided what became an op and what did not is in
   rendered as 63 or 65. Edge times are now computed directly, and an edge between samples is
   the on-sample edge delayed by its fraction (an 8-tap Lagrange fractional delay, applied
   before the edge shaper). Measured at 0.997 GHz on 64 GSa/s, edge-time error peak to peak
-  by polynomial crossing: **15.58 ps before, 3.0e-5 ps after**, for both kinds; a duty of 0.3
+  by polynomial crossing: **15.58 ps before; after, 3.0e-5 ps with a 9.6-sample edge**
+  (`tr_frac=0.15`, and `cmos` at the same edge), **1.1e-2 ps for `square` at its default
+  3.2-sample edge** (`tr_frac=0.05`) **and 5.2e-2 ps for `cmos` at a 2.2-sample edge**
+  (`tr_s=35e-12`): the shorter the edge, the less the interpolator has to work with; a duty of 0.3
   of a 256-sample period reads 0.299999999982 where it read 0.30078 (77 samples of 256). The residual is
   5.7e-6 sample for an edge of 8 samples and 5.6e-3 at the 2-sample floor.
   A record whose edges were all on samples *and* rightly placed is the same bits
@@ -211,7 +214,7 @@ None of these moves a rendered sample.
   carriers. Before the `square` / `cmos` change the same comparison was 28 of 28 and 238 of
   238. `tests/test_byte_identity.py` pins the default path in the tree.
 - **Each effect is asserted against an analytic result or an independent method**, in
-  `wfmsynth.validate` (434 checks) and the test suite (2449 tests): a sub-chain against
+  `wfmsynth.validate` (434 checks) and the test suite (2460 tests): a sub-chain against
   the same chain rendered alone and coupled by hand (equal); Bessel-4 `filter` against the
   scope front end (equal); a product `combine` against `modulate` OOK (equal); the delay's
   error against the exact trigonometric interpolant; trigger instants against an independent
@@ -250,12 +253,12 @@ None of these moves a rendered sample.
   and `step` / `pulse` / `sawtooth`, whose single edge or flyback is rounded to a sample.
   Keep samples per UI whole, and take jitter from `timing`.
 - Python 3.9, the declared floor, was run on one machine only (macOS arm64, CPython 3.9.6),
-  not in CI. With numpy 2.0.2 and scipy 1.13.1: 2459 passed, 2 failed, both
+  not in CI. With numpy 2.0.2 and scipy 1.13.1: 2470 passed, 2 failed, both
   `test_the_demo_does_not_warn` (`i2c_bus.py`, `inductive_handover.py`), on spurious
   `matmul` floating-point warnings that numpy 2.0 raises with Accelerate inside `net.py`,
   which this release does not touch; `validate` passes. With the floor's numpy 1.21.6 and
   scipy 1.7.3 the suite cannot complete on that machine (numpy's own `linalg.solve` dies
-  with a bus error); the 13 test files this release's rulings added or re-pinned, 261
+  with a bus error); the 13 test files this release's rulings added or re-pinned, 272
   tests, pass there. No 3.10+ syntax or API was found in the diff against `main`.
 
 ## 0.45.0 — 2026-11-04

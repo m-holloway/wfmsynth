@@ -73,13 +73,30 @@ def test_an_edge_between_samples_is_at_its_own_time(cycles, k, bound):
 
 
 def test_on_a_64_gsa_grid_the_clock_no_longer_carries_a_sample_of_jitter():
-    """The figure the gap was reported with: 0.997 GHz at 64 GSa/s, 15.6 ps peak to peak."""
+    """The figure the gap was reported with: 0.997 GHz at 64 GSa/s, 15.6 ps peak to peak.
+    Here with a 9.6-sample edge (`tr_frac=0.15`, 150 ps); short edges are the next test."""
     g = Grid(fs=64e9, n=1 << 15)
     spp = 64e9 / 0.997e9
     for kind, level, kw in (("square", 0.0, dict(tr_frac=0.15)),
                             ("cmos", 1.65, dict(v_lo=0.0, v_hi=3.3, tr_s=150e-12))):
         x = Signal(seed=1, grid=g).carrier(kind, f_hz=0.997e9, **kw).waveform()
         assert _tie_pp(x, level, spp) / 64e9 * 1e12 < 1e-3          # ps
+
+
+def test_with_a_short_edge_the_residual_is_larger_and_still_a_thousandth_of_the_fault():
+    """The figure above is for a 9.6-sample edge. `square`'s DEFAULT `tr_frac=0.05` is 3.2
+    samples at this rate and a 35 ps CMOS edge is 2.2, where the interpolator has less to work
+    with: 0.011 ps and 0.052 ps peak to peak, against the 15.6 ps the same trains had."""
+    g = Grid(fs=64e9, n=1 << 15)
+    spp = 64e9 / 0.997e9
+    sq = Signal(seed=1, grid=g).carrier("square", f_hz=0.997e9).waveform()
+    cm = Signal(seed=1, grid=g).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=0.997e9,
+                                        tr_s=35e-12).waveform()
+    old = P._shape_edges(_legacy(1 << 15, 64e9, 0.997e9), 0.05 * spp)
+    ps = 1e12 / 64e9
+    assert 14.0 < _tie_pp(old, 0.0, spp) * ps < 16.5
+    assert 1e-3 < _tie_pp(sq, 0.0, spp) * ps < 2e-2
+    assert 1e-3 < _tie_pp(cm, 1.65, spp) * ps < 1e-1
 
 
 @pytest.mark.parametrize("duty", [0.3, 0.5, 0.123456])

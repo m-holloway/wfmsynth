@@ -987,7 +987,7 @@ two scope channels, 1 GBd at 64 GSa/s, the scope triggered from the clock. The t
 `sequence` (idle, preamble, payload); clock and data `use` one PLL, one supply (`gain(by=)`) and
 one scope (`trigger(on=)`); the data trace is longer (`delay`), a 133 MHz neighbour leaks onto
 it (`combine`), and the board's loss is one toleranced part shared by both lines
-(`ws.tol(..., group="board")`). The whole record is 1888 bytes of JSON and replays bit for bit.
+(`ws.tol(..., group="board")`). The whole record is 1902 bytes of JSON and replays bit for bit.
 
 The PLL is 8 ps rms. Triggered on the clock, the data edges are 6.3 ps wide in the preamble and
 14.1 ps in the payload. Every candidate cause is one named thing in the recipe, so each is
@@ -1121,7 +1121,9 @@ distortion. `reference="decided"` scores against decisions instead of the truth 
 once decisions fail; pass `sent` as well and it counts them. Its `"frequency"` and `"phase"`
 corrections are acquired blind before any decision is made (the carrier line in the 4th power
 of the symbols for QPSK and QAM): an offset within &plusmn;baud/8 is found at any phase, and a
-record it cannot lock to is refused, not measured.
+record it cannot lock to is refused, not measured. The estimate repeats every baud/4, which
+`["acquisition"]` states (`pull_in_hz`, `alias_spacing_hz`); with `sent` a wrong alias is
+detected and refused.
 [`examples/rf_measures.py`](../examples/rf_measures.py) has the table.
 
 ## Impairments, and the report of what they came to
