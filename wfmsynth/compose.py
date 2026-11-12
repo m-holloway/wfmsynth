@@ -2590,8 +2590,9 @@ class Signal:
               rrc (beta, span_ui=16, baud) | fir (taps) | sos (sos) | zpk (zeros, poles, gain) |
               integrate (tau_s) | differentiate (tau_s)
 
-        Causal by default, and a causal filter DELAYS: `filter_delays()` reports by how much,
-        so the time of an event placed upstream can be corrected. `zero_phase=True` is the
+        Causal by default, and a causal filter DELAYS: `filter_delays()` reports by how much
+        (a slow feature by its group delay, a fast edge by its step delay), so the time of an
+        event placed upstream can be corrected. `zero_phase=True` is the
         opt-in, recorded in the recipe, and keeps the stated magnitude. A design that is
         unstable or not resolved on the grid is refused here, on the line that wrote it.
         `scope`, `probe`, `ctle` and `ac_couple` stay the named ops for the instrument, the
@@ -2606,11 +2607,14 @@ class Signal:
         return self._add("filter", kind=kind, **params)
 
     def filter_delays(self):
-        """The group delay of every `filter` op in this chain, in order: a list of
-        `{"op": index, "kind", "zero_phase", "group_delay_s", "at_hz"}`. An event placed
-        before op `i` is delivered later by the sum of the delays at index > its own. Only
-        `filter` ops report here -- the named channel and instrument ops have delays of their
-        own, which this does not include. See `stages.describe_filter`."""
+        """The delay of every `filter` op in this chain, in order: a list of
+        `{"op": index, "kind", "zero_phase", "group_delay_s", "at_hz", "step_delay_s"}`.
+        `group_delay_s` is how much later a feature SLOW against the filter arrives (a ramp,
+        an envelope); `step_delay_s` how much later the midpoint of an edge FAST against it
+        does -- a different number, None for a filter that blocks DC. An event placed before
+        op `i` is delivered later by the sum, over the filters after it, of the one that
+        matches the edge that carried it. Only `filter` ops report here -- the named channel
+        and instrument ops have delays of their own. See `stages.describe_filter`."""
         from . import stages as ST
         if self.grid is None:
             raise ValueError("filter_delays: a delay in seconds needs the sample rate -- give "

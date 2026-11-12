@@ -637,3 +637,28 @@ def test_a_chain_without_a_trigger_never_reaches_this_module(monkeypatch):
     sig = Signal(seed=3, grid=g).carrier("nrz", n_ui=1024).lossy(loss_db=6.0).digitize(snr_db=30)
     x, ev = sig.realize()
     assert len(x) == 4096 and sig.stored_grid(x).n == 4096 and sig.roles() == ["noise/2"]
+
+
+def test_comparator_and_trigger_share_one_state_machine_and_state_their_instants():
+    """Both run `stages.schmitt`, so they commit to the SAME crossings; each reports its own
+    instant -- the comparator when the band's far edge was reached, the trigger the last
+    crossing of the level on the way there -- so the trigger's is never the later one."""
+    g = Grid(fs=1e6, n=50000)
+    src = lambda: Signal(seed=1, grid=g).carrier("sine", f_hz=200.0).rx_noise(rms=0.05)  # noqa: E731
+    level, hyst = 0.1, 0.3
+    _, ev = src().law("comparator", threshold=level, hysteresis=hyst).realize()
+    comp = [e for e in ev if e.kind == "transition"]
+    x = src().waveform()
+    j, t, rising = TRIG._crossings(x, level, hyst)
+    state, i = stages.schmitt(x, level + hyst / 2, level - hyst / 2)
+    assert len(comp) == len(t) == len(i) >= 15
+    assert [e.sample for e in comp] == list(i)                        # the same commits
+    assert [e.direction > 0 for e in comp] == list(rising)
+    lead = np.array([e.t_s for e in comp]) * g.fs - t                 # comparator minus trigger
+    print(f"{len(t)} transitions; the comparator's instant is {lead.min():.2f} .. "
+          f"{lead.max():.2f} samples after the trigger's")
+    assert np.all(lead > 0) and np.all(t <= i)
+    # a sample exactly ON a trip point has not crossed it, in either
+    flat = np.array([-1.0, 0.0, 0.0, 1.0, 0.0, -1.0])
+    assert list(stages.schmitt(flat, 0.0, 0.0)[1]) == [3, 5]
+    assert list(TRIG._crossings(flat, 0.0, 0.0)[2]) == [True, False]

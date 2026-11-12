@@ -79,6 +79,8 @@ import math
 
 import numpy as np
 
+from . import stages as ST
+
 CONDITIONS = ("edge", "width", "runt")
 SLOPES = ("rising", "falling", "either")
 JITTER_ROOM = 6.0        # sigmas of trigger jitter the arming leaves clear at both ends
@@ -201,19 +203,13 @@ def _crossings(x, level, hysteresis):
     between samples `j` and `j + 1` at fractional sample `t`.
 
     A crossing is committed once the waveform has travelled from one side of the band
-    `level -/+ hysteresis/2` to the other; its time is the LAST time it crossed `level`
-    itself on the way, linearly interpolated."""
-    n = len(x)
-    k = np.arange(n)
-    up, dn = level + 0.5 * hysteresis, level - 0.5 * hysteresis
-    cmd = np.where(x >= up, 1, np.where(x < dn, 0, -1))          # -1: inside the band, hold
-    last = np.maximum.accumulate(np.where(cmd >= 0, k, -1))
-    if last[-1] < 0:
-        return np.zeros(0, int), np.zeros(0), np.zeros(0, bool)
-    first = int(np.argmax(last >= 0))
-    state = cmd[np.maximum(last, first)]
-    i = np.flatnonzero(state[1:] != state[:-1]) + 1              # first sample in the new state
-    rising = state[i] == 1
+    `level -/+ hysteresis/2` to the other (`stages.schmitt`, the state machine
+    `law("comparator")` runs too); its time is the LAST time it crossed `level` itself on the
+    way, linearly interpolated -- where a scope puts t = 0, and earlier than the instant a
+    comparator with the same band reports, which is when the band's far edge was reached."""
+    k = np.arange(len(x))
+    state, i = ST.schmitt(x, level + 0.5 * hysteresis, level - 0.5 * hysteresis)
+    rising = state[i]
     below = x < level
     last_below = np.maximum.accumulate(np.where(below, k, -1))
     last_above = np.maximum.accumulate(np.where(~below, k, -1))

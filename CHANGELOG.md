@@ -59,7 +59,8 @@ The rule that decided what became an op and what did not is in
   `limiter`, `deadzone`, `rectify`, `quantize`, `comparator`, `diode`) and ten named linear
   filters (`butter`, `bessel`, `cheby1`, `elliptic`, `rrc`, `fir`, `sos`, `zpk`, `integrate`,
   `differentiate`), never callables. A comparator's transitions are events with the sub-sample
-  crossing time; `filter_delays()` reports each filter's group delay; `zero_phase=True` removes
+  crossing time; `filter_delays()` reports each filter's group delay and, for an edge fast
+  against the filter, its 50 % step delay (a different number); `zero_phase=True` removes
   the delay without squaring the response. Asking for a shape a named op owns is refused and
   names that op.
 - **A triggered acquisition** (#85, and BACKLOG #50). `trigger(pre_s=, post_s=, ...)` finds an

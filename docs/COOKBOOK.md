@@ -896,6 +896,8 @@ edges(noisy().law("comparator", hysteresis=0.3, v_lo=0.0, v_hi=3.3))  # -> 19
 slow = noisy().filter("butter", f_hz=5e3, order=2).law("comparator", v_lo=0.0, v_hi=3.3)
 edges(slow)                                                           # -> 19
 slow.filter_delays()[0]["group_delay_s"]                              # -> 4.5e-05: it also moved them
+# (group_delay_s is for a feature slow against the filter, as here; a FAST edge's midpoint
+#  arrives step_delay_s later, a different number that sits beside it)
 ```
 
 A comparator's output edge sits on a sample; the true crossing time is the event's `t_s`. Laws:

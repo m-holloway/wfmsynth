@@ -572,8 +572,10 @@ out.filter_delays()                                   # [{'op': 2, 'kind': 'butt
 
 `f_hz` is the -3 dB point for `butter` and `bessel` but the passband EDGE for `cheby1` and
 `elliptic`. Every filter takes `zero_phase=True` except `integrate`/`differentiate`.
-`filter_delays()` covers `filter` ops only; `scope`, `probe` and `lossy` have delays of their
-own. A chain holding `law`, `filter`, a join or `use` cannot be `canonical()`-sorted: its order
+`filter_delays()` gives each filter's `group_delay_s` (what a feature slow against the filter
+is delayed by) and `step_delay_s` (the midpoint of an edge fast against it: 22.1 against 31.8
+samples for one pole at 5 MHz and 1 GSa/s); correct an upstream event by the one that matches
+its edge. It covers `filter` ops only; `scope`, `probe` and `lossy` have delays of their own. A chain holding `law`, `filter`, a join or `use` cannot be `canonical()`-sorted: its order
 is its meaning.
 
 ### A triggered acquisition
@@ -596,6 +598,21 @@ after the chain has run. Nothing fires before `pre_s`, and it re-arms after
 `max(holdoff_s, pre_s + post_s)`. Too few firings is refused with the render length that would
 hold them. Put it after `acquire` to trigger at the acquisition rate. With `n_segments > 1` it
 must be the last op. Width and runt triggers fire on the pulse's TRAILING edge.
+
+An event of the long render that falls outside every window is no longer on the record and is
+DROPPED from the list; each trigger event's `params["dropped"]` says how many, counted over the
+whole record (the same number on every trigger event). To put a window AT a known instant,
+trigger on a step placed there:
+
+```python
+t0 = sig.event_list().events[0].t_s                   # the instant to look at
+win = sig.trigger(on=Signal().carrier("step", t_step_s=t0), pre_s=1e-9, post_s=3e-9)
+```
+
+`trigger(level=)` is a scope's word; `gate`, `switch` and `law("comparator")` call theirs
+`threshold=`, and each refusal names the other. Their defaults differ on purpose: a trigger
+with no level sets itself to 50 % of the record, a comparator compares against 0 V, and a
+gate or switch separates an enable's two states at 0.5 (right for 0/1 and for -1/+1).
 
 ### Toleranced parts
 
@@ -666,8 +683,9 @@ default (a bare number is the pass edge; stop is twice it, 80 dB). `fs_out` is w
 decimation only. `rf.evm` corrections, each returned in `removed`: `"timing"` (within half a
 symbol of `delay_s`), `"frequency"`, `"offset"`, `"gain"`, `"phase"`, `"equalizer"` (with
 `equalizer_taps=`). `skip=` drops symbols at each end, which lack their neighbours' tails.
-`rf.evm` applies the RRC matched filter itself; score symbols you already hold with
-`ws.iq.evm(received, sent)`.
+`rf.evm` is THE EVM of a record: it applies the RRC matched filter itself and returns percent, dB
+and a fraction. `ws.iq.evm(received, sent)` is only its last step, a fraction, for symbols you
+already hold.
 
 ```python
 gi = ws.Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)

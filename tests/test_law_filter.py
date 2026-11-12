@@ -423,3 +423,31 @@ def test_sections_with_no_settled_state_are_refused_when_they_render():
     assert np.abs(np.roots(near[0][3:])).max() < 1.0 and sum(near[0][3:]) == 0.0
     with pytest.raises(ValueError, match="no settled state"):
         ST.apply_filter(np.ones(16), FS, "sos", sos=near)
+
+
+def test_a_fast_edge_arrives_at_the_step_delay_and_a_slow_one_at_the_group_delay():
+    """The two delays a filter reports are for the two regimes, and each is the one measured:
+    a step's 50 % crossing against `step_delay_s`, a ramp's against `group_delay_s`."""
+    fs, n = 1e9, 20000
+
+    def crossing(y):                                    # fractional sample where y reaches 0.5
+        j = int(np.flatnonzero(y >= 0.5)[0])
+        return j - 1 + (0.5 - y[j - 1]) / (y[j] - y[j - 1])
+
+    step = (np.arange(n) >= 5000).astype(float)         # its midpoint is at 4999.5
+    ramp = np.clip((np.arange(n) - 2000) / 6000.0, 0.0, 1.0)
+    for kind, kw in (("butter", dict(order=1)), ("butter", dict(order=4)),
+                     ("bessel", dict(order=4))):
+        rep = ST.describe_filter(fs, kind, f_hz=5e6, **kw)
+        fast = crossing(ST.apply_filter(step, fs, kind, f_hz=5e6, **kw)) - 4999.5
+        slow = crossing(ST.apply_filter(ramp, fs, kind, f_hz=5e6, **kw)) - crossing(ramp)
+        print(f"{kind} {kw}: step moved {fast:.3f} (reported {rep['step_delay_s'] * fs:.3f}), "
+              f"ramp moved {slow:.3f} (reported {rep['group_delay_s'] * fs:.3f}) samples")
+        assert abs(fast - rep["step_delay_s"] * fs) < 1e-6
+        assert abs(slow - rep["group_delay_s"] * fs) < 1e-3
+    one = ST.describe_filter(fs, "butter", f_hz=5e6, order=1)
+    assert one["step_delay_s"] / one["group_delay_s"] == pytest.approx(np.log(2.0), rel=2e-3)
+    # no midpoint to speak of: a filter that blocks DC, an integrator; none at all: zero phase
+    assert ST.describe_filter(fs, "butter", f_hz=5e6, btype="high")["step_delay_s"] is None
+    assert ST.describe_filter(fs, "integrate")["step_delay_s"] is None
+    assert ST.describe_filter(fs, "butter", f_hz=5e6, zero_phase=True)["step_delay_s"] == 0.0

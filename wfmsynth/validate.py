@@ -2816,6 +2816,26 @@ check("a filter REPORTS its group delay, and adding it to an upstream event's ti
       f"filter_delays() reports {_zrep * 1e9:.4f} ns "
       f"(off by {abs(_zpost - _zpre - _zrep) * _zfs:.1e} of a sample)")
 
+# ... AND THAT IS THE SLOW-EDGE NUMBER. An edge FAST against the filter arrives at the filter's
+# own 50 % step delay, a different number, which it reports beside it. Both regimes, four designs.
+_zstep = (np.arange(_zn) >= 2000).astype(float)
+_zfast = []
+for _zk, _zkw in (("butter", dict(order=1)), ("butter", dict(order=4)), ("bessel", dict(order=4)),
+                  ("fir", dict(taps=[0.1, 0.2, 0.4, 0.2, 0.1]))):
+    _zkw = _zkw if _zk == "fir" else dict(f_hz=5e6, **_zkw)
+    _zc = (Signal(seed=1, grid=_zg).capture(values=_zstep, fs_hz=_zfs)
+           .filter(_zk, **_zkw).law("comparator", threshold=0.5))
+    _zd = _zc.filter_delays()[0]
+    _zfast.append((_zk, (_zc.event_list().events[0].t_s - 1999.5 / _zfs) * _zfs,
+                   _zd["step_delay_s"] * _zfs, _zd["group_delay_s"] * _zfs))
+check("a filter reports the delay of a FAST edge too: the 50 % point of its own step response, "
+      "which is not its group delay",
+      all(abs(m - s) < 1e-6 for _k, m, s, _g in _zfast)
+      and abs(_zfast[0][2] / _zfast[0][3] - np.log(2.0)) < 2e-3      # one pole: ln 2 of 1/(2 pi fc)
+      and abs(_zfast[1][1] - _zfast[1][3]) > 5.0,
+      "a step's midpoint moved / step_delay_s / group_delay_s, in samples: "
+      + "; ".join(f"{k} {m:.3f} / {s:.3f} / {g:.3f}" for k, m, s, g in _zfast))
+
 _zzp = _zmeas(kind="butter", f_hz=_zfc, order=5, zero_phase=True)[:-1]
 _zunit = (np.arange(_zn) >= _zn // 2).astype(float)
 _zzs = (Signal(seed=1, grid=_zg).capture(values=_zunit, fs_hz=_zfs)

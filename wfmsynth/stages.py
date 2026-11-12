@@ -252,19 +252,39 @@ def _diode(x, r, i_sat, a):
     return a * w - rs
 
 
+def schmitt(x, up, dn, initial=None):
+    """THE hysteresis state machine, for everything that commits to a crossing: the output
+    goes high when ``x > up``, low when ``x < dn``, and HOLDS in between (a sample exactly on
+    a trip point has not crossed it). Returns ``(state, i)``: the state at every sample, and
+    the index of the first sample in each new state.
+
+    `initial` is the state held before the input first commits: True / False, or None for
+    "whatever it commits to first", so the record does not open with a transition.
+
+    `law("comparator")` and `trigger` both run this and differ only in the INSTANT they
+    report for a transition, each stating its own: the comparator the time the input reached
+    the trip point it crossed (`up` or `dn`: when its output switches); the trigger the last
+    time the input crossed the level between them (where a scope puts t = 0)."""
+    n = len(x)
+    cmd = np.where(x > up, 1, np.where(x < dn, 0, -1))        # -1: inside the band, hold
+    last = np.maximum.accumulate(np.where(cmd >= 0, np.arange(n), -1))
+    if initial is None:
+        first = int(np.argmax(last >= 0))                     # 0 when it never commits: no edge
+        state = (cmd[np.maximum(last, first)] == 1)
+    else:
+        state = np.where(last >= 0, cmd[np.maximum(last, 0)], int(bool(initial))).astype(bool)
+    return state, np.flatnonzero(state[1:] != state[:-1]) + 1
+
+
 def _comparator(x, q, fs, events, placement):
     v_lo, v_hi = float(q["v_lo"]), float(q["v_hi"])
     up_at = q["threshold"] + 0.5 * q["hysteresis"]
     dn_at = q["threshold"] - 0.5 * q["hysteresis"]
-    n = len(x)
-    # 1 where the input sets the output high, 0 where it sets it low, -1 where it HOLDS
-    cmd = np.where(x > up_at, 1, np.where(x < dn_at, 0, -1))
     first = (q["initial"] == "hi") if q["initial"] is not None else bool(x[0] > q["threshold"])
-    last = np.maximum.accumulate(np.where(cmd >= 0, np.arange(n), -1))
-    state = np.where(last >= 0, cmd[np.maximum(last, 0)], int(first)).astype(bool)
+    state, changes = schmitt(x, up_at, dn_at, initial=first)
     if events is not None:
         from .events import Event
-        for i in np.flatnonzero(state[1:] != state[:-1]) + 1:
+        for i in changes:
             rising = bool(state[i])
             trip = up_at if rising else dn_at
             frac = (trip - x[i - 1]) / (x[i] - x[i - 1])     # where between the two samples
@@ -284,7 +304,9 @@ def apply_law(x, kind, fs=None, events=None, placement="law", **params):
     `events.Event(kind="transition")` whose `sample` is the first sample at the new level,
     `direction` is +1 rising / -1 falling, `params` carry the trip level crossed and the level
     switched to, and `t_s` (given `fs`) is the time the INPUT crossed the trip level, linearly
-    interpolated between the two samples either side. The output itself is an ideal step on the
+    interpolated between the two samples either side. With hysteresis that is the edge of the
+    band, not `threshold`: a `trigger` on the same input reports the crossing of its level
+    instead, which is earlier (`schmitt` states both). The output itself is an ideal step on the
     sample grid, so its edge is quantised to a sample and the event's `t_s` is not: read the
     time from the event. In a chain these arrive through `Signal.realize()` / `event_list()`.
     """
@@ -556,26 +578,57 @@ def _group_delay(d, w):
     return float(tau)
 
 
-def describe_filter(fs, kind, at_hz=None, grid_baud=None, **params):
-    """What a filter does to TIME: `{"kind", "zero_phase", "group_delay_s", "at_hz"}`.
+def _step_delay(d, gd):
+    """How much later the designed filter delivers the MIDPOINT of an instantaneous edge, in
+    samples: where its own step response first reaches half its final value, measured (not a
+    formula -- it depends on the whole response). `gd` is its group delay at DC, which sets
+    how long a step has to be run. None when the response never gets there."""
+    n = int(16 * max(gd, 4.0)) + 64
+    step = np.ones(n)
+    y = (_sig.sosfilt(d["sos"], step) if d["form"] == "sos" else _sig.lfilter(d["taps"], 1.0, step))
+    half = 0.5 * float(np.abs(_response(d, 0.0))[0]) * np.sign(_response(d, 0.0)[0].real)
+    over = np.flatnonzero(y / half >= 1.0) if half else np.zeros(0, int)
+    if not len(over):
+        return None
+    j = int(over[0])
+    below = y[j - 1] if j else 0.0
+    # the step sits half a sample before its first 1: between the last 0 and the first 1
+    return float(j - 1 + (half - below) / (y[j] - below) + 0.5)
 
-    `group_delay_s` is how much later the filter delivers a narrow-band feature at `at_hz` --
-    and, at 0 Hz for a low-pass, how much later it delivers an edge's midpoint. Add it to the
-    time of any event placed upstream of the filter. A group delay is a function of frequency,
-    so `at_hz` is always stated: by default 0 Hz where the filter passes DC, otherwise the
-    frequency where its gain peaks (the centre of a band-pass). Pass `at_hz=` to ask elsewhere.
-    Zero for a zero-phase filter and for `integrate`, by construction."""
+
+def describe_filter(fs, kind, at_hz=None, grid_baud=None, **params):
+    """What a filter does to TIME:
+    `{"kind", "zero_phase", "group_delay_s", "at_hz", "step_delay_s"}`.
+
+    `group_delay_s` is how much later the filter delivers a narrow-band feature at `at_hz`,
+    and -- at 0 Hz, for a filter that passes DC -- anything SLOW against the filter: a ramp,
+    an envelope, an edge several time constants long. A group delay is a function of
+    frequency, so `at_hz` is always stated: by default 0 Hz where the filter passes DC,
+    otherwise the frequency where its gain peaks (the centre of a band-pass). Pass `at_hz=`
+    to ask elsewhere.
+
+    `step_delay_s` is how much later it delivers the midpoint of an edge FAST against the
+    filter: the 50 % point of its own step response, measured. The two differ (a first-order
+    low-pass: 1/(2 pi fc) against ln(2) of that), so an upstream event's time is corrected by
+    the one that matches the edge that carried it; between the regimes the truth is between
+    them. None where a step's midpoint is not defined: a filter that blocks DC, `integrate`,
+    `differentiate`.
+
+    Both are zero for a zero-phase filter, by construction."""
     d = design_filter(fs, kind, grid_baud=grid_baud, **params)
     fs = float(fs)
     out = {"kind": kind, "zero_phase": d["zero_phase"]}
     if d["form"] == "integrate" or d["zero_phase"]:
-        return {**out, "group_delay_s": 0.0, "at_hz": 0.0 if at_hz is None else float(at_hz)}
+        return {**out, "group_delay_s": 0.0, "at_hz": 0.0 if at_hz is None else float(at_hz),
+                "step_delay_s": 0.0 if d["zero_phase"] else None}
+    w = np.linspace(0.0, np.pi, 4097)
+    mag = np.abs(_response(d, w))
+    passes_dc = mag[0] >= 0.5 * mag.max()
     if at_hz is None:
-        w = np.linspace(0.0, np.pi, 4097)
-        mag = np.abs(_response(d, w))
-        at_hz = 0.0 if mag[0] >= 0.5 * mag.max() else float(w[np.argmax(mag)] * fs / (2 * np.pi))
+        at_hz = 0.0 if passes_dc else float(w[np.argmax(mag)] * fs / (2 * np.pi))
+    step = _step_delay(d, _group_delay(d, 0.0)) if passes_dc else None
     return {**out, "group_delay_s": _group_delay(d, 2 * np.pi * float(at_hz) / fs) / fs,
-            "at_hz": float(at_hz)}
+            "at_hz": float(at_hz), "step_delay_s": None if step is None else step / fs}
 
 
 def _impulse_extent(sos):
