@@ -50,6 +50,10 @@ ACCEPTS = {
     # not at RF, so on an envelope it is exactly what it says: a filter about the centre
     # frequency -- the matched filter, a channel-select filter. tests/test_iq_domain.py.
     "filter": BOTH,
+    # the I/Q impairments (`wfmsynth/rf.py`) are DEFINED on an envelope -- two rails, a phase,
+    # a centre frequency -- and have no meaning on a real voltage. tests/test_iq_impairments.py.
+    "iq_imbalance": (IQ,), "iq_offset": (IQ,), "freq_offset": (IQ,), "phase_noise": (IQ,),
+    "awgn": (IQ,), "spur": (IQ,), "dac": (IQ,),
 }
 
 # op -> the domain it converts the record TO. Absent means the op leaves the domain alone.

@@ -325,7 +325,10 @@ def test_every_op_is_real_only_unless_it_is_listed():
     """The default that makes the design safe, as an inventory: this fails when an op is
     opted in, so the opting-in is a decision somebody wrote down next to a test of it."""
     both = {op for op in C._EXEC if "iq" in DOMAIN.accepts(op)}
-    assert both == {"capture", "iq", "upconvert", "filter"}
+    assert both == {"capture", "iq", "upconvert", "filter",
+                    # defined on an envelope and nowhere else; tests/test_iq_impairments.py
+                    "iq_imbalance", "iq_offset", "freq_offset", "phase_noise", "awgn", "spur",
+                    "dac"}
     assert set(DOMAIN.ACCEPTS) | set(DOMAIN.EMITS) <= set(C._EXEC)
 
 

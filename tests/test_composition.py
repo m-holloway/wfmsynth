@@ -510,7 +510,11 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                # `trigger` SHORTENS the record to its window, so this sweep's same-length
                # comparison does not apply. tests/test_trigger.py moves every knob and checks
                # each one moves the samples and the recipe's content address.
-               "trigger"}
+               "trigger",
+               # the I/Q impairments act on a complex record, which this sweep's real carrier
+               # chain is not. tests/test_iq_impairments.py moves every knob of each and checks
+               # the samples and the digest move, and measures each effect on the record.
+               "iq_imbalance", "iq_offset", "freq_offset", "phase_noise", "awgn", "spur", "dac"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

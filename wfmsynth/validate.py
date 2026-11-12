@@ -3649,6 +3649,130 @@ check("the capture digest covers the samples, not the file: two formats give one
       _iqf_p.ops[0]["sha256"] == _iqf_q.ops[0]["sha256"] == _iqf_ws.capture.digest(_iqf_x)
       and np.array_equal(Signal.from_recipe(_iqf_r).waveform(), _iqf_x),
       f"sha256 {_iqf_p.ops[0]['sha256'][:12]}... for big-endian float64 and SigMF cf64_le alike")
+# ============================================================ I/Q impairments (GitHub #83)
+# Seven ops on a complex baseband record, one effect each (wfmsynth/rf.py). Each is measured
+# back off the record by a method that shares no code with the op. The probe is a complex tone
+# exactly on an FFT bin, so a bin IS a tone and no window sits between the record and the
+# number. Where the measurement is an estimate, its standard error is stated and printed.
+print("\nI/Q impairments (GitHub #83)")
+import json as _rjson                                                       # noqa: E402
+from wfmsynth import Grid as _RGrid, Signal as _RSig, Streams as _RSt       # noqa: E402
+from wfmsynth import iq as _RIQ, rf as _RRF                                 # noqa: E402
+_rfs, _rn, _rk = 400e6, 1 << 16, 1001
+_rg = _RGrid(fs=_rfs, baud=25e6, n=_rn, domain="iq", fc_hz=2.4e9)
+
+
+def _rtone(grid=_rg):
+    return _RSig(seed=3, grid=grid).capture(
+        values=np.exp(2j * np.pi * _rk * np.arange(grid.n) / grid.n))
+
+
+def _rbins(y):
+    return np.fft.fft(y) / len(y)
+
+
+def _rrefused(build):
+    try:
+        build().waveform()
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+_rY = _rbins(_rtone().iq_imbalance(gain_db=0.5, phase_deg=3.0).waveform())
+_rimg = 20 * np.log10(abs(_rY[_rk]) / abs(_rY[-_rk]))
+_rgl, _rc = 10 ** (0.5 / 20), np.cos(np.deg2rad(3.0))
+_rwant = 10 * np.log10((1 + 2 * _rgl * _rc + _rgl ** 2) / (1 - 2 * _rgl * _rc + _rgl ** 2))
+_rY = _rbins(_rtone().iq_imbalance(**_RRF.imbalance_for(30)).waveform())
+_rimg30 = 20 * np.log10(abs(_rY[_rk]) / abs(_rY[-_rk]))
+check("iq_imbalance: the image tone sits where the closed-form rejection ratio puts it, and "
+      "imbalance_for(30) makes a 30 dB image",
+      abs(_rimg - _rwant) < 1e-9 and abs(_RRF.image_rejection_db(0.5, 3.0) - _rwant) < 1e-9
+      and abs(_rimg30 - 30) < 1e-9,
+      f"0.5 dB / 3 deg: image {_rimg:.4f} dB down, closed form {_rwant:.4f} dB; "
+      f"imbalance_for(30) -> {_rimg30:.6f} dB")
+
+_rcfo = _rtone().freq_offset(f_hz=12345.0, drift_hz_per_s=5e6)
+_rph = np.unwrap(np.angle(_rcfo.waveform() * np.conj(_rtone().waveform())))
+_rc2, _rc1, _ = np.polyfit(np.arange(_rn) / _rfs, _rph, 2)
+_rdc = _rtone().iq_offset(i=0.02, q=-0.01).waveform().mean()
+check("freq_offset is the slope and curvature of the phase, lo_phase() is that phase, and "
+      "iq_offset is the record's mean",
+      abs(_rc1 / (2 * np.pi) - 12345.0) < 1e-6 and abs(_rc2 / np.pi - 5e6) < 1e-2
+      and np.abs(_rph - _rcfo.lo_phase()).max() < 1e-12 and abs(_rdc - (0.02 - 0.01j)) < 1e-15,
+      f"asked 12345 Hz + 5e6 Hz/s: fitted {_rc1 / (2 * np.pi):.6f} Hz, {_rc2 / np.pi:.4f} Hz/s; "
+      f"mean {_rdc:.5f}")
+
+_rprof = [(1e4, -70), (1e5, -90), (1e6, -120), (2e7, -130)]
+_rg2 = _RGrid(fs=_rfs, baud=25e6, n=1 << 18, domain="iq", fc_hz=2.4e9)
+_rth = np.angle(_rtone(_rg2).phase_noise(_rprof).waveform() * np.conj(_rtone(_rg2).waveform()))
+_rf = np.fft.rfftfreq(_rg2.n, 1 / _rfs)[1:]
+_rpsd = 2 * np.abs(np.fft.rfft(_rth)[1:]) ** 2 / (_rg2.n * _rfs)          # one-sided, rad^2/Hz
+_rl = 2 * 10 ** (_RRF.profile_dbc_hz(_rf, _rprof) / 10)
+_rbands = []
+for _rlo, _rhi in ((1e4, 1e5), (1e5, 1e6), (1e6, 2e7)):
+    _rm = (_rf >= _rlo) & (_rf <= _rhi)
+    _rbands.append((int(_rm.sum()), float(np.mean(_rpsd[_rm] / _rl[_rm]))))
+check("phase_noise: a periodogram of the phase read off the record is 2*L(f) in every decade, "
+      "within 4 standard errors (1/sqrt(bins) each), and empty outside the stated offsets",
+      all(abs(r - 1) < 4 / np.sqrt(m) for m, r in _rbands)
+      and _rpsd[_rl == 0].max() < 1e-25 * _rpsd[_rl > 0].max(),
+      "; ".join(f"{m} bins {10 * np.log10(r):+.2f} dB (s.e. {10 * np.log10(1 + 1 / np.sqrt(m)):.2f})"
+                for m, r in _rbands)
+      + f"; this record's rms {_rth.std():.4f} rad, the profile integrates to "
+        f"{_RRF.phase_rms_rad(_rprof):.4f}")
+
+_rP = np.abs(_rbins(_rtone().awgn(snr_db=20, bw_hz=_rfs / 16).waveform())) ** 2
+_rin = np.abs(np.fft.fftfreq(_rn, 1 / _rfs)) <= _rfs / 32
+_rin[_rk] = False
+_rsnr = 10 * np.log10(_rP[_rk] / _rP[_rin].sum())
+_rq = _RSig(seed=5, grid=_rg).iq("qpsk", prbs=15, prbs_phase=100).awgn(es_n0_db=15,
+                                                                      ref_power=1.0)
+_rsent, _ = _rq.transmitted()
+_resn0 = -20 * np.log10(_RIQ.evm(_RIQ.demodulate(_rq.waveform(), _rg)[10:-10], _rsent[10:-10]))
+_rse = 10 * np.log10(1 + 1 / np.sqrt(len(_rsent) - 20))
+check("awgn hits the stated ratio: SNR in the stated bandwidth read off a tone's spectrum, "
+      "Es/N0 read off the error vector of matched-filtered QPSK, each within 4 standard errors",
+      abs(_rsnr - 20) < 10 * np.log10(1 + 4 / np.sqrt(_rin.sum())) and abs(_resn0 - 15) < 4 * _rse,
+      f"asked 20 dB in fs/16: {_rsnr:.3f} dB over {int(_rin.sum())} bins; asked Es/N0 15 dB: "
+      f"{_resn0:.3f} dB over {len(_rsent) - 20} symbols (s.e. {_rse:.3f} dB)")
+check("awgn refuses an SNR with no bandwidth, and two statements of one noise density",
+      "ambiguous without bw_hz=" in _rrefused(lambda: _rtone().awgn(snr_db=20))
+      and "exactly one of" in _rrefused(lambda: _rtone().awgn(snr_db=20, bw_hz=1e6, es_n0_db=3)))
+
+_rY = _rbins(_rtone().spur(f_hz=-3000 * _rfs / _rn, dbc=-45.0).waveform())
+_rsp = 20 * np.log10(abs(_rY[-3000]) / abs(_rY[_rk]))
+check("spur: its bin against the carrier's is the stated dBc", abs(_rsp + 45.0) < 1e-9,
+      f"asked -45 dBc, measured {_rsp:.6f}")
+
+_rdq = []
+for _rb in (8, 10, 12, 14):
+    _rP = np.abs(_rbins(_rtone().dac(bits=_rb).waveform())) ** 2
+    _rdq.append((_rb, 10 * np.log10(_rP[_rk] / np.delete(_rP, _rk).sum())))
+_rclip = _rtone().dac(bits=12, headroom_pct=100 / 1.3 - 100, clip="hard").rf_report()[0]
+_rasin = 2 * np.arccos(1 / 1.3) / np.pi
+check("dac: a full-scale tone's quantisation noise is 6.02 N + 1.76 dB down (bound 0.15 dB), "
+      "and one driven 30 % over clips for the arcsine law's share of the time, once asked to",
+      all(abs(q - (6.02 * b + 1.76)) < 0.15 for b, q in _rdq)
+      and abs(_rclip["clipped_fraction"] - _rasin) < 2e-3
+      and "Pass clip='hard'" in _rrefused(lambda: _rtone().dac(bits=12, headroom_pct=-20)),
+      "; ".join(f"{b} bits {q:.2f} dB ({q - (6.02 * b + 1.76):+.2f})" for b, q in _rdq)
+      + f"; clipped {_rclip['clipped_fraction']:.4f}, arcsine law {_rasin:.4f}")
+
+_rall = (_RSig(seed=5, grid=_RGrid(fs=400e6, baud=25e6, n=1 << 14, domain="iq", fc_hz=2.4e9))
+         .iq("qam16", prbs=15).dac(bits=10, headroom_pct=5)
+         .iq_imbalance(gain_db=0.3, phase_deg=2.0).iq_offset(i=0.01)
+         .phase_noise(profile=[(1e5, -80), (1e6, -100), (1e7, -120)])
+         .freq_offset(f_hz=12e3).spur(f_hz=40e6, dbc=-45).awgn(es_n0_db=20))
+_rre = _RSig.from_recipe(_rjson.loads(_rjson.dumps(_rall.recipe())))
+_ra, _rbb = _rall.waveform(), _rall.contrast("phase_noise/4")
+check("the whole impaired chain replays bit-identically from its recipe, and its oscillator "
+      "and its noise are separate roles",
+      np.array_equal(_rre.waveform(), _ra) and _rre.sha256() == _rall.sha256()
+      and _rall.roles() == ["phase_noise/4", "awgn/7"] and np.abs(_ra - _rbb).max() > 1e-3
+      and np.array_equal(_rall.contrast("awgn/7", seed=5), _ra),
+      f"roles {_rall.roles()}; re-rolling the oscillator moved the record by "
+      f"{np.abs(_ra - _rbb).max():.3f}")
 
 print()
 if fails:

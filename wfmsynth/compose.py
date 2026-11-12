@@ -50,6 +50,8 @@ from . import trigger as TRIG
 from .grid import Grid
 from .streams import Streams
 from .stages import LAW_KEYS as _LAW_KEYS, FILTER_KEYS as _FILTER_KEYS
+from . import rf as RF
+from .rf import AWGN_KEYS as _AWGN_KEYS, DAC_KEYS as _DAC_KEYS
 
 
 # --------------------------------------------------------------- op executors
@@ -1330,6 +1332,38 @@ def _op_use(x, p, streams, grid, idx):
     return CH.use(x, p["name"], streams)
 
 
+# --------------------------------------------------------------- I/Q impairments (wfmsynth.rf)
+def _op_iq_imbalance(x, p, streams, grid, idx):
+    return RF.iq_imbalance(x, **{k: p[k] for k in ("gain_db", "phase_deg") if k in p})
+
+
+def _op_iq_offset(x, p, streams, grid, idx):
+    return RF.iq_offset(x, **{k: p[k] for k in ("i", "q") if k in p})
+
+
+def _op_freq_offset(x, p, streams, grid, idx):
+    return RF.freq_offset(x, grid.fs, **{k: p[k] for k in ("f_hz", "drift_hz_per_s", "fold_db")
+                                         if k in p})
+
+
+def _op_phase_noise(x, p, streams, grid, idx):
+    return RF.phase_noise(x, grid.fs, p.get("profile"), rng=streams.role(f"phase_noise/{idx}"))
+
+
+def _op_awgn(x, p, streams, grid, idx):
+    return RF.awgn(x, grid.fs, grid.baud, rng=streams.role(f"awgn/{idx}"),
+                   **{k: p[k] for k in _AWGN_KEYS if k in p})
+
+
+def _op_spur(x, p, streams, grid, idx):
+    return RF.spur(x, grid.fs, **{k: p[k] for k in ("f_hz", "dbc", "phase_rad", "ref_power")
+                                  if k in p})
+
+
+def _op_dac(x, p, streams, grid, idx):
+    return RF.dac(x, **{k: p[k] for k in _DAC_KEYS if k in p})
+
+
 _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "capture": _op_capture, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
@@ -1353,7 +1387,10 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "combine": _op_combine, "gain": _op_gain, "offset": _op_offset, "gate": _op_gate,
          "delay": _op_delay,
          "sequence": _op_sequence, "switch": _op_switch, "use": _op_use,
-         "trigger": _op_trigger}
+         "trigger": _op_trigger,
+         "iq_imbalance": _op_iq_imbalance, "iq_offset": _op_iq_offset,
+         "freq_offset": _op_freq_offset, "phase_noise": _op_phase_noise, "awgn": _op_awgn,
+         "spur": _op_spur, "dac": _op_dac}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1393,6 +1430,10 @@ OP_KIND = {
     "sequence": "source", "switch": "source",
     "use": "general",
     "trigger": "instrument",
+    # an I/Q impairment belongs to whichever end of the link it is written at -- imbalance
+    # before a frequency offset is the transmitter's, after it the receiver's -- so, like
+    # `law` and `filter`, where it sits is the meaning
+    **{op: "general" for op in RF.OPS},
 }
 # `use` is whatever the named chain is -- a source, a timing source, a supply -- so, like the
 # general stages, where it sits is its meaning and it has no home kind.
@@ -1518,7 +1559,9 @@ _LEAD_SKIP = {"carrier", "symbols", "coded", "nonlinearity", "crosstalk", "cross
               "pass_fet",
               # every `law` is a per-sample curve; the comparator's one bit of state is set by
               # the guard's own samples, which is the history a running signal would have had
-              "law"}
+              "law",
+              # per-sample on the envelope (two rails mixed, a constant added) or stochastic
+              "iq_imbalance", "iq_offset", "phase_noise"}
 # Ops with REAL memory but no probeable impulse response, whose extent is known in closed form.
 #
 # This category exists because `open_drain` fits none of the other three and putting it in the wrong
@@ -1616,6 +1659,15 @@ _LEAD_REJECT = {
                "not the extended render's length and a second window cannot be sliced out of "
                "it. It does not need one: a trigger past the turn-on leaves the turn-on in the "
                "part it discards",
+    "freq_offset": "the offset's phase and its drift are counted from the record's start, "
+                   "which a lead-in moves",
+    "spur": "the tone's phase is counted from the record's start, which a lead-in moves, and "
+            "its level is relative to the power of the record it is given",
+    "awgn": "its noise level is relative to the power of the record it is given, and a guard "
+            "is part of that record -- state ref_power= and the level no longer depends on it, "
+            "but the classification is per op name",
+    "dac": "its full scale is taken from the record it is given, and a guard is part of that "
+           "record",
     "acquire": "it resamples the record onto a second rate, so the guard's sample count is not the "
                "record's and the window cannot be sliced back out",
     "events": "it places a localized mechanism at an absolute position in the record, and a lead-in "
@@ -2167,6 +2219,114 @@ class Signal:
                              "capture has no transmitted symbols to report.")
         a = _iq_symbols(src, self.grid)
         return a, IQ.symbol_times(len(a), self.grid)
+
+    # ---- I/Q impairments: one op per effect, conventions in `wfmsynth/rf.py` ----
+    def iq_imbalance(self, **params):
+        """The modulator's two rails do not match: the Q rail has gain `gain_db` and sits
+        `phase_deg` off quadrature, relative to the I rail. Every component at +f gains an
+        IMAGE at -f.
+
+            .iq_imbalance(gain_db=0.5, phase_deg=3.0)
+            .iq_imbalance(**ws.rf.imbalance_for(30))     # the gain error with a 30 dB image
+
+        `rf_report()` gives the image rejection the two numbers come to."""
+        return self._add("iq_imbalance", **params)
+
+    def iq_offset(self, **params):
+        """A DC term on each rail, `i` and `q` in the record's units: at RF, the carrier
+        leaking through.
+
+            .iq_offset(i=0.02, q=-0.01)
+
+        `rf_report()` gives the leak in dBc. For a leak STATED in dBc: `spur(f_hz=0, dbc=)`."""
+        return self._add("iq_offset", **params)
+
+    def freq_offset(self, **params):
+        """The two ends' oscillators disagree: the envelope turns at `f_hz`, drifting by
+        `drift_hz_per_s`. Positive moves the spectrum up.
+
+            .freq_offset(f_hz=12e3)
+            .freq_offset(f_hz=12e3, drift_hz_per_s=5e6)
+
+        An offset that would wrap content past Nyquist is refused (`fold_db`, default -40, is
+        how much may). `lo_phase()` is the phase it added at every sample."""
+        return self._add("freq_offset", **params)
+
+    def phase_noise(self, profile, **params):
+        """The oscillator's PHASE NOISE: the envelope is rotated by a Gaussian phase whose
+        spectrum is `profile`, a list of (offset in Hz, L(f) in dBc/Hz) points joined by
+        straight lines on a log-frequency axis.
+
+            .phase_noise(profile=[(1e4, -80), (1e5, -100), (1e6, -120)])
+
+        Nothing is drawn outside the stated offsets, and an offset the record cannot resolve
+        (below 1/duration, above Nyquist) is refused. Its role is `phase_noise/<op index>`;
+        `lo_phase()` is the phase at every sample and `rf_report()` its rms."""
+        from .stages import plain
+        return self._add("phase_noise", profile=plain(profile), **params)
+
+    def awgn(self, **params):
+        """White Gaussian noise on both rails, at ONE stated ratio to the signal:
+
+            .awgn(es_n0_db=20)                    # per symbol, against the grid's baud
+            .awgn(ebn0_db=8)                      # per bit; bits/symbol from the iq source
+            .awgn(snr_db=25, bw_hz=30e6)          # in a stated bandwidth -- bw_hz is required
+
+        The signal power is the record's mean |x|**2 where the op sits, or `ref_power=` to
+        state it (a burst's idle time, or noise already added, would otherwise count). Role
+        `awgn/<op index>`. `rf_report()` gives the reference power and noise density used."""
+        if params.get("ebn0_db") is not None and "bits_per_symbol" not in params:
+            from . import iq as IQ
+            con = next((o.get("constellation") for o in self.ops if o["op"] == "iq"), None)
+            if con is not None:
+                params["bits_per_symbol"] = IQ.bits_per_symbol(con)
+        return self._add("awgn", **params)
+
+    def spur(self, **params):
+        """One unwanted tone, `f_hz` from the centre frequency (negative is below) and `dbc`
+        relative to the signal's power.
+
+            .spur(f_hz=3.1e6, dbc=-45)
+
+        params: `phase_rad` (at t = 0), `ref_power` (as for `awgn`)."""
+        return self._add("spur", **params)
+
+    def dac(self, bits, **params):
+        """The transmit converter: each rail rounded onto 2**`bits` codes and limited to its
+        full scale.
+
+            .dac(bits=12)                         # full scale at the record's rail peak
+            .dac(bits=12, headroom_pct=10)        # 10 % above it
+            .dac(bits=8, headroom_pct=-30, clip="hard")     # driven 30 % into clipping
+            .dac(bits=12, full_scale=2.0)         # or state the range
+
+        A record beyond full scale is refused unless `clip="hard"`. `rf_report()` gives the
+        crest factor, back-off, LSB, clipped fraction and the quantisation SNR."""
+        return self._add("dac", bits=bits, **params)
+
+    def rf_report(self):
+        """What each I/Q impairment op came to on THIS record: one dict per op, in chain
+        order, ``{"op": index, "name": op name, ...}`` with
+
+            iq_imbalance  image_rejection_db
+            iq_offset     leak_dbc
+            freq_offset   f_start_hz, f_end_hz
+            phase_noise   rms_rad (the profile's), realised_rms_rad (this draw's)
+            awgn          ref_power, n0 (per Hz), noise_power, snr_db (over the whole record
+                          band), es_n0_db
+            spur          ref_power, amplitude
+            dac           full_scale, lsb, rail_peak, crest_factor_db (envelope peak over mean
+                          power), backoff_db, clipped_fraction, sqnr_db (signal over the
+                          uniform-step noise of both rails)
+
+        Powers are measured on the record as it reaches the op."""
+        return RF.report(self)
+
+    def lo_phase(self, streams=None):
+        """The oscillator's phase at every sample, in rad: what `freq_offset` and
+        `phase_noise` multiplied the envelope by, summed over those ops. The ground truth for
+        a carrier-recovery loop."""
+        return RF.lo_phase(self, streams)
 
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
@@ -3085,9 +3245,9 @@ class Signal:
         doms = DOMAIN.trace(ops, grid)
         TRIG.check_chain(ops)
         for i, op in enumerate(ops):
-            if op["op"] in DOMAIN.EMITS:
+            if op["op"] in DOMAIN.EMITS or op["op"] in RF.RATE_AWARE:
                 # a mixer needs the rate the record is at NOW, which after an `acquire` or a
-                # resample is not the synthesis grid's
+                # resample is not the synthesis grid's; so does anything stated in Hz on I/Q
                 x = _EXEC[op["op"]](x, op, st, _grid_now(ops[:i], grid, x), i)
             elif op["op"] == "trigger":
                 now = _grid_now(ops[:i], grid, x)         # after an `acquire`, its rate
@@ -3193,6 +3353,8 @@ class Signal:
                 out.append(f"probe/{i}")
             elif op["op"] == "timing" and (op.get("rj_ps") or op.get("phase_noise")):
                 out.append(f"timing/{i}")
+            elif op["op"] in ("phase_noise", "awgn"):
+                out.append(f"{op['op']}/{i}")
         return out + SUB.roles(self) + TOL.roles(self.ops)
 
     def summary(self):

@@ -37,6 +37,7 @@ DEMOS = [
     "inductive_handover.py",
     "law_and_filter.py",
     "sequence_and_switch.py",
+    "iq_impairments.py",
     "iq_passband.py",
     "joins.py",
     "iq_recordings.py",

@@ -319,10 +319,8 @@ def _carrier_phase(n, fc_hz, fs, phase_rad):
     return 2.0 * np.pi * fc_hz * (np.arange(n) / fs) + phase_rad
 
 
-def folded_db(x, fc_hz, fs):
-    """How much of an envelope's power lies where up-conversion to `fc_hz` would fold it, in dB
-    relative to its total: outside ``|f| < min(fc_hz, fs/2 - fc_hz)``. Content beyond +that
-    passes Nyquist; content beyond -that crosses DC and lands on its own mirror image.
+def outside_db(x, room_hz, fs):
+    """How much of an envelope's power lies at ``|f| >= room_hz``, in dB relative to its total.
 
     Measured through a Hann window: the record's two ends are where the capture stops, not
     signal, and a rectangular window would report their step as wideband power (-36 dB for a
@@ -333,8 +331,16 @@ def folded_db(x, fc_hz, fs):
     if tot == 0.0:
         return -np.inf
     f = np.fft.fftfreq(len(X), 1.0 / fs)
-    out = float(X[np.abs(f) >= min(fc_hz, 0.5 * fs - fc_hz)].sum())
+    out = float(X[np.abs(f) >= room_hz].sum())
     return 10 * np.log10(out / tot) if out > 0 else -np.inf
+
+
+def folded_db(x, fc_hz, fs):
+    """How much of an envelope's power lies where up-conversion to `fc_hz` would fold it, in dB
+    relative to its total: outside ``|f| < min(fc_hz, fs/2 - fc_hz)``. Content beyond +that
+    passes Nyquist; content beyond -that crosses DC and lands on its own mirror image.
+    `outside_db` is the measurement."""
+    return outside_db(x, min(fc_hz, 0.5 * fs - fc_hz), fs)
 
 
 def upconvert(x, fc_hz, fs, phase_rad=0.0, fold_db=FOLD_DB):
