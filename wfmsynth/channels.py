@@ -122,6 +122,11 @@ def _uses(ops):
             yield from _uses(spec["ops"])
 
 
+# ops that act on a waveform and, as the FIRST op of a chain, are a source of their own (complex
+# noise, an unmodulated carrier). Under `shared` such a chain stays the stage it always was.
+_ALSO_SOURCES = ("awgn", "spur")
+
+
 class Channels:
     """Several named chains rendered as one record. See the module docstring.
 
@@ -153,12 +158,18 @@ class Channels:
         self._check_references()
         for name in self.names:
             if not self.is_signal(name):
+                first = self.chains[name][0]
+                used = self.chains[first["name"]][0]["op"] if first["op"] == "use" else None
                 raise ValueError(
                     f"Channels: channel {name!r} starts with "
-                    f"`{self.chains[name][0]['op']}`, which acts on a waveform and has none. "
-                    f"A channel starts with a source (carrier, symbols, coded, capture, iq) "
-                    f"or with use(<a chain that does>); a chain meant to be applied to "
-                    f"others belongs under `shared`.")
+                    f"`{first['op']}`, which acts on a waveform and has none. "
+                    f"A channel starts with a source (carrier, symbols, coded, capture, iq, "
+                    f"ofdm, laser) or with use(<a chain that does>); a chain meant to be "
+                    f"applied to others belongs under `shared`."
+                    + (f" The shared chain {first['name']!r} starts with `{used}`, which "
+                       f"under `shared` is a stage: it adds to whoever uses it. For the "
+                       f"noise or tone itself as a source, list {first['name']!r} among the "
+                       f"channels." if used in _ALSO_SOURCES else ""))
         for name in self.names:                 # refuse the wrong domain where it is written
             flat = self._flat(name)
             DOMAIN.trace(flat, DOMAIN.grid_for(flat, self.grid))
@@ -199,6 +210,8 @@ class Channels:
         first = self.chains[name][0]
         if first["op"] == "use":
             return self.is_signal(first["name"])
+        if first["op"] in _ALSO_SOURCES:        # no waveform under it: a channel is the noise
+            return name in self.names           # or tone itself, a shared one adds it
         return op_kind(first["op"]) == "source" or first["op"] == "net"
 
     def _flat(self, name):

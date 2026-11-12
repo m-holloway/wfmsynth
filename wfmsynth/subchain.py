@@ -527,9 +527,19 @@ def _short(v):
     r = repr(v)
     if isinstance(v, float) and len(r) > 8:
         return f"{v:.6g}"        # 500000000.0, 3.0000000000000004e-09: six figures read better
+    if isinstance(v, (list, tuple)) and 0 < len(v) <= 6 and all(
+            isinstance(e, (int, float)) and not isinstance(e, bool) for e in v):
+        flat = ", ".join(_short(e) for e in v)                 # two levels, a band's edges
+        flat = f"[{flat}]" if isinstance(v, list) else f"({flat}{',' if len(v) == 1 else ''})"
+        if len(flat) <= 48:
+            return flat
     if len(r) <= 48:
         return r
     if isinstance(v, dict):
+        if all(isinstance(e, (str, int, float)) for e in v.values()):
+            flat = "{" + ", ".join(f"{k}={_short(e)}" for k, e in v.items()) + "}"
+            if len(flat) <= 64:          # a dwell spec, a low-pass: few stated numbers
+                return flat
         return "{" + ", ".join(str(k) for k in v) + "}"
     if hasattr(v, "__len__") and not isinstance(v, str):
         return f"[{len(v)} values]"

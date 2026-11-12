@@ -5399,6 +5399,22 @@ check("a ws.tol handed to a recipe that converts its numbers is refused by name 
       f"{_pmsaid[4][:76]}...; ring(by=tol(0, tol_abs=0.2 nm)): dip at samples {_pmdips} of "
       f"4096 on units 0..2, role {_pmby.roles()}")
 
+_pmshared = _sws.Channels(
+    {"tx": _sws.recipes.multitone(domain="iq", **_pmplan),
+     "rx": _sws.recipes.multipath(Signal().use("tx"), [0.0, _pmtau], [1.0, 0.4j])},
+    seed=1, grid=_ofmg)
+_pmdirect = _sws.recipes.multipath(_pmcomb, [0.0, _pmtau], [1.0, 0.4j]).waveform()
+_pmnamed = float(np.abs(_pmshared.waveforms()["rx"] - _pmdirect).max())
+_pmreal = _qrefusal(lambda: _sws.Channels(
+    {"v": Signal().use("src").gain(by=0.4j)},
+    shared={"src": Signal().carrier("sine", f_hz=1e6)}, seed=1, grid=_ofmg).waveforms())
+check("a path's COMPLEX gain when the transmitter is a named chain: multipath(Signal()"
+      ".use('tx'), gains=[1, 0.4j]) in a Channels record is the record built from the "
+      "transmitter directly (the comb, a row of spur ops, being a channel of its own), and "
+      "the same gain on a named VOLTAGE is refused when it renders",
+      _pmnamed < 1e-12 and "complex and the record is a real voltage" in _pmreal,
+      f"max |named - direct| = {_pmnamed:.1e}; on a voltage: {_pmreal[:60]}...")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

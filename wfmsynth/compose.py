@@ -3068,7 +3068,11 @@ class Signal:
         if pair is not None:
             if not all(np.isfinite(pair)):
                 raise ValueError(f"gain: by={by!r} is not a finite number.")
-            if self.ops and DOMAIN.trace(self.ops, self.grid)[-1][0] not in DOMAIN.COMPLEX:
+            # a chain not yet on a record whose ops do not say (it starts with `use`) cannot
+            # know; `joins.gain` refuses a voltage when it renders
+            known = self.grid is not None or DOMAIN.needs(self.ops) is not None
+            if self.ops and known and \
+                    DOMAIN.trace(self.ops, self.grid)[-1][0] not in DOMAIN.COMPLEX:
                 raise ValueError(
                     f"gain: by={by!r} is complex and the record is a real voltage here, which "
                     f"has no phase to turn. A complex gain acts on an I/Q record or an optical "
@@ -4116,6 +4120,8 @@ class Signal:
         ('shape', 'optical'), ('channel', 'optical'), ('instrument', 'real')]`` from `eo` to
         `photodetect`. The last pair's domain is what `waveform()` returns."""
         kinds = [op_kind(o["op"]) for o in self.ops]
+        if self.ops and self.ops[0]["op"] in ("awgn", "spur"):
+            kinds[0] = "source"               # with no signal under it, it is one
         if not domains:
             return kinds
         return [(k, d) for k, (d, _) in zip(kinds, DOMAIN.trace(self.ops, self.grid))]

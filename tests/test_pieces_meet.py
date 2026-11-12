@@ -175,3 +175,71 @@ def test_a_recipe_argument_that_reaches_its_op_untouched_takes_a_tolerance():
     seen = ring.photodetect(shot=False)
     dips = {int(np.argmin(seen.unit(k).waveform())) for k in range(3)}
     assert len(dips) == 3
+
+
+# ---- used together, as an agent would: what the last round of use found
+def test_a_path_gain_may_be_complex_when_the_transmitter_is_a_named_chain():
+    """`multipath(Signal().use("tx"), gains=[..., 0.4j])` in a `Channels` record: a chain that
+    starts with `use` cannot know its domain when it is written, so the builder no longer
+    calls it a voltage. The record is the one built from the transmitter directly."""
+    shared = Signal().ofdm(**OFDM)
+    rec = ws.Channels({"rx": R.multipath(Signal().use("tx"), [0.0, 350e-9], [1.0, 0.4j])},
+                      shared={"tx": shared}, seed=1, grid=G)
+    direct = R.multipath(tx(), [0.0, 350e-9], [1.0, 0.4j]).waveform()
+    got = rec.waveforms()["rx"]
+    assert np.max(np.abs(got - direct)) < 1e-12 * np.max(np.abs(direct))
+    assert np.max(np.abs(got - tx().waveform())) > 0.1          # and the path is there
+
+
+def test_a_complex_gain_on_a_named_voltage_is_still_refused_when_it_renders():
+    rec = ws.Channels({"v": Signal().use("src").gain(by=0.4j)},
+                      shared={"src": Signal().carrier("sine", f_hz=1e6)}, seed=1, grid=G)
+    with pytest.raises(ValueError, match="complex and the record is a real voltage"):
+        rec.waveforms()
+    with pytest.raises(ValueError, match="complex and the record is a real voltage"):
+        Signal().carrier("sine", f_hz=1e6).gain(by=0.4j)        # its own ops say: at once
+
+
+def test_a_first_awgn_or_spur_is_reported_as_the_source_it_is():
+    tones = R.multitone(-4e6, 4e6, 9, domain="iq", sig=Signal(seed=1, grid=G))
+    assert tones.stage_kinds(domains=True)[:2] == [("source", "iq"), ("general", "iq")]
+    fade = Signal().awgn(snr_db=0, bw_hz=1e3, ref_power=1.0).filter("doppler", f_hz=500.0)
+    assert fade.stage_kinds() == ["source", "general"]
+    assert tx().awgn(snr_db=20, bw_hz=1e6).stage_kinds() == ["source", "general"]
+
+
+def test_a_recipe_handed_a_word_it_does_not_take_says_which_recipe_and_what_it_takes():
+    with pytest.raises(TypeError, match=r"^hum\(\) got an unexpected keyword argument 'sig'"
+                                        r".*It takes hum\(f_hz, amp"):
+        R.hum(50.0, 0.02, sig=Signal(seed=1, grid=G))
+
+
+def test_summary_shows_a_dwell_spec_not_only_its_keys():
+    sig = Signal(seed=1, grid=Grid(fs=1e6, n=1 << 12)).carrier(
+        "states", dwell={"dist": "lognormal", "median_s": 1e-4, "sigma": 1.0})
+    assert "dwell={dist='lognormal', median_s=0.0001, sigma=1.0}" in sig.summary()
+
+
+def test_a_chain_that_starts_with_spur_or_awgn_is_a_channel_and_a_stage_when_shared():
+    """A first `spur` or `awgn` has no waveform under it, so as a CHANNEL it is the tone or
+    the noise itself and other channels may `use` it; under `shared` it stays the stage it
+    was (it adds to whoever uses it), and using that as a source says which to do."""
+    comb = lambda: R.multitone(-4e6, 4e6, 9, domain="iq")
+    rec = ws.Channels({"tx": comb(),
+                       "rx": R.multipath(Signal().use("tx"), [0.0, 350e-9], [1.0, 0.4j])},
+                      seed=1, grid=G)
+    w = rec.waveforms()
+    alone = R.multitone(-4e6, 4e6, 9, domain="iq", sig=Signal(seed=1, grid=G))
+    assert np.array_equal(w["tx"], alone.waveform())
+    direct = R.multipath(alone, [0.0, 350e-9], [1.0, 0.4j]).waveform()
+    assert np.max(np.abs(w["rx"] - direct)) < 1e-12
+    with pytest.raises(ValueError, match="under `shared` is a stage.*among the channels"):
+        ws.Channels({"rx": Signal().use("tx")}, shared={"tx": comb()}, seed=1, grid=G)
+    spurred = ws.Channels({"a": tx_sub().use("tone")},
+                          shared={"tone": Signal().spur(f_hz=3e6, dbc=-20)}, seed=1, grid=G)
+    lone = tx().spur(f_hz=3e6, dbc=-20).waveform()
+    assert np.array_equal(spurred.waveforms()["a"], lone)       # the stage, as before
+
+
+def tx_sub():
+    return Signal().ofdm(**OFDM)

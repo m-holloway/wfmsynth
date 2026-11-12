@@ -121,7 +121,12 @@ def _numbers(where="write the chain out -- summary() of what this returns shows 
 
         @functools.wraps(fn)
         def checked(*args, **kwargs):
-            for name, v in names.bind(*args, **kwargs).arguments.items():
+            try:
+                bound = names.bind(*args, **kwargs)
+            except TypeError as e:           # say WHICH function, and what it does take
+                raise TypeError(f"{fn.__name__}() {e}. It takes "
+                                f"{fn.__name__}{names}.") from None
+            for name, v in bound.arguments.items():
                 held = list(v.values()) if isinstance(v, dict) else v
                 if name not in passes and (TOL.is_toleranced(v) or (
                         isinstance(held, (list, tuple))
