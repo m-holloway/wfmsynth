@@ -710,11 +710,10 @@ def _op_trigger(x, p, streams, grid, idx, sink=None, event_scale=1.0):
     kw = {k: p[k] for k in ("pre_s", "post_s", "condition", "level", "slope", "hysteresis",
                             "width_s", "runt_level", "holdoff_s", "jitter_s", "n_segments",
                             "average") if k in p}
-    # THE SEAM for a trigger on another channel (#78): the condition is looked for on `on`,
-    # which is `x` today. A sub-chain parameter resolved here through `subchain.signal` (the
-    # one-line form in that module's docstring, with n=len(x)) and passed as `on` is the
-    # whole change; `trigger.apply(on=)` is already tested at the function level.
-    return TRIG.apply(x, grid.fs, on=None, rng=streams.role(f"trigger/{idx}"), events=sink,
+    # the condition is looked for on `on` when it is given -- the scope's trigger input is
+    # another channel -- and the window is cut out of `x` either way
+    on = SUB.signal(p, "on", streams, grid, idx, n=len(x)) if p.get("on") is not None else None
+    return TRIG.apply(x, grid.fs, on=on, rng=streams.role(f"trigger/{idx}"), events=sink,
                       placement=f"trigger/{idx}", event_scale=event_scale, **kw)
 
 
@@ -3099,7 +3098,12 @@ class Signal:
                 width_s=[min, max] for "width"; runt_level for "runt";
                 holdoff_s; jitter_s (rms trigger jitter, role `trigger/<i>`);
                 n_segments (windows laid end to end: `x.reshape(n_segments, -1)`);
-                average (triggers averaged into each window).
+                average (triggers averaged into each window);
+                on (a sub-chain: the waveform the condition is looked for ON when the trigger
+                input is another channel -- `on=clock` cuts this record where the clock
+                fires. In a `Channels` record, a shared stage holding
+                `trigger(on=Signal().use("clk"), ...)` gives every channel that uses it the
+                same windows).
 
         Refused, with the render length that would do: no trigger found, or too few for
         `n_segments * average`. After an `acquire` it triggers on the acquired record, as a
@@ -3233,7 +3237,8 @@ class Signal:
             plan = self.lead_plan()
         return self._run(streams, _extended=True, _plan=plan), plan
 
-    def _run(self, streams=None, collect_events=False, _extended=False, _plan=None, _x=None):
+    def _run(self, streams=None, collect_events=False, _extended=False, _plan=None, _x=None,
+             _events=()):
         from .events import EventList
         if streams is not None and _plan is None:
             self = TOL.redrawn(self, streams)     # a re-rolled unit/* role is a sibling record
@@ -3243,7 +3248,9 @@ class Signal:
         grid = self.grid if plan is None else plan.grid
         win = None if plan is None else plan.window
         x = _x                                  # a shared chain applied by `use` starts from one
-        sink = [] if collect_events else None
+        # `_events` are those already on the waveform `_x` arrives with, so that an op here
+        # which re-times events (a `trigger`) moves or drops them with its own
+        sink = list(_events) if collect_events else None
         if collect_events:
             st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
         doms = DOMAIN.trace(ops, grid)
@@ -3357,6 +3364,8 @@ class Signal:
                 out.append(f"probe/{i}")
             elif op["op"] == "timing" and (op.get("rj_ps") or op.get("phase_noise")):
                 out.append(f"timing/{i}")
+            elif op["op"] in ("rx_noise", "timebase"):
+                out.append(f"{op['op']}/{i}")
             elif op["op"] in ("phase_noise", "awgn"):
                 out.append(f"{op['op']}/{i}")
         return out + SUB.roles(self) + TOL.roles(self.ops)

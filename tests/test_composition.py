@@ -529,3 +529,21 @@ def test_moving_a_knob_and_rerolling_a_seed_are_different_kinds_of_change():
     seeded = s.reflect(**base).waveform()
     assert _rel_rms(a, knob) > 0.05
     assert _rel_rms(a, knob) > 0.5 * _rel_rms(a, seeded) or _rel_rms(a, seeded) < 1e-12
+
+
+def test_roles_lists_the_receiver_noise_and_the_timebase_jitter_an_op_draws():
+    """`rx_noise` and `timebase` always drew from their own roles; `roles()` now says so, and
+    re-rolling one moves exactly that: a fresh 20 mV noise record differs from the old by
+    sqrt(2) x 20 mV, and the timebase re-roll leaves the noise-only difference at zero."""
+    import numpy as np
+    from wfmsynth import Grid, Signal
+    g = Grid(fs=64e9, baud=4e9, n=1 << 14)
+    sig = (Signal(seed=5, grid=g).carrier("nrz", n_ui=1024).rx_noise(rms=0.02)
+           .timebase(rms_ps=1.0))
+    assert sig.roles() == ["rx_noise/1", "timebase/2"]
+    x = sig.waveform()
+    quiet = Signal(seed=5, grid=g).carrier("nrz", n_ui=1024).rx_noise(rms=0.02)
+    d = quiet.contrast("rx_noise/1") - quiet.waveform()
+    assert abs(d.std() / (np.sqrt(2) * 0.02) - 1) < 0.05, d.std()   # 16384 samples: 0.6 %
+    assert not np.array_equal(sig.contrast("timebase/2"), x)
+    assert np.array_equal(sig.contrast("jitter/0"), x)              # a role nothing draws from

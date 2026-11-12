@@ -382,6 +382,7 @@ def use(x, name, streams):
                 f"-- crosstalk(aggressor=Signal().use({name!r})).")
         y, placed = r.signal(name)
         y = y.copy()                         # the one render is shared by every chain using it
+        placed = None if placed is None else placed.events
     else:
         if x is None:
             raise ValueError(
@@ -390,10 +391,14 @@ def use(x, name, streams):
                 f"before it.")
         sig = rec._signal(name)
         if sink is None:
-            y, placed = sig._run(r.view(name), _x=x), None
-        else:
-            y, placed = sig._run(r.view(name), collect_events=True, _x=x)
+            return sig._run(r.view(name), _x=x)
+        # the stage sees the events already on the waveform it is handed, so a `trigger` in
+        # it re-times them onto its windows (and drops the rest) along with the samples
+        before = {id(e) for e in sink}
+        y, placed = sig._run(r.view(name), collect_events=True, _x=x, _events=sink)
+        sink[:] = [e for e in placed.events if id(e) in before]
+        placed = [e for e in placed.events if id(e) not in before]
     if sink is not None and placed is not None:
         sink.extend(dataclasses.replace(e, at=name + ("/" + e.at if e.at else ""))
-                    for e in placed.events)
+                    for e in placed)
     return y

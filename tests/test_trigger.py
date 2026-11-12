@@ -257,7 +257,7 @@ def test_rerolling_trigger_jitter_keeps_the_same_edges():
     g = Grid(fs=FS, n=60000)
     sig = (Signal(seed=2, grid=g).carrier("sine", f_hz=F0).rx_noise(rms=0.01)
            .trigger(pre_s=100e-9, post_s=200e-9, level=0.0, jitter_s=3e-9, n_segments=8))
-    assert sig.roles() == ["trigger/2"]
+    assert sig.roles() == ["rx_noise/1", "trigger/2"]
     a = sig.event_list()
     b = sig.event_list(Streams(sig.seed).reroll("trigger/2"))
     assert [e.params["timestamp_s"] for e in a] == [e.params["timestamp_s"] for e in b]

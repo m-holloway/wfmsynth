@@ -463,3 +463,108 @@ def test_one_trigger_shared_by_two_channels_fires_with_one_jitter():
     assert np.allclose(x["b"], 0.5 * x["a"], atol=1e-12)    # the same window of the same tone
     y = rec.contrast("scope/trigger/0")
     assert all(not np.array_equal(y[name], x[name]) for name in x)
+
+
+# ---------------------------------------------------------------- the seams with other pieces
+def test_a_trigger_taken_from_another_channel_cuts_both_at_the_same_instants():
+    """`trigger(on=<clock>)` is the scope's trigger input being another channel. Checked
+    against slices of the untriggered record taken at the CLOCK's own crossings, found
+    independently by `trigger.find`; and against triggering each channel on itself, which
+    lands the data somewhere else."""
+    lanes = {"clk_line": Signal().carrier("square", f_hz=G.baud / 2).lossy(loss_db=2.0,
+                                                                         loss_at_ghz=5.0),
+             "tx": Signal().carrier("nrz", n_ui=N_UI, seed=5).lossy(loss_db=4.0, loss_at_ghz=5.0)}
+    pre, post = 0.5 / G.baud, 3.5 / G.baud
+
+    def record(**trig):
+        return ws.Channels(
+            {"clk": Signal().use("clk_line").use("scope"),
+             "data": Signal().use("tx").events("glitch", count=40).use("scope")},
+            shared=dict(lanes, scope=Signal().trigger(pre_s=pre, post_s=post, level=0.0,
+                                                      n_segments=6, holdoff_s=40 / G.baud,
+                                                      **trig)), seed=3, grid=G)
+
+    rec = record(on=Signal().use("clk_line"))
+    x, events = rec.realize()
+    stamps = {name: [e.params["timestamp_s"] for e in events[name] if e.kind == "trigger"]
+              for name in x}
+    assert len(stamps["clk"]) == 6 and stamps["clk"] == stamps["data"]
+
+    plain = ws.Channels({"clk": Signal().use("clk_line"),
+                         "data": Signal().use("tx").events("glitch", count=40)},
+                        shared=lanes, seed=3, grid=G)
+    long, placed = plain.realize()
+    from wfmsynth import trigger as TRIG
+    fires = TRIG.find(long["clk"], G.fs, level=0.0)["t_s"]
+    assert set(np.round(np.array(stamps["clk"]) * G.fs, 6)) <= set(np.round(fires * G.fs, 6))
+    n_win = round((pre + post) * G.fs)
+    starts = [e.params["start"] for e in events["data"] if e.kind == "trigger"]
+    for name in x:                                # every window is the long render, unresampled
+        for k, a in enumerate(starts):
+            assert np.array_equal(x[name][k * n_win:(k + 1) * n_win], long[name][a:a + n_win])
+    # the clock's crossing sits at pre_s in BOTH channels' windows, to half a sample
+    for e in events["data"]:
+        if e.kind == "trigger":
+            assert abs(e.t_s - e.params["segment"] * n_win / G.fs - pre) * G.fs <= 0.5
+
+    # the glitches placed before the scope are re-timed into the windows or dropped with them
+    glitches = [e for e in placed["data"] if e.kind == "glitch"]
+    kept = [e for e in events["data"] if e.kind == "glitch"]
+    inside = [e for e in glitches if any(a <= e.sample < a + n_win for a in starts)]
+    assert len(glitches) > len(kept) == len(inside) > 0
+    assert all(0 <= e.sample < len(x["data"]) for e in events["data"])
+    dropped = {e.params["dropped"] for e in events["data"] if e.kind == "trigger"}
+    assert dropped == {len(glitches) - len(kept)}
+
+    own = record().waveforms()                    # each channel triggering on itself
+    assert np.array_equal(own["clk"], x["clk"]) and not np.array_equal(own["data"], x["data"])
+    again = ws.Channels.from_recipe(json.loads(rec.to_json()))
+    assert again.sha256() == rec.sha256()
+    assert all(np.array_equal(again.waveforms()[k], x[k]) for k in x)
+
+
+def test_a_single_signal_triggers_on_a_sub_chain_too():
+    clock = Signal(grid=G).carrier("square", f_hz=G.baud / 4)
+    sig = (Signal(seed=1, grid=G).carrier("nrz", n_ui=N_UI, seed=2)
+           .trigger(on=clock, pre_s=1 / G.baud, post_s=3 / G.baud, level=0.0))
+    x, ev = sig.realize()
+    (e,) = [e for e in ev if e.kind == "trigger"]
+    long = Signal(seed=1, grid=G).carrier("nrz", n_ui=N_UI, seed=2).waveform()
+    assert np.array_equal(x, long[e.params["start"]:e.params["start"] + len(x)])
+    edge = e.params["timestamp_s"] * G.fs         # the clock's first rising edge after pre_s
+    assert abs(edge - 4 * SPB) < 1.0, edge        # one clock period = 4 UI
+    assert "on  [trigger/1/on]" in sig.summary()
+    with pytest.raises(ValueError, match="never resampled"):
+        short = Signal(grid=Grid(fs=G.fs, baud=G.baud, n=G.n // 2)).carrier("sine", f_hz=1e9)
+        (Signal(seed=1, grid=G).carrier("nrz", n_ui=N_UI)
+         .trigger(on={"from": short.recipe()}, pre_s=1e-10, post_s=1e-10).waveform())
+
+
+def test_crosstalk_matrix_couples_the_real_neighbour_channels():
+    """`crosstalk_matrix(aggressors=[...])` with each aggressor a NAMED lane of the record:
+    the victim holds exactly the coupling of the waveforms the record returns for those lanes
+    (`physics.crosstalk_matrix` on the arrays), and re-rolling one neighbour's jitter moves
+    that neighbour and the victim and nothing else."""
+    from wfmsynth import physics as P
+
+    def tx(seed):
+        return Signal().carrier("nrz", n_ui=N_UI, seed=seed, jitter=dict(rj=0.02))
+
+    couplings = [0.08, 0.03]
+    rec = ws.Channels(
+        {"lane0": Signal().use("tx0").crosstalk_matrix(
+            couplings=couplings, aggressors=[Signal().use("tx1"), Signal().use("tx2")]),
+         "lane1": Signal().use("tx1"), "lane2": Signal().use("tx2")},
+        shared={"tx0": tx(1), "tx1": tx(2), "tx2": tx(3)}, seed=4, grid=G)
+    x = rec.waveforms()
+    want = P.crosstalk_matrix(rec.waveform("tx0"), G, couplings,
+                              aggressors=[x["lane1"], x["lane2"]])
+    assert np.array_equal(x["lane0"], want)
+    coupled = x["lane0"] - rec.waveform("tx0")
+    assert np.abs(coupled).max() > 0.01           # and it is there
+    y = rec.contrast("tx2/jitter/0")
+    assert np.array_equal(y["lane1"], x["lane1"])
+    assert not np.array_equal(y["lane2"], x["lane2"])
+    assert not np.array_equal(y["lane0"], x["lane0"])
+    assert np.array_equal(y["lane0"], P.crosstalk_matrix(
+        rec.waveform("tx0"), G, couplings, aggressors=[x["lane1"], y["lane2"]]))

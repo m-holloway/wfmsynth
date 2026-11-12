@@ -51,6 +51,11 @@ Averaging jittered triggers does smear an edge, as on a real scope.
 (`x.reshape(n_segments, -1)`), each with its timestamp. `average=n` averages n consecutive
 triggers into each window.
 
+`on=<a sub-chain>` is the trigger INPUT when it is not this record: the condition is found on
+that waveform and the windows are cut out of this one, which is how a scope triggers channel 2
+from channel 1. Two channels of a `Channels` record that go through one shared stage holding
+`trigger(on=Signal().use("clk"), ...)` are therefore cut at the SAME instants.
+
 GROUND TRUTH. `Signal.realize()` returns one `Event(kind="trigger")` per trigger:
   sample, t_s          where the crossing sits in the delivered record (t_s is sub-sample)
   direction            +1 / -1, the edge that fired
@@ -181,7 +186,7 @@ def check_chain(ops):
                          f"{at[0]}. One record has one trigger; a second would cut a window "
                          f"out of a window. Use n_segments= for several windows.")
     i = at[0]
-    check({k: v for k, v in ops[i].items() if k != "op" and not k.startswith("_")})
+    check({k: v for k, v in ops[i].items() if k not in ("op", "on") and not k.startswith("_")})
     if int(ops[i].get("n_segments", 1)) > 1 and i != len(ops) - 1:
         raise ValueError(
             f"{ops[i + 1]['op']} (op {i + 1}): the record is {ops[i]['n_segments']} separate "

@@ -78,7 +78,7 @@ OP_KEYS = {
     "tia": frozenset({"bw_hz", "gain", "thermal_rms"}),
     "timebase": frozenset({"rms_ps"}),
     "timing": frozenset({"phase_noise", "pj", "rj_ps", "ssc", "wander"}),
-    "trigger": frozenset({"average", "condition", "holdoff_s", "hysteresis", "jitter_s", "level", "n_segments", "op", "post_s", "pre_s", "runt_level", "slope", "width_s"}),
+    "trigger": frozenset({"average", "condition", "holdoff_s", "hysteresis", "jitter_s", "level", "n_segments", "on", "op", "post_s", "pre_s", "runt_level", "slope", "width_s"}),
     "tx_ffe": frozenset({"pre", "spb", "taps"}),
     "upconvert": frozenset({"fc_hz", "fold_db", "phase_rad"}),
     "use": frozenset({"name"}),

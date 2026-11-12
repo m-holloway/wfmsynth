@@ -241,7 +241,9 @@ def test_roles_reach_inside_and_contrast_rerolls_one_segment_only():
     s = Signal(seed=3, grid=G).sequence([{"chain": lane(), "t_s": T_A}, {"chain": lane()}])
     roles = s.roles()
     assert roles == ["sequence/0/segments/0/chain/jitter/0",
-                     "sequence/0/segments/1/chain/jitter/0"]
+                     "sequence/0/segments/0/chain/rx_noise/2",
+                     "sequence/0/segments/1/chain/jitter/0",
+                     "sequence/0/segments/1/chain/rx_noise/2"]
     y, c = s.waveform(), s.contrast("sequence/0/segments/1/chain/jitter/0")
     assert np.array_equal(c[:N_A], y[:N_A])
     assert not np.array_equal(c[N_A:], y[N_A:])
@@ -461,7 +463,7 @@ def test_switch_parameters_move_the_samples_and_roles_reach_inside():
         assert other.sha256() != base.sha256()
         assert not np.array_equal(other.waveform(), base.waveform())
     s = Signal(seed=3, grid=G).switch(select=gate, inputs=[tone(), lane()])
-    assert s.roles() == ["switch/0/inputs/1/jitter/0"]
+    assert s.roles() == ["switch/0/inputs/1/jitter/0", "switch/0/inputs/1/rx_noise/2"]
     y, c = s.waveform(), s.contrast("switch/0/inputs/1/jitter/0")
     on = gate.waveform() > 0.0
     assert np.array_equal(c[~on], y[~on]) and not np.array_equal(c[on], y[on])
