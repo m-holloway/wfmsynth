@@ -1884,15 +1884,24 @@ def _stored_rate(ops, fs, n):
     return fs, n
 
 
+# The ops that are stated in Hz or seconds, or render a sub-chain beside the record, and so run
+# on the grid the record is on NOW (`_grid_now`) rather than the one the chain started on. The
+# general stages and the I/Q impairments; the named link and instrument ops are placed before
+# an acquisition and keep the synthesis grid.
+_RATE_NOW = RF.RATE_AWARE + ("filter", "law", "delay", "gate", "gain", "offset", "combine")
+
+
 def _grid_now(ops, grid, x, dom, fc):
     """The grid describing the record `x` after `ops`: its rate and length as they are at that
     point, not as the chain started, in the domain and about the centre (`dom`, `fc`) the
     chain has reached there."""
     if grid is None:
         raise ValueError("upconvert/downconvert need a sample rate: Signal(grid=Grid(fs=...))")
-    fs, _ = _stored_rate(ops, float(grid.fs), int(grid.n))
+    fs, n = _stored_rate(ops, float(grid.fs), int(grid.n))
+    if fs == grid.fs:
+        fs = grid.fs                         # untouched: the number the chain was given
     import dataclasses
-    return dataclasses.replace(grid, fs=fs, n=len(x), domain=dom, fc_hz=fc)
+    return dataclasses.replace(grid, fs=fs, n=n if x is None else len(x), domain=dom, fc_hz=fc)
 
 
 @dataclass
@@ -1956,6 +1965,11 @@ class Signal:
         DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
         TRIG.check_chain(self.ops + [new])
         self.ops.append(new); return self
+
+    def _rate_at(self, i):
+        """The sample rate the record is at when op `i` runs: the grid's, unless an op before
+        it stored or decimated the record (`acquire`, `downconvert(fs_out=)`)."""
+        return _stored_rate(self.ops[:i], self.grid.fs, int(self.grid.n))[0]
 
     def unit(self, seed):
         """The same design as ANOTHER UNIT: every toleranced parameter (`ws.tol`, `ws.corners`)
@@ -2455,7 +2469,8 @@ class Signal:
         if self.grid is None:
             ST.check_filter(kind, **params)
         else:
-            ST.design_filter(self.grid.fs, kind, grid_baud=self.grid.baud, **params)
+            ST.design_filter(self._rate_at(len(self.ops)), kind, grid_baud=self.grid.baud,
+                             **params)
         return self._add("filter", kind=kind, **params)
 
     def filter_delays(self):
@@ -2468,7 +2483,7 @@ class Signal:
         if self.grid is None:
             raise ValueError("filter_delays: a delay in seconds needs the sample rate -- give "
                              "the Signal a grid (Grid(fs=...)).")
-        return [{"op": i, **ST.describe_filter(self.grid.fs, grid_baud=self.grid.baud,
+        return [{"op": i, **ST.describe_filter(self._rate_at(i), grid_baud=self.grid.baud,
                                                **{k: o[k] for k in _FILTER_KEYS if k in o})}
                 for i, o in enumerate(self.ops) if o["op"] == "filter"]
 
@@ -2566,7 +2581,8 @@ class Signal:
         if self.grid is None:
             raise ValueError("delay_errors: the error is stated against the sample rate -- "
                              "give the Signal a grid (Grid(fs=...)).")
-        return [{"op": i, **JN.describe_delay(self.grid.fs, o.get("max_rate", JN.DELAY_MAX_RATE))}
+        return [{"op": i, **JN.describe_delay(self._rate_at(i),
+                                              o.get("max_rate", JN.DELAY_MAX_RATE))}
                 for i, o in enumerate(self.ops) if o["op"] == "delay"]
 
     def tx_ffe(self, taps, pre=1, **params):
@@ -3272,19 +3288,25 @@ class Signal:
                 was = doms[i - 1]
             elif was is None:
                 was = (DOMAIN.of(grid), getattr(grid, "fc_hz", None))
-            if op["op"] in DOMAIN.EMITS or op["op"] in RF.RATE_AWARE:
-                # a mixer needs the rate the record is at NOW, which after an `acquire` or a
-                # resample is not the synthesis grid's; so does anything stated in Hz on I/Q
-                x = _EXEC[op["op"]](x, op, st, _grid_now(ops[:i], grid, x, *was), i)
-            elif op["op"] == "trigger":
-                now = _grid_now(ops[:i], grid, x, *was)   # after an `acquire`, its rate
+            name = op["op"]
+            if name in DOMAIN.EMITS or name in _RATE_NOW or name == "trigger":
+                # the rate the record is at NOW, which after an `acquire` or a decimating
+                # `downconvert` is not the synthesis grid's: what a mixer needs, and anything
+                # stated in Hz or seconds (a corner, a delay, a crossing's time)
+                now = (None if grid is None and name in _RATE_NOW
+                       else _grid_now(ops[:i], grid, x, *was))
+            if name == "trigger":
                 x = _op_trigger(x, op, st, now, i, sink=sink, event_scale=now.fs / grid.fs)
-            elif collect_events and op["op"] in ("events", "law"):
-                x = _EXEC[op["op"]](x, op, st, grid, i, sink=sink)
-            elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
-                x = _EXEC[op["op"]](x, op, st, grid, i, win=win)   # range the vertical to the window
+            elif name == "law":
+                x = _op_law(x, op, st, now, i, sink=sink)
+            elif name in DOMAIN.EMITS or name in _RATE_NOW:
+                x = _EXEC[name](x, op, st, now, i)
+            elif collect_events and name == "events":
+                x = _op_events(x, op, st, grid, i, sink=sink)
+            elif win is not None and name in _LEAD_WINDOW_RANGED:
+                x = _EXEC[name](x, op, st, grid, i, win=win)   # range the vertical to the window
             else:
-                x = _EXEC[op["op"]](x, op, st, grid, i)
+                x = _EXEC[name](x, op, st, grid, i)
             if doms[i][0] == DOMAIN.IQ and not np.iscomplexobj(x):
                 raise ValueError(f"{op['op']} (op {i}) returned a real array for a complex "
                                  f"baseband record: it dropped the imaginary part. An op "
