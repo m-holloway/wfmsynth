@@ -90,11 +90,17 @@ def test_a_stated_domain_that_contradicts_the_source_is_refused_by_name():
 
 
 def test_a_real_records_grid_recipe_and_digest_are_what_they_were():
-    """The recipe of a real record has never carried a domain. These digests are of recipes
-    with the version field removed, taken on the commit before this change."""
+    """The recipe of a real record has never carried a domain. The digest below is of the
+    recipe with its version field removed, taken on the commit before this change (the JSON
+    is the same bytes on every host; the samples are compared in-process instead, since their
+    last bits follow the host's LAPACK)."""
     g = Grid(fs=64e9, baud=16e9, n=4096)
-    sig = (Signal(seed=3, grid=g).carrier("nrz", n_ui=1024, pattern="prbs7")
-           .lossy(loss_db=6.0, loss_at_ghz=8.0).rx_noise(rms=0.01))
+
+    def chain(grid):
+        return (Signal(seed=3, grid=grid).carrier("nrz", n_ui=1024, pattern="prbs7")
+                .lossy(loss_db=6.0, loss_at_ghz=8.0).rx_noise(rms=0.01))
+
+    sig = chain(g)
     r = sig.recipe()
     assert r["grid"] == {"fs": 64e9, "baud": 16e9, "n": 4096, "v_full": 1.0}
     assert sig.grid.domain == "real" and isinstance(sig.grid.domain, str)
@@ -105,7 +111,10 @@ def test_a_real_records_grid_recipe_and_digest_are_what_they_were():
     import hashlib
     assert hashlib.sha256(json.dumps(r, sort_keys=True).encode()).hexdigest()[:16] == \
         "48115f1befec60a3"
-    assert hashlib.sha256(sig.waveform().tobytes()).hexdigest()[:16] == "d48373d8caeb4e0a"
+    # stating what was the only possibility before is the same record, recipe and samples
+    stated = chain(Grid(fs=64e9, baud=16e9, n=4096, domain="real"))
+    assert stated.to_json() == sig.to_json()
+    assert np.array_equal(stated.waveform(), sig.waveform())
 
 
 def test_not_stating_survives_replace_copy_and_pickle():
