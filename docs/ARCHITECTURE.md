@@ -16,6 +16,11 @@ A waveform is an ordered list of operations. Each one owns a single physical eff
   supply        supply_coupling · noise       │
                                               ▼
   instrument    probe ─► scope ─► sample_clock ─► digitize ─► scope ─► store
+                                              │
+                                              ▼   trigger (cuts the windows a scope keeps)
+
+  an op's parameter may hold another chain:   crosstalk(aggressor=<chain>) · gain(by=<chain>)
+  several named chains are one record:        Channels({...}, shared={...}) · use("name")
 ```
 
 The ops are independent of each other. `jitter` displaces edges. `lossy` applies a frequency
@@ -83,6 +88,39 @@ get it wrong, silently. The library carries checks to cover that.
   a causal channel must put its energy after t=0; crosstalk must couple the aggressor's derivative
   rather than its level.
 
+## Where chains meet
+
+A chain is a line, and real records are not: an aggressor has its own channel, a clock and its
+data share a PLL, a transmission is an idle, a preamble and a payload. Four things let chains
+meet, and each is data in the recipe.
+
+- **A sub-chain is a value** (`subchain`). Any parameter that takes a signal takes a chain:
+  `{"ops": [...]}` is part of this record and moves with its seed; `{"from": recipe}` is another
+  record, pinned as rendered. One resolver serves every op, the parameter is found by its shape,
+  and its randomness is namespaced by where it sits (`crosstalk/1/aggressor/jitter/0`), so
+  `roles()`, `contrast()`, `summary()` and the event list reach inside with nothing registered.
+- **Joins** (`joins`, `sequence`). `combine` puts peers together sample by sample;
+  `gain`/`offset`/`gate`/`delay` take a number or a chain as `by`; `sequence` and `switch` join
+  chains in time.
+- **Named chains** (`channels`). A `Channels` record holds several chains under one seed and
+  grid, and `use(name)` is the only way one refers to another. Each chain draws under its OWN
+  name wherever it is used from, which is the whole reason two channels through one `pll` move
+  together, and why the correlation survives serialisation where object identity would not.
+- **A toleranced value** (`tolerance`). `ws.tol(1e3, 5)` in place of a number is resolved on the
+  way INTO the recipe, so every executor still sees a number and replay draws nothing; the
+  stated tolerance stays beside it so `unit(seed)` can draw another unit under the same noise.
+
+Three rules keep these honest. Nothing is ever resampled, truncated or stripped of an imaginary
+part to make it fit: a sub-chain off the record's grid is refused by name. A record is in one
+**domain**, a real voltage or a complex envelope about `fc_hz` (`domain`), and an op is
+real-only unless it has opted in with a test of what it means on an envelope; a chain that did
+not state its grid starts in the domain its own ops need. And the ops whose meaning is their
+position (`law`, `filter`, the joins, `use`, the I/Q impairments) are stage kind `general`:
+`canonical()` refuses to sort a chain that contains one.
+
+`trigger` is the one op that shortens a record: the grid is the long render and the op keeps the
+windows a scope would. `Signal.stored_grid(x)` accounts for it, as it does for `acquire`.
+
 ## Where the boundary sits: mechanisms in, knowledge out
 
 A pseudo-random sequence is a polynomial, a seed and a length. That is arithmetic, and it belongs in
@@ -98,6 +136,47 @@ accept a callable. A function cannot be serialised or digested, so a recipe hold
 replayed — which costs reproducibility, the property the recipe exists to provide. The workable form
 is a named registration whose source is hashed, with symbols-as-data as the always-available
 fallback. A consumer who lacks the registry entry is then told exactly what is missing.
+
+## What becomes an op
+
+The library had half of this rule already (one op, one effect; mechanisms in, knowledge out).
+Issue #87 asked for the other half, and this is it.
+
+1. **An op is a mechanism**: one physical effect that no arrangement of existing ops expresses.
+   The test is to try to write it as a chain. If it can be written, it is not an op.
+2. **A useful arrangement ships as a composition**: a plain function that returns a `Signal()`
+   sub-chain, with a COOKBOOK entry. It stays visible, because `summary()`, the recipe and
+   `roles()` show the ops it is made of, and a caller can change one of them.
+   `examples/composed_capture.py` has two (`clock()` and `pll()`).
+3. **Standards knowledge goes in a registry the caller populates**, as test patterns do. A named
+   parameter set has a document and a revision date behind it; the recipe records the name and
+   the resolved numbers.
+4. **An op that overlaps a general primitive stays, as the named shorthand** for the effect it
+   names, and the docs say which is canonical (the table is in
+   [COOKBOOK.md](COOKBOOK.md#which-name-is-canonical)). The named op is canonical for its own
+   effect; the general stage is for the shape that has no name.
+5. **Existing calls, recipes and outputs do not change.** Proven by digest against the previous
+   release, not assumed ([COMPATIBILITY.md](COMPATIBILITY.md)).
+
+The rule was applied while the primitives were built, and it cut things:
+
+| Asked for | Ruling | What it is instead |
+|---|---|---|
+| an `image(rejection_db)` op | declined | an image is what imbalance produces: `iq_imbalance(**rf.imbalance_for(30))` |
+| an amplifier op for RF | declined | `law("tanh")` on the passband record, between `upconvert` and `downconvert` |
+| hysteresis and edge shaping on `gate`, hysteresis on `switch` | declined | a `law("comparator", hysteresis=)` or a `filter` at the end of the enable's own sub-chain |
+| a pattern trigger | declined | a pulse-width trigger on the pattern's longest run |
+| `fork()` / `tap()` / a shared-op registry for multi-channel records | collapsed | one op, `use(name)` |
+| a second `phase_noise` shared with `timing(phase_noise=)` | declined | different mechanisms: one moves a waveform in time, the other rotates an envelope |
+
+**Which of #87's candidate primitives were worth having.** All eight, and none became
+unnecessary, but they are fewer concepts than issues. The sub-chain (#75) came first because
+every other one is a parameter that holds one. Signal-driven parameters (#79) and `combine`
+(#76) are one module, and `gain(by=chain)` is the same samples as a product `combine`: both
+names are kept because one says "a property of this signal" and the other "a second signal".
+`sequence` and `switch` (#77) stayed two ops, since one states its instants and the other emits
+them. Tolerances (#86) and the trigger (#85) are independent of the rest. `law`/`filter` (#80)
+are the general stages rule 4 is about.
 
 ## Working with agents
 

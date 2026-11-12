@@ -373,10 +373,11 @@ Current `dc_balanced()` is an 8b/10b-style block-inversion helper, not a standar
 
 ### #50 Trigger jitter distinct from timebase jitter
 
-**Status:** Open.
+**Status:** DELIVERED in 0.46.0 as `trigger(jitter_s=)` (role `trigger/<i>`), with #85.
 
-`timebase_jitter()` models sample-clock uncertainty. Trigger jitter is not currently a
-separate primitive, despite older acquisition-chain descriptions grouping the two.
+`timebase_jitter()` models sample-clock uncertainty. Trigger jitter is one draw per trigger that
+moves the whole window: a single record is moved, not smeared, and averaging smears. Both are
+hard checks in `wfmsynth.validate`.
 
 **Done when:**
 
@@ -721,6 +722,111 @@ exactly at any length; the only thing they cannot do is sit inside a switched ne
 4. **An inductor current emitted as a label.** `probes=["i(lp)"]` reads it; nothing emits an
    interval of it back out, same as #72 item 4.
 
+### #75–#87: chains that meet, and an I/Q domain
+
+**Status:** DELIVERED in 0.46.0. #87 is the tracking issue; its proposed rule for what becomes
+an op is adopted and stated in `docs/ARCHITECTURE.md` ("What becomes an op"), with its two open
+questions answered there. The user-facing text is the two closing chapters of
+`docs/COOKBOOK.md`; `examples/composed_capture.py` uses the composition primitives together.
+No `NUMERIC_CHANGES` entry: existing chains were compared against `main` by digest.
+
+| Issue | Delivered as | Module |
+|---|---|---|
+| #75 | a sub-chain is a value: `Signal()` / `{"ops"}` / `{"from": recipe}` in every signal-taking parameter; `summary()`, `subchain()`, `subchains()`; `Event.at`, `on_record()`; `crosstalk_matrix(aggressors=)` | `subchain` |
+| #76, #79 | `combine`; `gain` / `offset` / `gate` / `delay` with `by=` a number or a chain; `delay_errors()` | `joins` |
+| #77 | `sequence`, `switch`, `sequence.layout` | `sequence` |
+| #78 | `ws.Channels`, the `use` op, HDF5 with names and the recipe | `channels` |
+| #80 | `law`, `filter`, `filter_delays()` | `stages` |
+| #81 | `Grid(domain="iq", fc_hz=)`, `iq`, `upconvert`, `downconvert`, `transmitted()`, the opt-in table | `iq`, `domain` |
+| #82 | `read_iq`, `capture(format=)`, `to_sigmf`, `to_interleaved` | `iqfile` |
+| #83 | `dac`, `iq_imbalance`, `iq_offset`, `phase_noise`, `freq_offset`, `awgn`, `spur`, `rf_report()`, `lo_phase()` | `rf` |
+| #84 | `rf.spectrum`, `band_power`, `aclr`, `ccdf`, `evm`, `constellation_density` | `rf` |
+| #85 | `trigger` (edge, width, runt; segments, holdoff, averaging, trigger jitter; `on=`) | `trigger` |
+| #86 | `ws.tol`, `ws.corners`, `unit()`, `unit_dataset`, `unit_of`, `tolerance.resolved` | `tolerance` |
+
+**Decisions, where the issue left a question open.**
+
+- *One nested-signal form (#75).* The `net` driver form was generalised, with `from` added for
+  "another record". A different grid or rate is refused, never resampled. Sub-chain events are
+  listed with `Event.at` and excluded from `mask()`: labelling a victim's window with an
+  aggressor's glitch would be a false label. New parameters do not take the bare carrier-spec
+  shorthand; it survives on the six legacy parameters only.
+- *Sum against solve (#76).* `combine` refuses only what is certain. Whether two sources load
+  each other cannot be read from samples, so the line is stated, not guessed: superposition
+  holds where sources do not load one another, and two drivers on one node is `net`.
+- *What a variable delay promises (#79).* Error per tone bounded by a figure measured on the
+  kernel; causal means `by >= 0`; rate of change below `max_rate`. Reported at design level
+  (`delay_errors()`), not per record.
+- *One mechanism or two (#77).* Two. A sequence states its instants and a switch emits them;
+  folding one into the other needs an invented selector. State is per segment, default
+  `restart`, and is never carried between segments' chains.
+- *Shared by name, not by object (#78).* Names serialise. `fork()`, `tap()` and a shared-op
+  registry collapsed into `use`. Mutual crosstalk is a cycle and is refused; couple the
+  launched signals.
+- *Are general `law` / `filter` worth having (#80).* Yes, with the named ops canonical and the
+  overlap refused by name. `zero_phase` removes the phase of the stated design and is not
+  `filtfilt`, which squares the response.
+- *Domain on the grid, not a second record type (#81).* Mixers do not resample. Only ops with a
+  stated meaning on an envelope opt in; a channel stated at RF applied to an envelope would
+  filter about DC and is not opted in.
+- *How much to check a file (#82).* Byte order, because it is detectable from bytes. Scale is
+  not checked, because every scale is self-consistent; it is recorded, and export refuses to
+  clip.
+- *No `image` op (#83).* An image is what imbalance produces; `rf.imbalance_for(rejection_db)`
+  returns the imbalance. LO phase noise is not shared with `timing(phase_noise=)`: different
+  mechanisms.
+- *EVM hides nothing (#84).* Nothing fitted by default; each correction named and its amount
+  returned. A separate module from `measure`, which folds a real record without the sent data.
+- *Render long and cut (#85).* A window is a slice of the long render, never resampled; the
+  exact crossing is in the event. This also delivers #50.
+- *Syntax or a sampling step (#86).* Both, as one mechanism: the tolerance is written in place
+  and resolved on the way into the recipe, so executors see numbers and replay draws nothing.
+  `group=` was added so a process corner moves several parameters together.
+
+**Deliberately cut.** Weighted corner probabilities; a train/test split helper (`unit_of` and
+one line of numpy); Zarr export for `Channels` (the library has no Zarr exporter to extend);
+pattern, timeout and window triggers; gate hysteresis and edge shaping (a comparator or filter
+in the enable's sub-chain); CSV and MAT writers; real and unsigned SigMF; timing recovery and a
+blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbol event list
+(`transmitted()` is the container).
+
+**Deferred, each with the hook that is already there.**
+
+1. `unit_dataset` for a `Channels` record, and a partial unit re-roll in one
+   (`contrast("a/unit/1/r")` is refused; only `unit/*`). `Channels.unit` and `unit_of` are the
+   base.
+2. `delay` on an envelope (a shift plus the -2&pi;·fc·delay rotation), a trigger on I/Q
+   magnitude, a complex `by`, receiver-side I/Q imbalance, and a baseband-equivalent channel
+   (`lossy`/`sparam` about `fc_hz`).
+3. The optical field path (`eo` .. `photodetect`) still carries a complex array on a real grid,
+   outside the domain model.
+4. `measure` / `eye` cast complex input to float unguarded.
+5. A whole-chain delay report: `filter_delays()` covers `filter` ops only.
+6. Four crossing finders and three events-onto-another-clock helpers exist across `stages`,
+   `joins`, `sequence` and `trigger`; they agree and are tested, and want consolidating.
+
+**Needs a ruling** (found, not changed, because each moves existing output or API):
+
+1. `carrier("square")` and `carrier("cmos")` place each edge on the nearest sample: 15.6 ps
+   peak to peak at 64 GSa/s. Sub-sample placement, as `nrz` does, needs a `NUMERIC_CHANGES`
+   entry.
+2. `carrier`'s `n_ui` defaults to 32 stretched over the record, whatever `Grid(baud=)` says.
+3. `roles()` still omits roles that draw conditionally: `acquire`, `store`, `nonlinearity`,
+   `tia`, `edfa`, `optical`, `carrier_noise`.
+4. Whether a top-level `Signal` should infer its domain from its source, which would retire
+   `Grid(domain=)` for everything but `capture`.
+5. A builder method mutates its `Signal` and returns it, so `base.a()` then `base.b()` is one
+   chain. Composition makes reusing a base natural; a `copy()` or non-mutating builders would
+   remove the trap. Documented as a gotcha for now.
+6. `filter` and `law` validate their design before a tolerance is drawn, so
+   `filter(f_hz=ws.tol(...))` raises a bare `TypeError`; and `ws.tol` on a whole-number
+   parameter draws a float that fails at render instead of being refused at build with
+   "use `ws.corners`".
+7. `downconvert(fs_out=)` has no unit suffix; `es_n0_db` and `ebn0_db` are spelled
+   inconsistently. Renaming is a Tier 1 deprecation cycle.
+8. `net`'s `{"ops": Signal}` drops that Signal's seed and grid silently (the generic sub-chain
+   path refuses the same thing); `Signal.unit()` does not move a `{"from": recipe}` record.
+
 ## Known limitations and claim boundaries
 
 Keep these statements synchronized with user-facing documentation:
@@ -781,7 +887,7 @@ branches.
 | #21–26 | Sim-to-real diagnostics, critical-sampling guidance, CI foundation, canonical instrument quantization/digitization/absolute offsets |
 | #28–38 | Rx CTLE/DFE, waveform CDR fold, shot noise, SSC, differential pairs, supply coupling, optical primitives, timing sources, scenes, phase noise, drift |
 | #39 | DC-balance helper and 64b/66b scrambling; standards-complete 8b/10b remains #46 |
-| #40 | Scope bandwidth, probe loading, and timebase jitter; trigger jitter remains #50 |
+| #40 | Scope bandwidth, probe loading, and timebase jitter; trigger jitter (#50) arrived with `trigger` in 0.46.0 |
 | #41–45 | Open-drain/UART primitives, de-emphasis presets, electrical idle/LFPS, laser chirp, arbitrary-symbol carriers |
 | #47 | Generalized two-rate acquisition and record decimation |
 | events | Localized placeable needles (`Signal.events` / `place_events`) with per-window labels; clock recovery stays external |
@@ -790,6 +896,7 @@ branches.
 | #58–61 | `read_touchstone` records a file's own reference impedance (`# ... R <z0>`, or a Touchstone 2.0 `[Reference]` block); `write_touchstone`/`touchstone_channel` can state or renormalize to a system impedance via the standard closed-form transform; `sparam.check_response(freqs, S)` reports passivity (max singular value) and a precursor-energy fraction as a causality diagnostic, leaving samples alone; `sparam.measured(..., left=, right=)` takes a 4-port (or wider) measured file as a differential cascade SECTION via its mixed-mode SDD block, so a chain of these composes exactly like a chain of 2-port sections; `sparam.stub(...)` adds an open/short transmission-line stub as its own lossless, reciprocal cascade section (`"stub"` in a declarative `Signal.cascade(path=[...])`) |
 | #62 | `read_mdif` reads one well-documented MDIF (`.mdf`) dialect -- `BEGIN`/`END` blocks, each a full S-matrix sweep at one point of an outer VAR sweep (a stub length, a Z0) -- into an `MdifSweep` (`.freqs`, `.S`, `.axes`); `.select(**kwargs)` names one sweep point and returns `(freqs, S)`, ready for `sparam_channel`'s own slicing. An unrecognised column layout (MA/dB pairs, an unstated dialect) or a mismatch between blocks (VAR names, frequency axis, port count) raises rather than guessing |
 | performance | A benchmark suite (`tools/benchmark.py`) gated on peak memory and on SCALING rather than wall time, wired into per-PR CI. `resample_at` -- reached by `acquire`, `sample_clock`, `dcd` and `shift`, so most instrument chains pay it -- rewritten as a polyphase table gather with a sliding-window view: 2.7x faster and 3.3x -> 1.3x the record in peak memory, agreeing to 1.6e-15. `_min_phase_H` no longer builds the magnitude mirror, the complex cepstrum or the folding weight vector: every chain 8.5x -> 6.0x the record. An opt-in `method="auto"/"overlap"` block path for `lossy`/`sparam`/`cascade` takes a channel to 1.2x the record, recorded in the recipe because the two paths differ by 1e-5 (a behaviour change by the byte-identity gate's own band, not round-off). Net on a full instrument chain: 603 -> 303 ms and 8.5x -> 6.0x memory by default, 1.2x with the block path |
+| #75–#87 | Chains that meet (a sub-chain as a value, `combine` and signal-driven `gain`/`offset`/`gate`/`delay`, `sequence`/`switch`, `Channels` and `use`, general `law`/`filter`, a triggered acquisition, toleranced parts) and an I/Q domain (complex-baseband records, `upconvert`/`downconvert`, open-format recordings, transmitter and LO impairments, RF measures). The rule for what becomes an op is in `docs/ARCHITECTURE.md`; decisions, cuts and what is deferred are under "#75–#87" above |
 | #73 | A scenario layer over the shared net: `Hold(who, t0, t1, **tag)` says who was on the net and when, `Agent(during, after, lead, lag, then, unless)` says what being on it does, and `scenario.schedule` compiles the two into the net's event list -- pure, deterministic and JSON-able, adding no physics. `merge_holds` unions an agent's touching holds (consecutive identical bits are one hold, tolerating the float-noise case where `t0 + i*dt + dt` and `t0 + (i+1)*dt` differ in the last bit), and `hold_windows` turns the same list into `events.label_windows` input, so the thing that produced the waveform is the thing that labels it. A release reaction is all-or-nothing over its whole window, because half a settling sequence parks the thing it was settling in its intermediate state permanently; the t=0 rest row is the agent SETTLED (`after` with the reaction applied), which for a switch that stays closed then opens is the opposite of `after`. Solver events gained `g` (siemens; zero IS an open) and `src` (a driver's level), while `gate`/`relax` are refused by name as time-varying elements. `examples/i2c_bus.py` is the worked caller layer: an I2C write across a 3.3 V/1.8 V MOSFET translator, ~40 lines of protocol, finding t_r = 1209 ns against the 300 ns Fast-mode limit and R_ds(on) eating 90 % of the high side's V_OL budget |
 | #72 (tier 1) | A shared net as one channel stage: several drivers, switched terminations and one solve, where a `cascade` is a series 2-port chain with one source and one probe. Nodes, rails, lumped R/C, Thevenin drivers with a scheduled output conductance, and a schedule of absolute-time events against stable ids, all plain JSON so a protocol or fault generator can produce one. EXACT rather than integrated: between events the network is constant and the symmetric generalised eigenproblem gives it in closed form, so there is no step size, no guard time and no accuracy that decays over a long record. `physics.open_drain_line` is reproduced to 2.2e-15 and a two-node coupled net with a switched termination agrees with an independently-written RK45 integrator to 5.9e-12 |
 | #63 | `Signal.sparam(..., z0=...)` now forwards the reference-impedance renormalization `touchstone_channel` already offered directly -- it was being silently dropped on the composable path, the same class of bug #57 fixed for `ports`. Recorded in the recipe; omitting it is unchanged |

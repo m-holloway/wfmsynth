@@ -414,6 +414,290 @@ out = ws.net.solve(spec, fs=fs, n=n, schedule=sched, probes=["bus", "i(lp)"],
   one approximation in the module, it refuses a line longer than ~12 rise times, and a real line
   still belongs to `lossy`/`sparam`/`cascade`. `examples/inductive_handover.py` is the worked one.
 
+## Chains that meet
+
+Each block below starts from these lines.
+
+```python
+import json, numpy as np, wfmsynth as ws
+from wfmsynth import Signal
+
+g = ws.Grid(fs=64e9, baud=1e9, n=1 << 16)            # 64 samples/UI, 1024 UI
+N_UI = 1024
+
+def data(seed=3):                                    # a builder mutates: one fresh Signal per use
+    return Signal(seed=1, grid=g).carrier("nrz", n_ui=N_UI, pattern="prbs7", seed=seed)
+```
+
+### A sub-chain: three ways to write one, and how to reach inside
+
+```python
+lane = Signal().carrier("nrz", n_ui=N_UI, seed=9).timing(rj_ps=1.0).lossy(loss_db=6.0, loss_at_ghz=0.5)
+
+a = data().crosstalk(aggressor=lane, coupling=0.1)                       # a Signal: part of this record
+b = data().crosstalk(aggressor={"ops": lane.ops}, coupling=0.1)          # the same thing, as data
+assert a.sha256() == b.sha256()
+
+standalone = Signal(seed=5, grid=g).carrier("nrz", n_ui=N_UI, seed=9).timing(rj_ps=1.0)
+c = data().crosstalk(aggressor={"from": standalone.recipe()}, coupling=0.1)   # another record, pinned
+assert np.array_equal(c.subchain("crosstalk/1/aggressor"), standalone.waveform())
+
+print(a.summary())                                   # the tree; [crosstalk/1/aggressor] is the namespace
+assert a.roles() == ["crosstalk/1/aggressor/timing/1"]
+used = a.subchain("crosstalk/1/aggressor")           # the aggressor exactly as it was coupled
+moved = a.contrast("crosstalk/1/aggressor/timing/1") # re-roll ONLY the aggressor's jitter
+assert not np.array_equal(moved, a.waveform())
+assert Signal.from_recipe(json.loads(a.to_json())).sha256() == a.sha256()
+```
+
+A sub-chain must land on the record's own grid as a real waveform, or it is refused: nothing is
+resampled. Parameters that take one: `crosstalk(aggressor=)`,
+`crosstalk_matrix(couplings=[...], aggressors=[...])`, `modulate(message=)`,
+`open_drain(second=)`, `hybrid_echo(own=)`, `pass_fet(gate=)`, `trigger(on=)`, a `net` driver's
+`source`, `combine`, `by=`, `sequence` segments and `switch` inputs. A record with a lead-in
+cannot hold one.
+
+### combine, and a parameter driven by a signal
+
+```python
+def tone(**k):
+    return Signal().carrier("sine", **k)
+
+data().combine(tone(f_hz=133e6, amp=0.03))                        # x + other
+data().combine([tone(f_hz=1e6), tone(f_hz=3e6)], gains=[0.1, 0.05])
+data().combine(tone(f_hz=5e9), how="product")                     # also "min", "max"
+data().gain(by=tone(f_hz=700e3, amp=0.04, offset=1.0))            # x * by: by is the factor itself
+data().offset(by=0.1)                                             # x + by; a number or a chain
+gated, ev = data().gate(by=tone(f_hz=2e6), threshold=0.5, off="zero").realize()   # off="hold" too
+[e.t_s for e in ev if e.kind == "transition"]                     # when the enable crossed
+late = data().delay(by=300e-12)                                   # seconds; >= 0 everywhere
+late.delay_errors()                                               # [{'op': 1, 'error': 2.31e-05, 'below_hz': 0.4*fs, ...}]
+```
+
+`delay(by=<chain>)` is a moving delay (Doppler, a wobbling path): causal, band-limited, error
+stated per tone below 0.4 fs. Its rate of change per sample must stay under `max_rate` (0.5), so
+white jitter as `by` is refused; filter it in its sub-chain, or use `timing` for jitter about
+zero. A gate with a noisy enable chatters: end the enable's sub-chain in
+`law("comparator", hysteresis=)`.
+
+### sequence and switch
+
+```python
+tx = (Signal(seed=1, grid=g)
+      .sequence([{"chain": Signal().carrier("dc", level=-1.0), "t_s": 64e-9},
+                 {"chain": Signal().carrier("nrz", n_ui=N_UI, pattern="clock"), "t_s": 448e-9,
+                  "state": "continue"},                           # as if running since t = 0
+                 {"chain": Signal().carrier("nrz", n_ui=N_UI, pattern="prbs7"),
+                  "state": "continue"}],                          # last one takes the rest
+                join="crossfade", t_join_s=1e-9)                  # or "hold"; default "cut"
+      .lossy(loss_db=6.0, loss_at_ghz=0.5))                       # ops after it act on the joined record
+x, ev = tx.realize()
+assert [e.sample for e in ev if e.kind == "segment"] == [4096, 32768]
+plan = ws.sequence.layout(tx.ops[0]["segments"], g)               # [{'segment', 'start', 'stop', ...}]
+
+mux = Signal(seed=1, grid=g).switch(select=Signal().carrier("square", f_hz=2e6),
+                                    inputs=[Signal().carrier("dc", level=0.0),
+                                            Signal().carrier("nrz", n_ui=N_UI)],
+                                    threshold=0.0, t_switch_s=1e-9)   # N inputs take N-1 thresholds
+```
+
+Both are sources: first in the chain. Durations are whole samples and must fill the record; an
+off-grid `t_s` is refused naming the two nearest that fit. The default `"state": "restart"`
+begins the chain at its own t = 0 (turn-on included). Nothing is carried from one segment's
+chain into the next; to share a filter put it after `sequence`.
+
+### Several channels from one recipe
+
+```python
+def clock():
+    return Signal().carrier("nrz", n_ui=N_UI, pattern="clock")
+
+rec = ws.Channels(
+    {"clk":  Signal().use("clk_line").rx_noise(rms=0.01).use("scope"),
+     "data": (Signal().carrier("nrz", n_ui=N_UI, pattern="prbs7").use("pll")
+              .lossy(loss_db=6.0, loss_at_ghz=0.5).rx_noise(rms=0.01).use("scope"))},
+    shared={"pll": Signal().timing(phase_noise=dict(rms_ps=2.0)),      # a STAGE: applied
+            "clk_line": clock().use("pll"),                            # a SIGNAL: starts with a source
+            "scope": Signal().trigger(on=Signal().use("clk_line"), pre_s=1e-9, post_s=3e-9,
+                                      level=0.0, slope="rising", n_segments=16, holdoff_s=20e-9)},
+    seed=1, grid=g)
+
+x, events = rec.realize()                             # {"clk": array, "data": array}, {name: EventList}
+assert x["clk"].shape == x["data"].shape == (16 * 256,)          # the same 16 windows on both
+assert rec.roles() == ["clk/rx_noise/1", "data/rx_noise/3", "pll/timing/0"]
+other_pll = rec.contrast("pll/timing/0")              # every channel that uses the PLL moves
+assert ws.Channels.from_recipe(json.loads(rec.to_json())).sha256() == rec.sha256()
+print(rec.summary())
+```
+
+Chains are written `Signal()` with no seed and no grid; the record has one of each.
+`use(name)` first in a chain (or inside any signal-taking parameter) IS that chain's waveform;
+after a source it APPLIES the named stage. A chain draws under its own name wherever it is used,
+so two channels through `pll` see one realisation, and the same chain under two names is two.
+The trigger above is on `clk_line`, not `clk`: `clk` uses `scope`, and a chain cannot reach
+itself (a cycle is refused, naming it). `rec.waveform(name)`, `rec.stored_grid(name, x)`,
+`rec.unit(seed)` and `rec.write_hdf5(path)` are the per-record counterparts of the `Signal`
+methods. A differential pair is `{"p": chain, "n": Signal().use("p").law("poly", coeffs=[0.0, -1.0])}`.
+
+### law and filter
+
+```python
+out = (Signal(seed=1, grid=ws.Grid(fs=1e6, n=50000))
+       .carrier("sine", f_hz=200.0).rx_noise(rms=0.05)
+       .filter("butter", f_hz=5e3, order=2)                       # causal: it delays what follows
+       .law("comparator", threshold=0.0, hysteresis=0.3, v_lo=0.0, v_hi=3.3))
+x, ev = out.realize()
+edges = [e for e in ev if e.kind == "transition"]     # e.t_s is the sub-sample crossing, e.direction +-1
+out.filter_delays()                                   # [{'op': 2, 'kind': 'butter', 'group_delay_s': 4.5e-05, ...}]
+```
+
+| `law(kind, ...)` | Parameters |
+|---|---|
+| `tanh` | `gain=1, sat=1` |
+| `poly` | `coeffs=[c0, c1, ...]` ascending |
+| `limiter` | `lo`, `hi` (at least one) |
+| `deadzone` | `width, center=0` |
+| `rectify` | `mode="half"` or `"full"` |
+| `quantize` | `bits, lo, hi`; saturates; top code is `hi` less one step |
+| `comparator` | `threshold=0, hysteresis=0, v_lo=0, v_hi=1, initial=None` |
+| `diode` | `r_load_ohm, i_sat=1e-12, ideality=1`; needs volts |
+
+| `filter(kind, ...)` | Parameters |
+|---|---|
+| `butter`, `bessel`, `cheby1`, `elliptic` | `f_hz, order=4, btype="low"`; `[lo, hi]` for `"bandpass"`/`"bandstop"`; `ripple_db`, `stop_db` |
+| `rrc` | `beta, span_ui=16`; unit DC gain; the `iq` source's matched filter |
+| `fir`, `sos` | your `taps` / digital `sos` for this grid |
+| `zpk` | analog `poles`, `zeros` in rad/s (a 1 MHz pole is `-2*pi*1e6`), `gain` |
+| `integrate`, `differentiate` | `tau_s=1` |
+
+`f_hz` is the -3 dB point for `butter` and `bessel` but the passband EDGE for `cheby1` and
+`elliptic`. Every filter takes `zero_phase=True` except `integrate`/`differentiate`.
+`filter_delays()` covers `filter` ops only; `scope`, `probe` and `lossy` have delays of their
+own. A chain holding `law`, `filter`, a join or `use` cannot be `canonical()`-sorted: its order
+is its meaning.
+
+### A triggered acquisition
+
+```python
+shot = (data().lossy(loss_db=3.0, loss_at_ghz=0.5).rx_noise(rms=0.01)
+        .trigger(pre_s=1e-9, post_s=3e-9,             # required; the window about each firing
+                 condition="edge",                    # or "width" (width_s=[min, max]), "runt" (runt_level=)
+                 level=0.0, slope="rising",           # level=None is "set to 50 %" of THIS record
+                 hysteresis=0.0, holdoff_s=20e-9, jitter_s=0.0, n_segments=8, average=1))
+x, ev = shot.realize()
+rows = x.reshape(8, -1)                               # segments are end to end in one 1-D record
+stored = shot.stored_grid(x)                          # n = 2048; shot.grid is still the long render
+for e in ev:                                          # one Event(kind="trigger") per firing
+    e.t_s, e.params["segment"], e.params["timestamp_s"], e.params["jitter_s"]
+```
+
+Render long, then cut: the trigger acts on the realised waveform, so where it fires is known only
+after the chain has run. Nothing fires before `pre_s`, and it re-arms after
+`max(holdoff_s, pre_s + post_s)`. Too few firings is refused with the render length that would
+hold them. Put it after `acquire` to trigger at the acquisition rate. With `n_segments > 1` it
+must be the last op. Width and runt triggers fire on the pulse's TRAILING edge.
+
+### Toleranced parts
+
+```python
+def unit_under_test(seed):
+    return (Signal(seed=seed, grid=ws.Grid(fs=100e9, n=8000))
+            .carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=25e6, tr_s=1e-9)
+            .probe(r_source=ws.tol(1e3, 5),                        # +/-5 %, uniform
+                   c_load_f=ws.tol(2e-12, 10, dist="normal"))      # 10 % = 3 sigma; "corner" = an end
+            .digitize(bits=ws.corners({"coarse": 6, "fine": 10}))  # a whole number takes corners
+            .rx_noise(rms=0.005))
+
+s = unit_under_test(3)
+r = s.recipe()
+ws.op_params(r, "probe")["r_source"]                  # 1019.1...: the resolved number, in its own place
+ws.tolerance.resolved(r)                              # [{'role': 'unit/1/r_source', 'value': ..., 'nom': ...}, ...]
+s.unit(8)                                             # a sibling Signal: another unit, the SAME noise
+s.contrast("unit/*", seed=8)                          # its waveform
+X, recipes = ws.unit_dataset(lambda rng: unit_under_test(int(rng.integers(1 << 30))),
+                             n_units=6, n_captures=4, seed=1)
+group = np.array([ws.unit_of(q) for q in recipes])    # the key for a held-out-unit split
+```
+
+`ws.tol(nom, tol_pct)` or `ws.tol(nom, tol_abs=)` (a percentage of a zero nominal is refused).
+`group="board"` makes several parameters one draw, in one chain or across the chains of a
+`Channels` record. A hand-written recipe may carry `{"nom": 1e3, "tol_pct": 5}` where a number
+goes; `from_recipe` draws it under the recipe's seed. Known gap: `filter(..., f_hz=ws.tol(...))`
+and `law("quantize", bits=ws.corners(...))` fail with a bare `TypeError`, because those two
+builders check their design before the value is drawn; draw the value yourself there.
+
+## I/Q and RF
+
+```python
+import os, tempfile, numpy as np, wfmsynth as ws
+from wfmsynth import Signal, rf
+
+g = ws.Grid(fs=6.4e9, baud=25e6, n=1 << 18, domain="iq", fc_hz=1e9)   # the grid carries the carrier
+
+def source():
+    return Signal(seed=1, grid=g).iq("qam16", prbs=15, prbs_phase=100)   # or iq(symbols=[1+0j, 1j, ...])
+
+sent, t_s = source().transmitted()                     # ground truth: complex symbols, centre times
+
+rx = (source()
+      .upconvert()                                     # iq -> real passband volts, same grid
+      .law("tanh", sat=2.5)                            # an amplifier acts on the voltage
+      .probe(bw_hz=3e9)                                # every real op applies here
+      .downconvert(fc_hz=1e9, lpf=dict(pass_hz=40e6, stop_hz=120e6, atten_db=80), fs_out=400e6))
+y = rx.waveform()                                      # complex128
+gy = rx.stored_grid(y)                                 # 400 MSa/s, domain "iq": measure with THIS
+
+raw = rf.evm(y, gy, sent, skip=8)                      # nothing fitted: 26.7 %
+fit = rf.evm(y, gy, sent, skip=8, correct=("gain", "phase"))      # 1.8 %
+fit["removed"]                                         # {'gain_db': -0.62, 'phase_rad': -0.267}
+rf.aclr(y, gy, channel_bw_hz=33.75e6, offsets_hz=[40e6])["aclr_db"]    # [42.4]
+rf.ccdf(y[1024:-1024])["papr_db"]                      # 4.96; slice off the burst's turn-on
+spec = rf.spectrum(y, gy, rbw_hz=1e6)                  # {'f_hz', 'psd_per_hz', 'rbw_hz', ...}
+rf.band_power(spec, -16.875e6, 16.875e6)
+```
+
+`upconvert` and `downconvert` never resample: the grid must hold the carrier with the envelope's
+bandwidth clear of DC and Nyquist (refused otherwise, stating the folded power), and `lpf` has no
+default (a bare number is the pass edge; stop is twice it, 80 dB). `fs_out` is whole-number
+decimation only. `rf.evm` corrections, each returned in `removed`: `"timing"` (within half a
+symbol of `delay_s`), `"frequency"`, `"offset"`, `"gain"`, `"phase"`, `"equalizer"` (with
+`equalizer_taps=`). `skip=` drops symbols at each end, which lack their neighbours' tails.
+`rf.evm` applies the RRC matched filter itself; score symbols you already hold with
+`ws.iq.evm(received, sent)`.
+
+```python
+gi = ws.Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
+
+tx = (Signal(seed=1, grid=gi).iq("qam16", prbs=15, prbs_phase=100)
+      .dac(bits=8, headroom_pct=5)                     # or full_scale=; clip="hard" to allow clipping
+      .iq_imbalance(gain_db=0.3, phase_deg=2.0)        # Q against I, modulator convention
+      .iq_offset(i=0.02, q=-0.01)                      # carrier leak, record units
+      .phase_noise(profile=[(1e4, -75), (1e5, -95), (1e6, -115)])   # (offset Hz, dBc/Hz)
+      .freq_offset(f_hz=2e3)                           # also drift_hz_per_s=
+      .spur(f_hz=3.1e6, dbc=-45)
+      .awgn(es_n0_db=25, ref_power=1.0))               # or ebn0_db=, or snr_db= WITH bw_hz=
+x = tx.waveform()
+tx.rf_report()                                         # what each request came to, per op
+phase = tx.lo_phase()                                  # rad per sample: phase_noise + freq_offset
+assert tx.roles() == ["phase_noise/4", "awgn/7"]
+
+work = tempfile.mkdtemp()
+ws.to_sigmf(os.path.join(work, "rec"), x, gi)                       # float32 by default
+again = ws.read_iq(os.path.join(work, "rec"), format="sigmf", baud=25e6)   # a Signal; grid from the file
+wrote = ws.to_interleaved(os.path.join(work, "rec.iq"), x, dtype="float32")
+raw = ws.read_iq(wrote["path"], format="iq_interleaved", dtype="float32",
+                 fs_hz=gi.fs, fc_hz=gi.fc_hz, baud=25e6, embed=True)       # embed: replay needs no file
+matched = raw.filter("rrc", beta=0.35, zero_phase=True)             # a recording is a chain like any other
+```
+
+The order of the impairments is physical and is kept: these are `general` stages. All seven
+refuse a real record. `ebn0_db` needs the source's constellation (or `bits_per_symbol=`).
+`ws.iqfile.describe(path, format, ...)` reports a file's length, peak counts and full-scale
+fraction without building anything. A file states no symbol rate; pass `baud=` or a matched
+filter has nothing to read. On an envelope `gain(by=)`, `gate(by=)` (real `by`), `combine` (sum,
+I/Q peers), `sequence`, `switch`, `filter` and `use` work; `offset`, `delay`, `law` and
+`trigger` are refused and name `iq_offset`, the passband record, `dac`, and a voltage.
+
 ## Writing records out
 
 There is no archive writer in this library — it produces waveforms, and the container is yours.

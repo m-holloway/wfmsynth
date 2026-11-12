@@ -12,6 +12,131 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## 0.46.0 — unreleased
+
+Chains can meet, and a record can be complex baseband. Until now a chain was a line with one
+source, and signals met only inside a few special ops, each with its own nested format. This
+release adds the small set of primitives that let chains meet (#75–#80, #85, #86, tracked by
+#87), and an I/Q domain with its mixers, impairments, file formats and measures (#81–#84).
+Every existing call, recipe and rendered sample is unchanged; see *How it stays exact*.
+
+Read [docs/COOKBOOK.md](docs/COOKBOOK.md#composing-a-realistic-capture) for these in order.
+The rule that decided what became an op and what did not is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#what-becomes-an-op).
+
+### Added
+
+- **A sub-chain is a value** (#75). Every parameter that takes a signal takes a chain, in one
+  form: a `Signal()` or `{"ops": [...]}` is part of this record and draws under its seed;
+  `{"from": recipe}` is another record, pinned as rendered. Wired into
+  `crosstalk(aggressor=)`, the new `crosstalk_matrix(aggressors=[...])`, `modulate(message=)`,
+  `open_drain(second=)`, `hybrid_echo(own=)`, `pass_fet(gate=)`, `events(aggressor=)` and a
+  `net` driver's `source`. `Signal.summary()` prints a chain as a tree,
+  `subchains()` / `subchain(namespace)` return a sub-chain and its waveform exactly as used, and
+  `roles()` / `contrast()` reach inside under the namespace (`crosstalk/1/aggressor/jitter/0`).
+  An event inside a sub-chain is listed with `Event.at` set; `EventList.on_record()` is the
+  rest. A sub-chain off the record's grid is refused, never resampled.
+- **`combine`, and `gain` / `offset` / `gate` / `delay` driven by a signal** (#76, #79).
+  `combine(others, how="sum"|"product"|"min"|"max", gains=)`; the other four take `by=`, a
+  number or a chain. `gate` emits its switching instants as events. `delay` is a causal,
+  band-limited variable fractional delay whose error is stated (`delay_errors()`: 2.3e-5 of a
+  tone below 0.4 fs) and whose rate of change is bounded (`max_rate`).
+- **`sequence` and `switch`** (#77). Two sources made of chains: segments end to end with
+  stated durations, `restart` or `continue` state and a `cut`, `crossfade` or `hold` join; or N
+  inputs selected by a signal crossing thresholds. Boundaries and changes are events;
+  `ws.sequence.layout` gives every segment's sample range for labels.
+- **Several correlated channels from one recipe** (#78). `ws.Channels({name: chain},
+  shared={name: chain}, seed=, grid=)` and one op, `use(name)`: a shared stage is applied, a
+  shared signal is referred to. Each chain draws under its own name, so channels through one
+  shared PLL see one realisation and `contrast("pll/timing/0")` moves exactly those channels.
+  One `recipe()`, one `sha256()`, `Channels.from_recipe`, `write_hdf5` (channel names and the
+  recipe travel in the file; `hdf5.read_recipe`, `hdf5.channel_names`).
+- **Two general stages, `law` and `filter`** (#80). Eight named transfer laws (`tanh`, `poly`,
+  `limiter`, `deadzone`, `rectify`, `quantize`, `comparator`, `diode`) and ten named linear
+  filters (`butter`, `bessel`, `cheby1`, `elliptic`, `rrc`, `fir`, `sos`, `zpk`, `integrate`,
+  `differentiate`), never callables. A comparator's transitions are events with the sub-sample
+  crossing time; `filter_delays()` reports each filter's group delay; `zero_phase=True` removes
+  the delay without squaring the response. Asking for a shape a named op owns is refused and
+  names that op.
+- **A triggered acquisition** (#85, and BACKLOG #50). `trigger(pre_s=, post_s=, ...)` finds an
+  edge, pulse-width or runt condition on the realised waveform and keeps a window about each
+  firing; `n_segments`, `holdoff_s`, `average`, and `jitter_s` as trigger jitter distinct from
+  `timebase`. `trigger(on=<chain>)` triggers from another signal, which in a `Channels` record
+  cuts every channel at the same instants. Each firing is an event carrying its exact time.
+- **Unit-to-unit variation** (#86). `ws.tol(nom, tol_pct | tol_abs=, dist=, group=)` and
+  `ws.corners({...})` go where a number goes. The value is drawn once on the way into the
+  recipe, which keeps both it and its stated tolerance. `Signal.unit(seed)` /
+  `Channels.unit(seed)` is another unit under the same noise; `ws.unit_dataset` builds units ×
+  captures and `ws.unit_of(recipe)` is the key for a held-out-unit split.
+- **Complex baseband records** (#81). `Grid(domain="iq", fc_hz=)`, an `iq` source (BPSK, QPSK,
+  QAM-16/64 or literal symbols, root-raised-cosine), `upconvert` to a real passband record and
+  `downconvert` back with a stated low-pass, and `Signal.transmitted()` as ground truth. An op
+  is real-only unless it has opted in (`wfmsynth.domain`), so nothing drops an imaginary part.
+- **I/Q recordings in open formats** (#82). `ws.read_iq` and `capture(format=)` read SigMF,
+  raw interleaved, CSV and MAT; `ws.to_sigmf` and `ws.to_interleaved` write. SigMF annotations
+  and events convert both ways; interleaved export can write a marker channel. A byte-swapped
+  file is detected and refused.
+- **I/Q impairments** (#83). `dac`, `iq_imbalance`, `iq_offset`, `phase_noise` (a stated
+  dBc/Hz profile), `freq_offset`, `awgn` (Es/N0, Eb/N0, or SNR in a stated bandwidth) and
+  `spur`; `rf_report()` says what each request came to on this record and `lo_phase()` returns
+  the oscillator's phase per sample.
+- **RF measures against ground truth** (#84). `ws.rf.spectrum`, `band_power`, `aclr`, `ccdf`,
+  `constellation_density`, and `evm` against the transmitted symbols, which fits nothing unless
+  a correction is named and returns what each removed.
+- **The pieces together.** `gain`, `gate`, `combine` (sum), `sequence`, `switch`, `filter` and
+  `use` are defined on an envelope and the rest refuse it naming the alternative; a chain that
+  did not state its grid starts in the domain its own ops need; tolerances work inside a
+  `Channels` record, with `group=` making one part across chains.
+- **Twelve examples**, all run by the test suite: `sub_chains`, `joins`,
+  `sequence_and_switch`, `clock_and_data`, `law_and_filter`, `triggered_capture`,
+  `unit_variation`, `composed_capture`, `iq_passband`, `iq_recordings`, `iq_impairments`,
+  `rf_measures`. `composed_capture.py` uses the composition primitives on one two-channel
+  triggered capture and isolates each cause of its jitter by changing one named thing.
+
+### Changed
+
+None of these moves a rendered sample.
+
+- **`Signal.roles()` lists more of what was always drawn**: `timing/<i>` (with `rj_ps` or
+  `phase_noise`), `rx_noise/<i>`, `timebase/<i>`, sub-chain roles, and a `net` driver chain's
+  roles. Code comparing `roles()` against a stored list will differ. `crosstalk` no longer
+  lists `jitter/xtalk<i>` when its aggressor is a sub-chain.
+- **A complex file read into a real chain is refused.** `capture()` used to keep the real part
+  under a numpy warning. HDF5 export of a complex record is likewise refused by name.
+- **A malformed `net` driver source is refused**: `{"ops": [...], <unread key>, "volts": ...}`
+  used to ignore the extra key.
+- **Three parameter shapes are now reserved in a recipe**: a dict with a list under `ops` or a
+  dict under `from` is a sub-chain, and a dict holding `nom`, `tol_pct`, `tol_abs` or `corners`
+  is a toleranced value. No existing op parameter used them.
+- `stage_kinds()` reports `general` for the ops whose position is their meaning (`law`,
+  `filter`, the joins, `use`, the I/Q impairments), and `canonical()` refuses a chain holding
+  one rather than sort it.
+
+### How it stays exact
+
+- **No `NUMERIC_CHANGES` entry was needed.** Recipe digest, samples, JSON replay, `contrast()`
+  output and event lists were compared against `main` at the branch's head: 16 of 16 chains covering every pre-existing signal-taking form, 259 of 259 renders in common (mixed chains, lead-ins and every example `main` ships; two further recipes embed a temporary path and differ between two runs of `main` itself), and 18 of 18 acquisition and capture chains, one of which differs only in its `roles()` list. The comparison scripts were run from outside the tree and are not shipped; in the tree, `tests/test_byte_identity.py` pins the default path.
+- **Each effect is asserted against an analytic result or an independent method**, in
+  `wfmsynth.validate` (428 checks) and the test suite (2160 tests): a sub-chain against
+  the same chain rendered alone and coupled by hand (equal); Bessel-4 `filter` against the
+  scope front end (equal); a product `combine` against `modulate` OOK (equal); the delay's
+  error against the exact trigonometric interpolant; trigger instants against an independent
+  edge list; toleranced draws against their stated distributions over 10 000 seeds; the mixers
+  against a closed-form tone; each I/Q impairment against its closed form; EVM in noise against
+  the analytic value. The numbers are printed by `python -m wfmsynth.validate`.
+- **What a stage cannot do honestly it refuses, by name, with the alternative.** Nothing is
+  resampled to fit, truncated, clipped on export, or stripped of an imaginary part.
+
+### Known gaps
+
+- `carrier("square")` and `carrier("cmos")` place each edge on the nearest sample (measured at
+  64 GSa/s: 15.6 ps peak to peak). Fixing it moves existing records and needs a
+  `NUMERIC_CHANGES` entry; until then a clock for timing work is
+  `carrier("nrz", pattern="clock")`.
+- `filter(..., f_hz=ws.tol(...))` and `law("quantize", bits=ws.corners(...))` fail with a bare
+  `TypeError`, because those two builders check their design before the value is drawn.
+- Not exercised on Python 3.9 (the changed files parse at that grammar; the suite ran on 3.14).
+
 ## 0.45.0 — 2026-11-04
 
 A shared net gains inductance, so a hand-over rings instead of merely settling — the last place

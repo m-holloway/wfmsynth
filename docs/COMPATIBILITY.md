@@ -72,6 +72,15 @@ are as important as the loud one and are tested: a current recipe, a recipe not 
 changed op, and a recipe with no version field at all (those predate the field and are not
 evidence of anything — warning on all of them would teach people to filter the category out).
 
+**What a recipe may hold grew in 0.46.0, by addition.** A parameter may be a sub-chain
+(`{"ops": [...]}` or `{"from": <recipe>}`); a hand-written recipe may state a toleranced value
+(`{"nom": ..., "tol_pct": ...}`, `{"corners": {...}}`) where a number goes, and a resolved one
+keeps its statement under the op's `_unit` annotation; a several-channel record has `channels`
+(and `shared`) where a single one has `ops`; and `grid` carries `domain` / `fc_hz` only when
+the record is not real. Those key shapes are reserved: a parameter dict with a list under `ops`,
+a dict under `from`, or any of `nom`, `tol_pct`, `tol_abs`, `corners` is read as what it looks
+like. A recipe written before 0.46.0 contains none of them and replays unchanged.
+
 **Adding to `NUMERIC_CHANGES` is the running cost of the guarantee.** It is one tuple, and it is
 small beside a record that silently means something other than it says.
 
@@ -107,6 +116,9 @@ Being honest about the edges is what makes the rest credible.
 - **The `JUDGEMENT`-grade models.** Fitted shapes (`resonant_reflection`, the nonlinearity
   defaults, the crosstalk kernels) may be re-fitted as better evidence arrives. Such a re-fit is
   a Tier 2(c) change and goes through the same gate. See [`FIDELITY.md`](FIDELITY.md).
+- **The list `roles()` returns.** It names the randomness a chain draws, and it grows when a
+  role that was always drawn starts being listed (0.46.0 added `timing`, `rx_noise`, `timebase`
+  and sub-chain roles). The draws themselves, and so the samples, are Tier 2.
 - **Warnings.** New ones may appear in any release. They are how this library says "this is
   probably not what you meant", and adding one is not a breaking change. Run with
   `-W error` in CI if you want them to be.

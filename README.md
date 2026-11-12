@@ -68,6 +68,23 @@ profile = ws.AcquisitionProfile(
 stored = signal.acquire(profile).waveform()
 ```
 
+A parameter that takes a signal takes a whole chain, so chains meet without leaving the recipe:
+
+```python
+lane = ws.Signal().carrier("nrz", n_ui=1024, seed=9).lossy(loss_db=6.0, loss_at_ghz=12.5)
+victim = (
+    ws.Signal(seed=7, grid=grid)
+    .carrier("nrz", n_ui=1024, tr_frac=0.5, causal=True)
+    .crosstalk(aggressor=lane, coupling=0.1)           # the neighbour, after its own channel
+)
+print(victim.summary())                                # the chain as a tree, sub-chain included
+```
+
+That is the first of a small set of composition primitives (several channels from one recipe, a
+trigger, sequences, unit-to-unit tolerances); the cookbook's
+[Composing a realistic capture](docs/COOKBOOK.md#composing-a-realistic-capture) takes them one
+at a time.
+
 Run [`examples/quickstart.py`](examples/quickstart.py) for a guided first example, then see
 [`examples/README.md`](examples/README.md) for the full learning path.
 
@@ -140,6 +157,8 @@ has what it needs to do so.
 |---|---|---|
 | Build a realistic, reproducible signal path | `Signal` + `Grid` | Recommended high-level API; records each stage in a recipe |
 | Model what a scope stores | `Signal.acquire(AcquisitionProfile)` | Separates fine-grid simulation from front end, sampling, ADC, and record decimation |
+| Several correlated channels (clock and data, a pair, lanes on one supply) | `ws.Channels` + `use(name)` | One recipe and one digest; shared chains draw the same randomness on every channel that uses them |
+| RF: a complex-baseband record, impairments, EVM/ACLR | `Grid(domain="iq", fc_hz=)` + `Signal.iq`, `ws.rf` | The envelope is the record; `upconvert`/`downconvert` cross to a passband voltage and back |
 | Apply or study one physical operation | `wfmsynth.physics` | Low-level NumPy-in/NumPy-out primitives for custom pipelines |
 | Add one named fault to an existing array | `apply_impairment` | Convenient fixed vocabulary for class-labelled augmentation |
 | Plant a rare, localized defect in a long record | `Signal.events` / `place_events` | Targeting (symbols, edges, pattern, aggressor, poisson, …) is independent of mechanism (runt, glitch, ring, droop, …); emits event times for an external segmenter |
@@ -221,7 +240,18 @@ legacy array-warp workflows but should not be the default for a new physical cha
    [`examples/inductive_handover.py`](examples/inductive_handover.py) is what the same
    hand-over does once the package inductance is in the net: overshoot and ringing past the
    receiver's absolute maxima, where the R-C model of the identical board passes.
-6. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
+6. **Compose chains that meet:** [`examples/sub_chains.py`](examples/sub_chains.py) — a
+   chain as another op's parameter — then
+   [`examples/composed_capture.py`](examples/composed_capture.py), one two-channel triggered
+   capture built from all the composition primitives, with each cause of its jitter isolated
+   by changing one named thing. The cookbook chapter
+   [Composing a realistic capture](docs/COOKBOOK.md#composing-a-realistic-capture) walks them
+   in order.
+7. **Go to RF when you need it:** [`examples/iq_passband.py`](examples/iq_passband.py) — a
+   complex-baseband record, up to a passband voltage, through a scope, and back to symbols;
+   the cookbook's [I/Q chapter](docs/COOKBOOK.md#iq-complex-baseband-and-rf) covers
+   impairments, files and measures.
+8. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
    samples/UI, two-rate acquisition, and localized events (needles in a long record)
    are indexed in [`examples/README.md`](examples/README.md).
 
@@ -230,6 +260,8 @@ legacy array-warp workflows but should not be the default for a new physical cha
 | Area | Modules | Main capabilities |
 |---|---|---|
 | Composition and units | `compose`, `grid`, `streams` | `Signal`, recipes, deterministic factor streams, contrastive pairs |
+| Chains that meet | `subchain`, `joins`, `sequence`, `channels`, `stages`, `trigger`, `tolerance` | A chain as any signal-taking parameter; `combine` and signal-driven `gain`/`offset`/`gate`/`delay`; `sequence`/`switch`; several named channels in one recipe (`Channels`, `use`); general `law`/`filter` stages; a triggered, segmented, averaged acquisition; toleranced parts and corners with held-out-unit datasets; `summary()` as a tree |
+| I/Q and RF | `iq`, `domain`, `rf`, `iqfile` | Complex-baseband records and QAM sources, `upconvert`/`downconvert`, transmitter and LO impairments with a report of what each came to, SigMF and interleaved I/Q in and out, spectrum/ACLR/CCDF and EVM against the transmitted symbols |
 | Sources and effects | `physics`, `capture`, `impairments`, `events`, `grammar` | Digital/RF/analog/CMOS sources, a real capture from disk, channels, reflections, jitter, named faults, localized needles (incl. a generic clamped-exponential rail transient), broad shape generation |
 | Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, a probe pack (loading, compensation, ground-lead ring, termination, AC coupling, overload recovery), scope/ADC effects, segmented PAM4 datasets |
 | Links and systems | `rx`, `cdr`, `sparam`, `net`, `scenario`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, shared nets (several drivers, switched terminations, R/L/C elements so a hand-over rings, each driver optionally rendering its own chain as its level) and the scenario layer that schedules them from "who held the net when", multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |

@@ -146,7 +146,34 @@ cannot stop — and 12 Ω of series damping is the whole fix, for 131 ps of fall
 inductance is also what makes a line reachable as a lumped ladder (`net.line_ladder`), sized by
 a measured rule rather than a rule of thumb.
 
-### 7. Specialist topics
+### 7. Compose chains that meet
+
+A chain is a line with one source; a capture is not. Take these in order, and stop when you
+have what you need. The cookbook chapter
+[Composing a realistic capture](../docs/COOKBOOK.md#composing-a-realistic-capture) is the text
+that goes with them.
+
+| Example | Use it when |
+|---|---|
+| [`sub_chains.py`](sub_chains.py) | An op's second signal has a chain of its own: an aggressor after its own channel, a filtered message. Start here |
+| [`joins.py`](joins.py) | A second signal is added, multiplies, gates or delays the record: hum on a sensor, gain on a supply ripple, an enable, a Doppler delay |
+| [`sequence_and_switch.py`](sequence_and_switch.py) | The transmission has parts in time (idle, preamble, payload) or a signal selects between sources, and you need per-sample labels of which |
+| [`clock_and_data.py`](clock_and_data.py) | Several channels must be correlated the way one PLL, one supply or one bit stream makes them, from one recipe |
+| [`law_and_filter.py`](law_and_filter.py) | The shape has no named op: a comparator with hysteresis, an anti-alias filter, with the delay accounted for |
+| [`triggered_capture.py`](triggered_capture.py) | The record is what a scope's trigger kept: an edge or pulse-width trigger, segmented memory, holdoff, averaging |
+| [`unit_variation.py`](unit_variation.py) | Parts have tolerances and a model must generalise to units it has not seen; shows the leakage a random split hides |
+| [`composed_capture.py`](composed_capture.py) | You want to see all of the above on one two-channel triggered capture, and each cause of its jitter isolated by changing one named thing |
+
+### 8. I/Q and RF
+
+| Example | Use it when |
+|---|---|
+| [`iq_passband.py`](iq_passband.py) | The signal is a modulated carrier: a complex-baseband record, up to a passband voltage, through a scope, back to symbols. Start here |
+| [`iq_impairments.py`](iq_impairments.py) | A transmitter and its oscillator are not ideal: an EVM budget predicted from the chain's own report against the measured EVM |
+| [`rf_measures.py`](rf_measures.py) | You need ACLR, PAPR and EVM against the transmitted symbols, with an amplifier compressing the passband voltage |
+| [`iq_recordings.py`](iq_recordings.py) | I/Q has to come from or go to a file: SigMF with annotations, raw interleaved samples with a marker channel, an embedded recording |
+
+### 9. Specialist topics
 
 | Example | Use it when |
 |---|---|
