@@ -4242,7 +4242,7 @@ check("every op that does not act on a field refuses one by name and names photo
       all(m.startswith(f"{op} (op 2)") and "optical field (domain 'optical')" in m
           and "photodetect(" in m for op, m in zip(_onot, _omsgs))
       and "photodetect(responsivity=...) is the bridge" in _ocmsg
-      and len(_onot) == len(_oC._EXEC) - 12,
+      and len(_onot) == len(_oC._EXEC) - 15,
       f"{len(_onot)} of {len(_oC._EXEC)} ops refused; {len(_oC._EXEC) - len(_onot)} accept a "
       f"field: {sorted(set(_oC._EXEC) - set(_onot))}; e.g. {_ocmsg[:92]}...")
 
@@ -5135,6 +5135,204 @@ check("recipes.buck, a synchronous buck as ONE net (a PWM driver, an inductor, a
       "; ".join(f"{c['v_in']:g} V at duty {c['duty']}: {1e3 * pp * r:.4f} mV against "
                 f"{1e3 * pp:.4f} mV ({100 * (r - 1):+.3f} %), f_sw/f0 {c['f_sw_hz'] / f0:.1f}"
                 for c, _, r, _, pp, _, f0 in _rures))
+
+print("\n== a swept-wavelength record: a laser in its own frame, delay and combine as the "
+      "interferometer, a resonator solved there (GitHub #93, #94) ==")
+from scipy.integrate import solve_ivp as _swivp
+from scipy.special import wofz as _swwofz
+from wfmsynth import swept as _SW, measure as _swM
+
+_swC = 299792458.0e9                                      # nm/s
+_swg = Grid(fs=1e6, n=1 << 17)
+_swt = np.arange(_swg.n) / _swg.fs
+_swT = _swg.n / _swg.fs
+_swrate = (_swC / 1549.0 - _swC / 1551.0) / _swT
+
+
+def _swlas(grid=_swg, **kw):
+    return Signal(seed=1, grid=grid).laser(**(kw or dict(start_nm=1549.0, stop_nm=1551.0)))
+
+
+def _swpd(s):
+    return s.copy().photodetect(shot=False).waveform()
+
+
+def _swfringe(x, nu):
+    """The delay a fringe against optical frequency stands for, from its spectrum."""
+    o = np.argsort(nu)
+    un = np.linspace(nu.min(), nu.max(), len(nu))
+    xi = np.interp(un, nu[o], x[o])
+    s = np.abs(np.fft.rfft((xi - xi.mean()) * np.hanning(len(xi))))
+    k = int(s.argmax())
+    return (k + 0.5 * (s[k - 1] - s[k + 1]) / (s[k - 1] - 2 * s[k] + s[k + 1])) / (
+        len(xi) * (un[1] - un[0]))
+
+
+# ---- the frame: a delayed copy is turned by the carrier's integral over the delay
+_swl = _swlas()
+_swmap = _SW.wavelength_map(_swl)
+_swtau = 2e-9
+_swx = _swpd(_swl.copy().combine([_swl.copy().delay(by=_swtau)]).gain(by=0.5))
+_swwant = 0.5 * (1 + np.cos(2 * np.pi * _swtau * _swC / (1549.0 + 2.0 * (_swt - _swtau / 2) / _swT)))
+_swerr = float(np.abs(_swx - _swwant)[1:].max())
+_swsp = np.abs(np.fft.rfft((_swx - _swx.mean()) * np.hanning(_swg.n)))
+_swbeat = float(_swsp.argmax() * _swg.fs / _swg.n)
+check("a laser's field is a constant in the frame of its own carrier, and `delay` on it turns "
+      "the carrier by its integral over the delay: field + delayed field detected is "
+      "(1 + cos(2 pi nu(t - tau/2) tau))/2 and beats in time at (sweep rate) x delay",
+      np.array_equal(_swl.waveform(), np.ones(_swg.n, complex)) and _swl.roles() == []
+      and _swerr < 1e-8 and abs(_swbeat / (_swrate * _swtau) - 1) < 2e-3,
+      f"1549 -> 1551 nm in {_swT * 1e3:.0f} ms ({_swrate / 1e12:.3f} THz/s), tau = 2 ns: max "
+      f"|record - closed form| {_swerr:.1e}; beat {_swbeat:.1f} Hz against rate x tau "
+      f"{_swrate * _swtau:.1f} Hz")
+
+# ---- the interferometer and the stray reflection are chains
+_swmz = [_swpd(_sws.recipes.mzi(_swl, delay_s=50e-12, extinction_db=er)) for er in (None, 20.0)]
+_swmzd = _swfringe(_swmz[0], _swmap["f_hz"])
+_swer = float(10 * np.log10(_swmz[1].max() / _swmz[1].min()))
+_swsr = _swpd(_sws.recipes.stray_reflection(_swl, delay_s=40e-12, reflectivity=0.02))
+_swsrd = _swfringe(_swsr, _swmap["f_hz"])
+check("recipes.mzi and recipes.stray_reflection are delay + gain + combine: an MZI's fringes "
+      "are 1/delay apart in optical frequency with the stated extinction, and a stray "
+      "reflection's fringe has the spacing its delay predicts and is 4 r peak to peak",
+      abs(_swmzd / 50e-12 - 1) < 2e-3 and _swmz[0].min() < 1e-6 and abs(_swer - 20.0) < 0.01
+      and abs(_swsrd / 40e-12 - 1) < 2e-3 and abs(np.ptp(_swsr) / 0.08 - 1) < 1e-3
+      and [o["op"] for o in _sws.recipes.mzi(_swl, delay_s=50e-12).ops] == ["laser", "gain",
+                                                                           "combine"],
+      f"MZI 50 ps: fringe spacing reads back as {_swmzd * 1e12:.3f} ps, darkest fringe "
+      f"{_swmz[0].min():.1e}, stated 20 dB -> {_swer:.4f} dB; stray reflection 40 ps, r = 0.02: "
+      f"{_swsrd * 1e12:.3f} ps, {np.ptp(_swsr):.5f} peak to peak against 0.08")
+
+# ---- a ring on a slow sweep: wavelength, Q, extinction and FSR
+_swring = _sws.recipes.ring(_swl, wavelength_nm=1550.0, q=1e5, extinction_db=15.0, fsr_nm=0.8)
+_swrx = _swpd(_swring)
+_swdips = _swM.resonances(*_swM.transmission(_swrx, _swmap["wavelength_nm"]))
+_swmid = min(_swdips, key=lambda d: abs(d["wavelength_nm"] - 1550.0))
+_swnext = [d["wavelength_nm"] for d in _swdips if d["wavelength_nm"] > 1550.4][0]
+_swsteady = float(np.abs(_swrx - np.abs(_SW.steady(_swmap["wavelength_nm"], _swring.ops[1])) ** 2).max())
+check("a ring stated by wavelength, Q, extinction and FSR (recipes.ring, one resonator op) "
+      "measured on a slow sweep has them: the dips are read off the record by "
+      "measure.resonances, and the record is the stated settled response",
+      abs(_swmid["wavelength_nm"] - 1550.0) < 2e-5 and abs(_swmid["q"] / 1e5 - 1) < 5e-3
+      and abs(_swmid["extinction_db"] - 15.0) < 0.05 and abs(_swnext - 1550.8) < 1e-4
+      and _swsteady < 1e-5,
+      f"resonance at {_swmid['wavelength_nm']:.6f} nm (1550), Q {_swmid['q']:.0f} (100000), "
+      f"extinction {_swmid['extinction_db']:.3f} dB (15), next order at {_swnext:.5f} nm "
+      f"(1550.8); max |record - settled response| {_swsteady:.1e}")
+
+_swop = dict(wavelength_nm=1550.0, intrinsic_hz=1e9, coupling_hz=0.5e9, fsr_hz=100e9)
+_swe = np.exp(-2j * np.pi * (_swmap["f_hz"] - _swC / 1550.0) / 100e9)
+_swr, _swa = np.exp(-np.pi * 0.5e9 / 100e9), np.exp(-np.pi * 1e9 / 100e9)
+_swexact = np.abs((_swr - _swa * _swe) / (1 - _swr * _swa * _swe)) ** 2
+_swdiff = float(np.abs(_swpd(_swl.copy().resonator(**_swop)) - _swexact).max())
+check("every order of the ring is counted (the far ones in closed form), so the record is "
+      "the ring formula (r - a e^{j phi})/(1 - r a e^{j phi}) to first order in the coupling "
+      "per round trip",
+      _swdiff < 5e-4,
+      f"finesse 67, coupling per round trip {np.pi * 0.5e9 / 100e9:.4f}: max |record - ring "
+      f"formula| {_swdiff:.1e} (bound 5e-4, about the coupling squared)")
+
+# ---- a fast sweep: ring-down, against the swept Lorentzian and an ODE integration
+_swgf = Grid(fs=50e6, n=100000)
+_swlf = _swlas(_swgf, start_nm=1550.0, speed_nm_per_s=50.0)
+_swlam = _SW.wavelength_map(_swlf)["wavelength_nm"]
+_swl0 = float(_swlam[_swgf.n // 2])
+_swfx = _swlf.copy().resonator(wavelength_nm=_swl0, intrinsic_hz=0.3e6, coupling_hz=0.7e6).waveform()
+_swk, _swke = 2 * np.pi * 1e6, 2 * np.pi * 0.7e6
+_swd = 2 * np.pi * (_swC / _swlam - _swC / _swl0)
+_swtf = np.arange(_swgf.n) / _swgf.fs
+_swchirp = float(np.gradient(_swd, _swtf)[_swgf.n // 2])
+_swp = -0.5j * _swchirp
+_swana = 1 - _swke * 0.5 * np.sqrt(np.pi / _swp) * _swwofz(1j * (0.5 * _swk + 1j * _swd)
+                                                           / (2 * np.sqrt(_swp)))
+_swi0, _swi1 = _swgf.n // 2 - 6000, _swgf.n // 2 + 12000
+_swode = _swivp(lambda s, y: -(0.5 * _swk + 1j * np.interp(s, _swtf, _swd)) * y + 1.0,
+                (_swtf[_swi0], _swtf[_swi1]), [1.0 / (0.5 * _swk + 1j * _swd[_swi0]) + 0j],
+                t_eval=_swtf[_swi0:_swi1 + 1], method="DOP853", rtol=1e-10, atol=1e-16)
+_swea = float(np.abs(_swfx - _swana).max())
+_sweo = float(np.abs(_swfx[_swi0:_swi1 + 1] - (1 - _swke * _swode.y[0])).max())
+_swstill = 1 - _swke / (0.5 * _swk + 1j * _swd)
+_swpk = float((np.abs(_swfx) ** 2).max())
+check("a resonance crossed within a photon lifetime is NOT its Lorentzian: the ring-down "
+      "beats with the laser. The field matches the analytic swept Lorentzian (Faddeeva "
+      "function) and an independent ODE integration (DOP853)",
+      _swea < 3e-5 and _sweo < 3e-5 and np.abs(_swfx - _swstill).max() > 0.5 and _swpk > 1.3
+      and int(np.argmin(np.abs(_swfx))) > _swgf.n // 2,
+      f"1 MHz linewidth swept at 50 nm/s (chirp / kappa^2 = {abs(_swchirp) / _swk ** 2:.2f}): "
+      f"max |field - analytic| {_swea:.1e}, |field - ODE| {_sweo:.1e} (bound 3e-5); against "
+      f"the settled Lorentzian {np.abs(_swfx - _swstill).max():.2f}; transmission peaks at "
+      f"{_swpk:.3f} and bottoms at {(np.abs(_swfx) ** 2).min():.4f} (settled: 0.16), "
+      f"{(int(np.argmin(np.abs(_swfx))) - _swgf.n // 2) / _swgf.fs * 1e6:.2f} us late")
+
+# ---- two channels, one laser: the map from the reference, the device on the recovered axis
+_swsrc = lambda: Signal().use("laser")                                   # noqa: E731
+
+
+def _swbench(**las):
+    return _sws.Channels(
+        {"dut": _sws.recipes.ring(_swsrc(), wavelength_nm=1550.0, q=1e5, extinction_db=15.0,
+                                  fsr_nm=0.8).photodetect(shot=False),
+         "ref": _sws.recipes.mzi(_swsrc(), delay_s=2e-9).photodetect(shot=False)},
+        shared={"laser": Signal().laser(start_nm=1549.0, stop_nm=1551.0, **las)},
+        seed=1, grid=_swg)
+
+
+_swfr = 1550.0 ** 2 / _swC / 2e-9                                        # one fringe, nm
+_swb = _swbench(bow_nm=0.02, ripple_nm=3e-3, ripple_hz=40.0)
+_sww = _swb.waveforms()
+_swtruth = _SW.wavelength_map(_swb.signal("ref"))["wavelength_nm"]
+_swgot = _swM.swept_map(_sww["ref"], _swg.fs, 2e-9, at_s=0.0, wavelength_nm=1549.0)
+_swmerr = float(np.abs(_swgot - _swtruth).max())
+_swlin = float(np.abs(_swtruth - (1549.0 + 2.0 * _swt / _swT)).max())
+_swwl, _swtr = _swM.transmission(_sww["dut"], _swgot)
+_swdop = [o for o in _swb.signal("dut").ops if o["op"] == "resonator"][0]
+_swterr = float(np.abs(_swtr - np.abs(_SW.steady(_swwl, _swdop)) ** 2).max())
+_swrec = min(_swM.resonances(_swwl, _swtr), key=lambda d: abs(d["wavelength_nm"] - 1550.0))
+_swnaive = min(_swM.resonances(*_swM.transmission(_sww["dut"], 1549.0 + 2.0 * _swt / _swT)),
+               key=lambda d: abs(d["wavelength_nm"] - 1550.0))
+check("on a sweep that is NOT linear (a bow and a ripple), the time-to-wavelength map "
+      "recovered from the reference interferometer's fringes matches the ground truth, and "
+      "the transmission put on that recovered axis is the device's stated response; on the "
+      "axis a linear sweep would assume the ring is misplaced",
+      _swmerr < 0.02 * _swfr and _swterr < 5e-3
+      and abs(_swrec["wavelength_nm"] - 1550.0) < 5e-5
+      and abs(_swnaive["wavelength_nm"] - 1550.0) > 0.015,
+      f"reference fringes {_swfr * 1e3:.2f} pm apart: max |recovered - true| "
+      f"{_swmerr * 1e3:.4f} pm ({_swmerr / _swfr:.4f} fringe, bound 0.02) where the sweep is "
+      f"{_swlin * 1e3:.1f} pm off linear; max |T - stated| {_swterr:.1e}; ring found at "
+      f"{_swrec['wavelength_nm']:.5f} nm, against {_swnaive['wavelength_nm']:.5f} nm on a "
+      f"linear axis")
+
+_swh = _swbench(hops=[{"t_s": 0.07, "by_nm": 0.03}])
+_swhw, _swhev = _swh.realize()
+_swht = _SW.wavelength_map(_swh.signal("ref"))["wavelength_nm"]
+_swhe = (_swM.swept_map(_swhw["ref"], _swg.fs, 2e-9, at_s=0.0, wavelength_nm=1549.0) - _swht) / _swfr
+_swhk = int(0.07 * _swg.fs)
+check("a mode hop is a step in the map and an event, and it breaks what a fringe count can "
+      "know: after it the recovered map is off by the hop less a whole number of fringes",
+      np.abs(_swhe[:_swhk - 500]).max() < 3e-3 and abs(_swhe[_swhk + 500:].mean() + 7.0) < 0.05
+      and [e.t_s for e in _swhev["dut"] if e.kind == "mode_hop"] == [0.07],
+      f"a 30 pm hop is {0.03 / _swfr:.2f} fringes: map error before it "
+      f"{np.abs(_swhe[:_swhk - 500]).max():.1e} fringe, after it "
+      f"{_swhe[_swhk + 500:].mean():.3f} fringes ({_swhe[_swhk + 500:].mean() * _swfr * 1e3:.2f} pm)")
+
+# ---- what cannot be done honestly is refused by name
+_swref = [
+    _qrefusal(lambda: _swl.copy().optical_mpi(delay_samples=3)),
+    _qrefusal(lambda: _swl.copy().combine([Signal().laser(start_nm=1549.0, stop_nm=1552.0)]).waveform()),
+    _qrefusal(lambda: _swl.copy().delay(by=1e-6).waveform()),
+    _qrefusal(lambda: _swl.copy().resonator(wavelength_nm=1550.0, intrinsic_hz=2e6,
+                                            coupling_hz=2e6).waveform()),
+    _qrefusal(lambda: Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096))
+              .carrier("nrz", n_ui=512).eo().delay(by=1e-11)),
+]
+check("refused by name: a copy without the carrier's turn (optical_mpi) on a laser's field, "
+      "fields about two carriers combined, a delay whose beat leaves the grid, a resonance "
+      "crossed in under 4.4 samples, and a delay on a field that states no carrier",
+      "recipes.stray_reflection" in _swref[0] and "another carrier" in _swref[1]
+      and "past this grid's Nyquist" in _swref[2] and "would alias" in _swref[3]
+      and "carrier was never stated" in _swref[4] and "laser(start_nm=...)" in _swref[4],
+      "; ".join(m.split(":")[0] + ": " + m.split(":", 1)[1].strip()[:58] + "..." for m in _swref))
 
 print()
 if fails:

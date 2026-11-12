@@ -64,8 +64,15 @@ Modules / public API:
   recipes       useful ARRANGEMENTS as plain functions returning a chain: fading(),
                 multipath() on an envelope; what a capture carries that is not the signal --
                 flicker() (1/f noise from superposed two-state processes), hum(), ripple(),
-                pickup(); a contact as an enable, bounce() and intermittent(); and sources,
-                oscillator_startup(), multitone() and buck() (a converter as one `net`)
+                pickup(); a contact as an enable, bounce() and intermittent(); sources,
+                oscillator_startup(), multitone() and buck() (a converter as one `net`);
+                and mzi(), stray_reflection(), ring() and gas_cell() on a swept laser's
+                field
+  swept         Signal.laser(): a swept-wavelength laser, its field held in the frame of its
+                own moving carrier; wavelength_map() is the ground-truth map from time to
+                wavelength; Signal.resonator() is a ring solved in that frame (ring-down and
+                all), steady() its response standing still. Read back with
+                measure.swept_map / transmission / resonances
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 
 A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM
@@ -108,7 +115,7 @@ from . import (physics, impairments, events, grammar, pam4, grid, instrument, st
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
                tolerance, subchain, joins, sequence, channels, trigger, iqfile,
-               rf, baseband, states, recipes, ofdm)
+               rf, baseband, states, recipes, ofdm, swept)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -181,7 +188,7 @@ __all__ = [
     # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
     # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
     "capture", "hdf5", "resample", "net", "scenario", "stages", "iq", "domain", "joins",
-    "trigger", "rf", "baseband", "recipes", "ofdm",
+    "trigger", "rf", "baseband", "recipes", "ofdm", "swept",
     "LAW_KINDS", "FILTER_KINDS",
     "iqfile", "read_iq", "to_sigmf", "to_interleaved",
     "Hold", "Agent", "merge_holds", "hold_windows",

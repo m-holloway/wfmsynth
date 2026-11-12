@@ -156,6 +156,13 @@ SAID_AS = {
     ("ofdm", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
     ("ofdm", "symbols"): "n_symbols= (how many OFDM symbols); the values on the resource "
                          "grid come from constellation= with prbs= or bits=, and pilots=",
+    ("laser", "wavelength_nm"): "start_nm= (alone it is a laser standing still; with "
+                                "stop_nm= or speed_nm_per_s= a sweep)",
+    ("laser", "speed_nm_s"): "speed_nm_per_s=",
+    ("resonator", "q"): "intrinsic_hz= and coupling_hz= (its two linewidths); from a Q and "
+                        "an extinction, ws.recipes.ring(chain, wavelength_nm=, q=, "
+                        "extinction_db=)",
+    ("resonator", "fsr_nm"): "fsr_hz= (ws.recipes.ring takes fsr_nm=)",
     ("carrier", "prbs"): "pattern='prbs7' (also 'prbs15', 'clock', ...), with seed= for its "
                          "phase; prbs=<order> is how `iq` and `coded` say it",
     ("carrier", "transition_s"): "tr_s= (the 10-90 % time of an edge, in seconds)",

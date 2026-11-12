@@ -454,9 +454,9 @@ class _Render:
         return self.done[name]
 
 
-def use(x, name, streams, dom=None):
+def use(x, name, streams, dom=None, carrier=None):
     """The `use` op: the chain `name` of the record being rendered, at this point in a chain.
-    `dom` is the domain the waveform `x` is in."""
+    `dom` is the domain the waveform `x` is in, and `carrier` what a field is about."""
     r = getattr(streams, "record", None)
     if r is None:
         raise ValueError(
@@ -488,11 +488,12 @@ def use(x, name, streams, dom=None):
                 f"before it.")
         sig = rec._signal(name, like=x, dom=dom)
         if sink is None:
-            return sig._run(r.view(name), _x=x)
+            return sig._run(r.view(name), _x=x, _carrier=carrier)
         # the stage sees the events already on the waveform it is handed, so a `trigger` in
         # it re-times them onto its windows (and drops the rest) along with the samples
         before = {id(e) for e in sink}
-        y, placed = sig._run(r.view(name), collect_events=True, _x=x, _events=sink)
+        y, placed = sig._run(r.view(name), collect_events=True, _x=x, _events=sink,
+                             _carrier=carrier)
         sink[:] = [e for e in placed.events if id(e) in before]
         placed = [e for e in placed.events if id(e) not in before]
     if sink is not None and placed is not None:

@@ -203,7 +203,10 @@ def test_the_ops_that_accept_a_field_are_an_inventory():
     takes = {op for op in C._EXEC if "optical" in DOMAIN.accepts(op)}
     assert takes == {"fiber", "optical_mpi", "edfa", "photodetect",          # defined on E(t)
                      "capture",                                              # a stored field
-                     "filter", "gain", "gate", "combine", "sequence", "switch", "use"}
+                     "filter", "gain", "gate", "combine", "sequence", "switch", "use",
+                     # a swept laser and what reads its carrier (tests/test_swept.py);
+                     # `delay` only on a field that states one, and refused here otherwise
+                     "laser", "resonator", "delay"}
     assert DOMAIN.EMITS["eo"] == "optical" and DOMAIN.EMITS["photodetect"] == "real"
     assert DOMAIN.accepts("eo") == ("real",)
     # ... and every other op is refused on a field, each naming the bridge

@@ -44,6 +44,18 @@ A SOURCE
                   inductor, a capacitor and a load, solved by `net`. In volts.
                   `buck_ripple` is the textbook figures it is checked against.
 
+ON A SWEPT LASER'S FIELD (`wfmsynth.swept`), devices and what a bench adds
+
+    mzi           a Mach-Zehnder interferometer: the field and a delayed copy of it,
+                  `delay` + `gain` + `combine`. Fringes every 1/delay_s of optical
+                  frequency; also the wavelength reference of a sweep.
+    stray_reflection   a weak delayed copy added to the field: the fringe a pair of
+                  facets or connectors puts across a spectrum.
+    ring          a `resonator` stated the way a ring is specified: Q, extinction, free
+                  spectral range in nm.
+    gas_cell      absorption lines at stated wavelengths, one `resonator` each: an
+                  absolute wavelength reference.
+
     import wfmsynth as ws
     tx = ws.Signal(seed=1, grid=g).iq("qpsk", prbs=11)
     rx = ws.recipes.multipath(tx, delays_s=[0.0, 2e-6, 5e-6], gains=[1.0, 0.5, 0.25],
@@ -60,6 +72,10 @@ A SOURCE
     ws.Signal(seed=1, grid=g).carrier("sine", f_hz=1e3).combine(clutter)
 
     ws.recipes.multitone(1e6, 9e6, 33, notch=(4.6e6, 5.4e6), sig=ws.Signal(seed=1, grid=g))
+
+    laser = ws.Signal(seed=1, grid=g).laser(start_nm=1549.0, stop_nm=1551.0)
+    dut = ws.recipes.ring(laser, wavelength_nm=1550.0, q=1e5, extinction_db=15.0)
+    dut = ws.recipes.stray_reflection(dut, delay_s=40e-12, reflectivity=0.02).photodetect()
 
 A SOURCE takes `sig=`, the Signal to build on. Left out it is `Signal()`, a sub-chain for
 another op; given `ws.Signal(seed=1, grid=g)`, the result is the record.
@@ -81,6 +97,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import swept as SW
 from .compose import Signal
 
 
@@ -149,14 +166,7 @@ def multipath(tx, delays_s, gains, doppler_hz=None, shape="jakes"):
     if not isinstance(tx, Signal) or not tx.ops:
         raise ValueError("multipath: tx is the transmitter's chain, a Signal that already "
                          "has its source: ws.Signal(seed=1, grid=g).iq('qpsk', prbs=11).")
-    drawn = tx.roles()
-    if drawn and tx.ops[0]["op"] != "use":
-        raise ValueError(
-            f"multipath: tx draws random roles {drawn}, and it is rendered once per path "
-            f"under that path's own names, so each path would carry different noise rather "
-            f"than a delayed copy. Put the transmitter in a Channels record as a named chain "
-            f"and pass ws.Signal().use(<name>), which is the same samples wherever it is "
-            f"used; or move the randomness after the multipath.")
+    _same_on_every_path(tx, "multipath")
 
     def path(d, g):
         s = tx.copy()
@@ -170,6 +180,18 @@ def multipath(tx, delays_s, gains, doppler_hz=None, shape="jakes"):
 
     paths = [path(d, g) for d, g in zip(delays_s, gains)]
     return paths[0].combine(paths[1:]) if len(paths) > 1 else paths[0]
+
+
+def _same_on_every_path(tx, who):
+    """Refuse a chain that would not be the same samples each time it is rendered."""
+    drawn = tx.roles()
+    if drawn and tx.ops[0]["op"] != "use":
+        raise ValueError(
+            f"{who}: tx draws random roles {drawn}, and it is rendered once per path "
+            f"under that path's own names, so each path would carry different noise rather "
+            f"than a delayed copy. Put the transmitter in a Channels record as a named chain "
+            f"and pass ws.Signal().use(<name>), which is the same samples wherever it is "
+            f"used; or move the randomness after the {who}.")
 
 
 def _corners(f_lo_hz, f_hi_hz, per_decade):
@@ -702,3 +724,142 @@ def buck(v_in, duty, f_sw_hz, l_h, c_f, r_load_ohm, r_on_ohm=0.05, tr_s=20e-9, s
         drivers=[{"id": "switch", "node": "sw", "ohm": float(r_on_ohm), "state": "driving",
                   "source": {"ops": pwm, "volts": True}}],
         probe="out")
+
+
+# ------------------------------------------------------------------ on a laser's field
+
+def _field(tx, who):
+    if not isinstance(tx, Signal) or not tx.ops:
+        raise ValueError(
+            f"{who}: its first argument is the chain the light arrives on, a Signal that "
+            f"already has its source: ws.Signal(seed=1, grid=g).laser(start_nm=1549.0, "
+            f"stop_nm=1551.0), or ws.Signal().use(<name>) of a laser in a Channels record.")
+    return tx
+
+
+def _two_paths(tx, delay_s, direct, delayed, who):
+    """``direct * E(t) + delayed * E(t - delay_s)``: the chain, and a copy of it through
+    `delay` and `gain`, joined by `combine`."""
+    _same_on_every_path(_field(tx, who), who)
+    if not float(delay_s) > 0:
+        raise ValueError(f"{who}: delay_s is how much longer the second path takes, in "
+                         f"seconds, and is positive; got {delay_s!r}. A path difference "
+                         f"dL in a medium of group index ng is ng * dL / c.")
+    out = tx.copy() if direct == 1.0 else tx.copy().gain(by=float(direct))
+    return out.combine([tx.copy().delay(by=float(delay_s)).gain(by=float(delayed))])
+
+
+def mzi(tx, delay_s, extinction_db=None):
+    """A MACH-ZEHNDER INTERFEROMETER with arms `delay_s` apart, one output port.
+
+        laser = ws.Signal(seed=1, grid=g).laser(start_nm=1549.0, stop_nm=1551.0)
+        ws.recipes.mzi(laser, delay_s=50e-12).photodetect(shot=False)
+
+    The chain is `tx.gain(by=a)` combined with `tx.delay(by=delay_s).gain(by=b)`. On a
+    laser's field `delay` turns the carrier by its integral over the delay, so the output
+    power is ``a^2 + b^2 + 2ab*cos(2*pi*nu*delay_s)``: fringes ``1/delay_s`` apart in optical
+    frequency (50 ps is 20 GHz, 0.16 nm at 1550 nm), beating in time at (sweep rate) x
+    delay_s. Ideal couplers give a = b = 1/2: power from 1 down to 0. `extinction_db` is the
+    ratio of the brightest to the darkest fringe, 20*log10((a + b)/(a - b)) with a + b = 1,
+    for arms that are not balanced. Used as a sweep's wavelength reference, the fringe count
+    is the optical frequency: `ws.measure.swept_map`.
+
+    A passive interferometer has a delay, not a V-pi; a driven one is `eo(kind="mzm")`."""
+    rho = 0.0 if extinction_db is None else 10.0 ** (-float(extinction_db) / 20.0)
+    if not 0.0 <= rho < 1.0:
+        raise ValueError(f"mzi: extinction_db={extinction_db!r} is the brightest fringe over "
+                         f"the darkest, in dB, and is positive (leave it out for none).")
+    return _two_paths(tx, delay_s, 0.5 * (1.0 + rho), 0.5 * (1.0 - rho), "mzi")
+
+
+def stray_reflection(tx, delay_s, reflectivity):
+    """A STRAY REFLECTION: a weak copy of the field, `delay_s` late, added to it.
+
+        ws.recipes.stray_reflection(dut, delay_s=40e-12, reflectivity=0.02)
+
+    Two facets, two connectors or a facet and a detector window send a little light round
+    twice; it arrives `delay_s` later (twice the gap's transit time) and interferes. The
+    chain is `tx` combined with `tx.delay(by=delay_s).gain(by=reflectivity)`, so
+    `reflectivity` is the FIELD ratio of the twice-reflected light (the product of the two
+    amplitude reflection coefficients; the same number `optical_mpi` takes), and the power
+    ripples by ``1 + r^2 + 2r*cos(2*pi*nu*delay_s)``: a fringe of period ``1/delay_s`` in
+    optical frequency and 4r peak to peak. This is the first round trip only: right while r
+    is small, and a cavity with strong mirrors is a `resonator`."""
+    if not 0.0 < float(reflectivity) < 1.0:
+        raise ValueError(f"stray_reflection: reflectivity={reflectivity!r} is the field "
+                         f"ratio of the reflected copy, between 0 and 1.")
+    return _two_paths(tx, delay_s, 1.0, reflectivity, "stray_reflection")
+
+
+def _plain(who, **values):
+    for k, v in values.items():
+        if isinstance(v, dict):
+            raise ValueError(
+                f"{who}: {k}= is converted into the resonator's own numbers here, so it "
+                f"takes a number. For a part that varies from unit to unit put the "
+                f"tolerance where the number ends up: tx.resonator(wavelength_nm=, "
+                f"intrinsic_hz=ws.tol(...), coupling_hz=ws.tol(...)).")
+
+
+def ring(tx, wavelength_nm, q, extinction_db=None, fsr_nm=None, coupling="under",
+         split_hz=None, by=None):
+    """A RING RESONATOR on a bus waveguide, stated as a ring is specified.
+
+        ws.recipes.ring(laser, wavelength_nm=1550.0, q=1e5, extinction_db=15.0, fsr_nm=0.8)
+
+    It is one `resonator` op, with these numbers turned into its own:
+
+        linewidth   nu0 / q                            intrinsic_hz + coupling_hz
+        extinction  ((ki - ke)/(ki + ke))**2 = 10**(-extinction_db/10); left out, the ring
+                    is critically coupled (ki = ke) and the dip reaches zero
+        coupling    "under" (ke < ki, the usual case) or "over" (ke > ki): the same dip,
+                    told apart only by phase
+        fsr_nm      the next resonance sits at wavelength_nm + fsr_nm; the others follow
+                    evenly in optical FREQUENCY (no dispersion)
+
+    `q` is the LOADED Q, the one a sweep measures. `split_hz` and `by` are the
+    resonator's: a backscatter doublet, and a resonance that moves during the sweep."""
+    _plain("ring", wavelength_nm=wavelength_nm, q=q, extinction_db=extinction_db,
+           fsr_nm=fsr_nm)
+    if coupling not in ("under", "over"):
+        raise ValueError(f"ring: coupling is 'under' (the bus takes less than the ring "
+                         f"loses) or 'over'; got {coupling!r}.")
+    if not (float(q) > 0 and float(wavelength_nm) > 0):
+        raise ValueError(f"ring: wavelength_nm={wavelength_nm!r} and q={q!r} are positive.")
+    width = float(SW.hz(wavelength_nm)) / float(q)
+    s = 0.0 if extinction_db is None else 10.0 ** (-float(extinction_db) / 20.0)
+    if not 0.0 <= s < 1.0:
+        raise ValueError(f"ring: extinction_db={extinction_db!r} is how far the dip goes "
+                         f"down, in dB, and is positive (leave it out for a dip to zero).")
+    ke = 0.5 * width * (1.0 - s if coupling == "under" else 1.0 + s)
+    extra = {}
+    if fsr_nm is not None:
+        extra["fsr_hz"] = float(SW.hz(wavelength_nm) - SW.hz(wavelength_nm + float(fsr_nm)))
+    if split_hz is not None:
+        extra["split_hz"] = float(split_hz)
+    return _field(tx, "ring").copy().resonator(
+        wavelength_nm=float(wavelength_nm), intrinsic_hz=width - ke, coupling_hz=ke, by=by,
+        **extra)
+
+
+def gas_cell(tx, lines_nm, depth=0.5, width_hz=1e9):
+    """A GAS CELL: absorption lines at stated wavelengths, the absolute reference of a sweep.
+
+        ws.recipes.gas_cell(laser, lines_nm=[1549.73, 1550.52], depth=0.4, width_hz=2e9)
+
+    One `resonator` per line, undercoupled so that its dip is a Lorentzian `width_hz` wide
+    (full width at half depth) taking the fraction `depth` of the power at its centre --
+    what a pressure-broadened line does to the light, by the same equation. A line is at
+    its wavelength whatever the laser does, so the time a sweep crosses one anchors the map
+    a fringe count gives (`ws.measure.swept_map(at_s=, wavelength_nm=)`)."""
+    _plain("gas_cell", depth=depth, width_hz=width_hz)
+    if not (0.0 < float(depth) < 1.0 and float(width_hz) > 0 and len(lines_nm)):
+        raise ValueError(f"gas_cell: depth={depth!r} is the fraction of the power a line "
+                         f"takes at its centre (between 0 and 1), width_hz={width_hz!r} its "
+                         f"full width, and lines_nm at least one wavelength.")
+    ke = 0.5 * float(width_hz) * (1.0 - np.sqrt(1.0 - float(depth)))
+    out = _field(tx, "gas_cell").copy()
+    for lam in lines_nm:
+        out = out.resonator(wavelength_nm=float(lam), intrinsic_hz=float(width_hz) - ke,
+                            coupling_hz=float(ke))
+    return out

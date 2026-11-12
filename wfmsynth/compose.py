@@ -59,6 +59,8 @@ from . import states as STATES
 from .states import KEYS as _STATES_KEYS
 from . import ofdm as OFDM
 from .ofdm import KEYS as _OFDM_KEYS
+from . import swept as SW
+from .swept import LASER_KEYS as _LASER_KEYS, RESONATOR_KEYS as _RESONATOR_KEYS
 
 
 # --------------------------------------------------------------- op executors
@@ -858,6 +860,22 @@ def _op_eo(x, p, streams, grid, idx):                        # E->O: electrical 
                               rng=streams.role(f"linewidth/{idx}"))
 
 
+def _op_laser(x, p, streams, grid, idx):
+    """A swept laser: a field in the frame of its own carrier (`wfmsynth/swept.py`)."""
+    if x is not None:
+        raise ValueError("laser is a source and starts a chain; a waveform has already "
+                         "arrived here.")
+    return SW.laser({k: p[k] for k in _LASER_KEYS if k in p}, grid, idx,
+                    sink=getattr(streams, "sink", None))
+
+
+def _op_resonator(x, p, streams, grid, idx, carrier=None):
+    """A resonator solved in the laser's frame; `by` moves its resonance in nm."""
+    by = 0.0 if p.get("by") is None else _by(p, streams, grid, idx, len(_joined(x, p)))
+    return SW.resonator(_joined(x, p), grid.fs, carrier,
+                        {k: p[k] for k in _RESONATOR_KEYS if k in p}, shift_nm=by)
+
+
 def _op_fiber(x, p, streams, grid, idx):                     # fibre CD (physical β2·L) + attenuation
     from . import optical as OPT
     return OPT.fiber(x, length_km=p.get("length_km", 1.0), D_ps_nm_km=p.get("D_ps_nm_km", 17.0),
@@ -1565,7 +1583,7 @@ def _joined(x, p):
     return x
 
 
-def _op_combine(x, p, streams, grid, idx):
+def _op_combine(x, p, streams, grid, idx, carrier=None):
     """Peer signals joined sample by sample (`wfmsynth/joins.py`)."""
     from . import joins as JN
     x = _joined(x, p)
@@ -1574,6 +1592,8 @@ def _op_combine(x, p, streams, grid, idx):
     # voltage, voltages
     dom = DOMAIN.held(x, grid)[0]
     JN.check_domain(p.get("how", "sum"), dom)
+    if dom == DOMAIN.OPTICAL:                 # ... and fields about the SAME carrier
+        SW.same_carrier(p.get("others") or (), carrier, grid, getattr(streams, "record", None))
     return JN.combine(x, SUB.signals(p, "others", streams, grid, idx, n=len(x), domain=dom),
                       how=p.get("how", "sum"), gains=p.get("gains"))
 
@@ -1608,16 +1628,17 @@ def _op_gate(x, p, streams, grid, idx):
                    placement=f"gate/{idx}")
 
 
-def _op_delay(x, p, streams, grid, idx):
+def _op_delay(x, p, streams, grid, idx, carrier=None):
     """A delay moves the labels with the samples: every event already on the waveform is
-    later by the delay AT that event, and one pushed past the end is gone with its samples."""
+    later by the delay AT that event, and one pushed past the end is gone with its samples.
+    `carrier` is the laser a field is in the frame of (`wfmsynth/swept.py`)."""
     from . import joins as JN
     sink = getattr(streams, "sink", None)
     upstream = list(sink or ())               # before `by` renders: its own events stay put
     by = _by(p, streams, grid, idx, len(_joined(x, p)))
     y = JN.delay(x, by, None if grid is None else grid.fs,
                  max_rate=p.get("max_rate", JN.DELAY_MAX_RATE),
-                 fc_hz=getattr(grid, "fc_hz", None))
+                 fc_hz=getattr(grid, "fc_hz", None), carrier=carrier)
     if upstream:
         gone = {id(e) for e in upstream}
         EV.shift(upstream, by, grid.fs, len(y))
@@ -1695,6 +1716,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
          "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
          "photodetect": _op_photodetect, "tia": _op_tia,
+         "laser": _op_laser, "resonator": _op_resonator,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase, "store": _op_store,
          "de_emphasis": _op_de_emphasis, "acquire": _op_acquire, "probe": _op_probe,
          "events": _op_events,
@@ -1737,6 +1759,7 @@ OP_KIND = {
     "crosstalk_matrix": "channel", "hybrid_echo": "channel", "multipair": "channel",
     "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
     "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
+    "laser": "source", "resonator": "channel",
     "probe": "probe",
     "rx_noise": "instrument", "agc": "instrument",
     "ctle": "instrument", "dfe": "instrument", "rx_ffe": "instrument", "tia": "instrument",
@@ -1965,6 +1988,10 @@ _LEAD_REJECT = {
           "render; the record's head IS the transmitter turning on",
     "ofdm": "its symbols are placed from the record's start and a burst has no earlier symbols "
             "to render; the record's head IS the transmitter turning on",
+    "laser": "its sweep is counted from the record's start, which a lead-in moves: the "
+             "delivered window would open on another wavelength under the same recipe",
+    "resonator": "it is solved against the laser's sweep, which is counted from the record's "
+                 "start",
     "upconvert": "the carrier's phase is counted from the record's start, which a lead-in "
                  "moves -- the delivered window would open on a different carrier phase under "
                  "the same recipe",
@@ -2034,7 +2061,7 @@ def _lead_source_geometry(ops, grid):
         raise ValueError("a lead-in needs a source op (add a carrier first)")
     src = ops[0]
     if src["op"] not in ("carrier", "symbols", "coded"):
-        if src["op"] in ("sequence", "switch", "iq", "ofdm"):   # sources that cannot extend
+        if src["op"] in ("sequence", "switch", "iq", "ofdm", "laser"):   # cannot extend
             raise ValueError(f"lead_in: the {src['op']!r} op cannot be rendered with a "
                              f"lead-in because {_LEAD_REJECT[src['op']]}")
         raise ValueError(f"a lead-in needs the first op to be the source; ops[0] is "
@@ -2218,7 +2245,10 @@ def _stored_rate(ops, fs, n, peak_ok=False):
 # on the grid the record is on NOW (`_grid_now`) rather than the one the chain started on. The
 # general stages and the I/Q impairments; the named link and instrument ops are placed before
 # an acquisition and keep the synthesis grid.
-_RATE_NOW = RF.RATE_AWARE + ("filter", "law", "delay", "gate", "gain", "offset", "combine")
+_RATE_NOW = RF.RATE_AWARE + ("filter", "law", "delay", "gate", "gain", "offset", "combine",
+                             "resonator")
+# ... of which these, on an optical field, are handed the carrier it is an envelope about
+_CARRIER_NOW = DOMAIN.READS_CARRIER + ("combine",)
 # ... and the channel ops that, on an ENVELOPE, are read about its centre frequency
 _CENTRE_NOW = ("lossy", "sparam")
 
@@ -2233,7 +2263,8 @@ def _grid_now(ops, grid, x, dom, fc):
     if fs == grid.fs:
         fs = grid.fs                         # untouched: the number the chain was given
     import dataclasses
-    return dataclasses.replace(grid, fs=fs, n=n if x is None else len(x), domain=dom, fc_hz=fc)
+    return dataclasses.replace(grid, fs=fs, n=n if x is None else len(x), domain=dom,
+                               fc_hz=fc if dom == DOMAIN.IQ else None)
 
 
 @dataclass
@@ -3080,7 +3111,11 @@ class Signal:
 
         On an I/Q record the envelope is shifted AND the carrier turned by
         -2*pi*fc_hz*by, as delaying the passband signal would: a constant delay is also a
-        phase, and a moving one a Doppler shift of -fc_hz * d(by)/dt. See `wfmsynth.joins`."""
+        phase, and a moving one a Doppler shift of -fc_hz * d(by)/dt. See `wfmsynth.joins`.
+
+        On the field of a `laser` the same holds with the laser's own moving carrier: the
+        field is turned by the integral of nu(t) over the delay, so a delayed copy beats
+        against the direct path at (sweep rate) x delay. See `wfmsynth.swept`."""
         from . import joins as JN
         OPKEYS.check("delay", params)
         JN.check_delay(max_rate)
@@ -3122,6 +3157,53 @@ class Signal:
         params: kind('mzm'|'dml'), vpi, bias, er_db, p_avg, alpha (chirp), adiabatic. Follow with
         `fiber`/`edfa`/`photodetect` — NOT the real-valued electrical ops."""
         return self._add("eo", **params)
+
+    def laser(self, **params):
+        """First op of a SWEPT-WAVELENGTH chain: a tunable laser, as an optical field held in
+        the frame of its own moving carrier (`wfmsynth.swept`).
+
+            Signal(grid=Grid(fs=1e6, n=1 << 17)).laser(start_nm=1549.0, stop_nm=1551.0)
+            Signal(grid=g).laser(start_nm=1550.0)                     # standing still
+            Signal(grid=g).laser(start_nm=1549.0, speed_nm_per_s=40.0, ripple_nm=2e-3,
+                                 ripple_hz=300.0, hops=[{"t_s": 0.02, "by_nm": 0.05}])
+
+        `start_nm` is the wavelength at the record's start. `stop_nm` is reached at its end,
+        or state `speed_nm_per_s`; with both the laser parks at `stop_nm`. `bow_nm` (a bow
+        that peaks at mid-sweep) and `ripple_nm` with `ripple_hz` (a periodic wobble) are the
+        sweep's nonlinearity; `hops` its mode hops, each a step in wavelength at a stated
+        time and a `mode_hop` event. `power` is |E|^2 (default 1). It draws nothing.
+
+        The samples are a constant: everything is in the carrier nu(t), which
+        `ws.swept.wavelength_map(sig)` returns as the ground-truth map from time to wavelength. On
+        this field `delay` turns the carrier by its integral over the delay, so a delayed
+        copy beats against the direct path (`ws.recipes.mzi`, `stray_reflection`), and
+        `resonator` is solved in the same frame. `photodetect` is the bridge out."""
+        if self.ops:
+            raise ValueError("laser is a source and starts a chain; this one already has "
+                             f"{self.ops[0]['op']!r}. A second laser is a second chain.")
+        if self.grid is not None:
+            SW.Carrier(_stated(self._drawn(params)), self.grid.fs, self.grid.n)
+        return self._add("laser", **params)
+
+    def resonator(self, by=None, **params):
+        """A resonator coupled to the bus -- a ring, a disc, an absorption line -- on the
+        field of a `laser`, solved in the laser's frame by coupled-mode theory
+        (`wfmsynth.swept`).
+
+            laser.resonator(wavelength_nm=1550.0, intrinsic_hz=1e9, coupling_hz=1e9)
+
+        `intrinsic_hz` and `coupling_hz` are its two loss rates as linewidths: the dip is
+        their sum wide (full width at half depth) and reaches
+        ((intrinsic - coupling)/(intrinsic + coupling))**2, zero when they are equal.
+        `fsr_hz` repeats it every free spectral range; `split_hz` splits each resonance in
+        two (backscatter). `by` moves the resonance while the sweep runs, in nm: a number, or
+        a sub-chain (a ring warming up). A slow sweep traces the Lorentzian; a fast one
+        leaves light in the ring, and the record shows the ring-down beating with the laser.
+        From a Q and an extinction: `ws.recipes.ring`."""
+        SW.check_resonator(_stated(self._drawn(params)))
+        if by is not None:
+            params["by"] = _by_given("resonator", by)
+        return self._add("resonator", **params)
 
     def fiber(self, **params):
         """Single-mode fibre on the optical field: physical chromatic dispersion (β2·L) + attenuation.
@@ -3783,7 +3865,7 @@ class Signal:
         return self._run(streams, _extended=True, _plan=plan), plan
 
     def _run(self, streams=None, collect_events=False, _extended=False, _plan=None, _x=None,
-             _events=()):
+             _events=(), _carrier=None):
         from .events import EventList
         if streams is not None and _plan is None:
             self = TOL.redrawn(self, streams)     # a re-rolled unit/* role is a sibling record
@@ -3801,6 +3883,8 @@ class Signal:
         # where the chain starts: on its grid's domain, or -- a shared stage applied by `use`
         # -- on whatever the waveform it is handed is; a `use` in it is whatever it names
         was = None if _x is None else DOMAIN.held(_x, grid)
+        if _carrier is not None:                # ... a field, about the carrier it came with
+            was = (was[0], _carrier)
         rec = getattr(st, "record", None)
         doms = DOMAIN.trace(ops, grid, start=was,
                             expand=None if rec is None else rec.rec.expand)
@@ -3824,10 +3908,12 @@ class Signal:
                 x = _op_trigger(x, op, st, now, i, sink=sink)
             elif name == "law":
                 x = _op_law(x, op, st, now, i, sink=sink)
+            elif name in _CARRIER_NOW and was[0] == DOMAIN.OPTICAL:
+                x = _EXEC[name](x, op, st, now, i, carrier=was[1])
             elif at_now:
                 x = _EXEC[name](x, op, st, now, i)
             elif name == "use":                # a stage it names acts in the domain reached
-                x = CH.use(x, op["name"], st, dom=was[0])
+                x = CH.use(x, op["name"], st, dom=was[0], carrier=was[1])
             elif collect_events and name == "events":
                 x = _op_events(x, op, st, grid, i, sink=sink)
             elif win is not None and name in _LEAD_WINDOW_RANGED:

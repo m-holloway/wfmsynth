@@ -80,6 +80,8 @@ where an envelope does, is refused by name.
              and its digest are what they were before the field was a domain. A chain may also
              start IN the field on a `Grid(domain="optical")`: a `capture` of complex samples,
              or a `sequence` / `switch` of field chains (which an unstated grid follows).
+             `laser(start_nm=, ...)` starts in the field too, and is the one source that
+             STATES ITS CARRIER: see "A STATED CARRIER" below.
     bridge   `photodetect`: i = R*|E|^2, real. An electrical op placed on the field is
              refused naming it.
 
@@ -96,13 +98,27 @@ table above read with "field" for "envelope", the same yes and the same no:
     sequence, switch       yes  field chains in time order; `select` real
     use, Channels          yes  a named chain is whatever its own ops make it
     combine product/min/max, offset, trigger    no, each for the reason above
-    delay                   no  a delayed field is also turned by its carrier's phase, and
-                                a field's grid states no carrier to turn it by (an envelope's
-                                does, which is why `delay` is in for I/Q): delay the drive
-                                before `eo` or the photocurrent after `photodetect`
+    delay                   no, unless the field's carrier is stated (below): a delayed
+                                field is also turned by its carrier's phase, and a field
+                                from `eo` or a capture states none to turn it by. Delay the
+                                drive before `eo` or the photocurrent after `photodetect`
     law                     no  the envelope laws are an RF amplifier's; a modulator's law is
                                 `eo(kind=)` and a detector's `photodetect`
     lossy, sparam           no  a field's channel is `fiber`
+
+A STATED CARRIER. `trace` carries, beside the domain, what the record is an envelope ABOUT:
+`fc_hz` for I/Q, and for a field the `laser` op that made it -- data, from which
+`wfmsynth.swept.Carrier` gives nu(t). Two ops read it (`READS_CARRIER`) and are refused by
+name on a field that states none:
+
+    delay       the envelope is shifted and turned by the integral of nu over the delay, so a
+                delayed copy beats against the direct path at (sweep rate) x delay: an
+                interferometer arm, a stray reflection (`wfmsynth.recipes.mzi`, ...)
+    resonator   a ring, solved in the laser's frame (`wfmsynth.swept`)
+
+`optical_mpi` copies the envelope WITHOUT the carrier's turn, which on a moving carrier is
+wrong, so it is refused there naming `recipes.stray_reflection`. `filter` on a laser's field
+stays what it says, a filter about the carrier -- which now moves: a tracking filter.
 
 POLARISATION is two fields, and two chains of one record are what `Channels` is: no part of
 the domain. Both through one fibre, and a detector that sees both powers:
@@ -150,9 +166,9 @@ ACCEPTS = {
     # On an optical field they are an attenuator, a shutter, a coupler and a switch.
     "gain": ANY, "gate": ANY, "combine": ANY, "sequence": ANY, "switch": ANY,
     # an envelope is shifted and its carrier turned by -2*pi*fc*delay: the envelope of the
-    # delayed passband signal (`wfmsynth/joins.py`, tests/test_envelope_joins.py). Not a
-    # field: its grid states no optical carrier to turn it by
-    "delay": BOTH,
+    # delayed passband signal (`wfmsynth/joins.py`, tests/test_envelope_joins.py). A field
+    # likewise, when its carrier is stated -- a `laser`'s is; `trace` refuses the others
+    "delay": ANY,
     # `law` has kinds for each: a voltage law on a voltage, an amplifier's AM/AM and AM/PM on
     # an envelope's magnitude; the kind handed the other is refused by `stages.refuse_law`
     "law": BOTH,
@@ -165,7 +181,15 @@ ACCEPTS = {
     # field ops are defined on E(t) and nowhere else, and the detector takes the field.
     "eo": (REAL,), "fiber": (OPTICAL,), "optical_mpi": (OPTICAL,), "edfa": (OPTICAL,),
     "photodetect": (OPTICAL,),
+    # a swept laser is a SOURCE of a field held in the frame of its own moving carrier, and a
+    # resonator is solved in that frame (`wfmsynth/swept.py`, tests/test_swept.py)
+    "laser": (OPTICAL,), "resonator": (OPTICAL,),
 }
+# the ops that, on a field, read its carrier nu(t), and so need a field that states one
+READS_CARRIER = ("delay", "resonator")
+# what `trace` holds for the carrier of a field brought in by a `use` it cannot follow: a
+# lone chain cannot know whether the chain it names states one, so nothing is refused on it
+CARRIER_ELSEWHERE = "stated by the chain a use op names, if at all"
 
 # an op refused in one domain that has a counterpart in the other, or a reason: said in its
 # refusal. Keyed by the domain the record is in.
@@ -194,10 +218,14 @@ _INSTEAD = {
                   "second field: combine(<a field chain>). A DC photocurrent is offset(by=) "
                   "after photodetect.",
         "delay": "A delayed field is also turned by its carrier's phase, which shifting the "
-                 "envelope alone would leave out. Delay the drive before eo (a field delayed "
-                 "as a whole keeps its intensity), or the photocurrent after photodetect; a "
-                 "delayed COPY beating with the field is optical_mpi(delay_samples=, "
-                 "reflectivity=).",
+                 "envelope alone would leave out, and this field states no carrier (one from "
+                 "laser(start_nm=...) does, and delay then turns it). Delay the drive before "
+                 "eo (a field delayed as a whole keeps its intensity), or the photocurrent "
+                 "after photodetect; a delayed COPY beating with the field is "
+                 "optical_mpi(delay_samples=, reflectivity=).",
+        "resonator": "A resonator is solved against the laser's frequency nu(t), and this "
+                     "field states no carrier: start the chain with laser(start_nm=...).",
+        "laser": "The record is already a field: laser is a source and starts a chain.",
         "law": "The laws act on a voltage, or (saleh, rapp) on an RF amplifier's envelope. "
                "The modulator's law is eo(kind=) and the detector's is photodetect, which is "
                "square-law.",
@@ -269,6 +297,11 @@ def refuse(op, dom, i=None):
     takes, and which op converts."""
     where = "" if i is None else f" (op {i})"
     want = " or ".join(repr(d) for d in accepts(op))
+    if op == "laser" and not i:
+        return ValueError(
+            f"laser: this chain's grid STATES domain={dom!r}, and laser is the source of an "
+            f"optical field. Leave domain= off the Grid -- the record's domain then follows "
+            f"its source -- or state Grid(..., domain='optical').")
     if dom == OPTICAL and op in _REAL_SOURCES + ("iq",) and not i:
         return ValueError(
             f"{op}{where}: this chain's grid STATES domain='optical', and {op} is the source "
@@ -288,6 +321,11 @@ def refuse(op, dom, i=None):
             f"complex baseband record. Leave domain= off the Grid -- the record's domain then "
             f"follows its source -- or state Grid(..., domain='iq', fc_hz=...). {REBUILT}")
     instead = _INSTEAD[dom].get(op)
+    if dom in accepts(op):                    # a field op on a field that states no carrier
+        why = "" if op == "laser" else ", and its carrier was never stated"
+        return ValueError(
+            f"{op}{where}: the record is {_WHAT[dom]} at this point in the chain{why}. "
+            f"{instead} {_FIX[OPTICAL, REAL]}")
     return ValueError(
         f"{op}{where}: the record is {_WHAT[dom]} at this point in the chain, and {op} takes "
         f"domain {want} only. {instead + ' ' if instead else ''}"
@@ -390,7 +428,9 @@ def trace(ops, grid, start=None, expand=None):
     raising the named refusal at the first op handed a domain it does not accept.
 
     `fc_hz` is None for a real record, for an I/Q record whose centre was never stated, and
-    for an optical field (its carrier is stated where it acts: `fiber(wavelength_nm=)`).
+    for an optical field from `eo` or a capture (its carrier is stated where it acts:
+    `fiber(wavelength_nm=)`). For the field of a `laser` it is that op -- the data
+    `wfmsynth.swept.Carrier` reads nu(t) from -- until `photodetect`.
 
     `start` is ``(domain, fc_hz)`` where the chain does not begin on the grid's: a shared stage
     begins on whatever the chain using it has reached. With no grid at all the chain starts in
@@ -399,15 +439,26 @@ def trace(ops, grid, start=None, expand=None):
     it a `use` is taken to leave the domain alone (a lone chain cannot know)."""
     if start is not None:
         dom, fc = start
-    elif grid is None:
-        dom, fc = needs(ops) or REAL, None
+    elif grid is None:                # not yet on a record: a stage cannot know what it
+        dom = needs(ops) or REAL      # will be handed, so no carrier is missed here
+        fc = CARRIER_ELSEWHERE if dom == OPTICAL else None
     else:
         dom, fc = of(grid), getattr(grid, "fc_hz", None)
     out = []
     for i, o in enumerate(ops):
         name = o["op"]
-        if dom not in accepts(name):
+        if dom not in accepts(name) or (dom == OPTICAL and fc is None
+                                        and name in READS_CARRIER) or (name == "laser" and i):
             raise refuse(name, dom, i)
+        if name == "optical_mpi" and isinstance(fc, dict):
+            raise ValueError(
+                f"optical_mpi (op {i}): this field is in the frame of a laser's moving "
+                f"carrier, where a delayed copy is also turned by the carrier's phase and "
+                f"beats at (sweep rate) x delay; optical_mpi copies the envelope alone. The "
+                f"copy with its turn is ws.recipes.stray_reflection(chain, delay_s=, "
+                f"reflectivity=), which is delay + gain + combine.")
+        if name == "laser":
+            fc = o
         if name == "use" and expand is not None:
             is_signal, inner = expand(o["name"])
             if is_signal:                    # it IS the record from here: its own domain
@@ -417,6 +468,8 @@ def trace(ops, grid, start=None, expand=None):
                 dom, fc = trace(inner, grid, start=(dom, fc))[-1]
             out.append((dom, fc))
             continue
+        if name == "use" and dom == OPTICAL and fc is None:
+            fc = CARRIER_ELSEWHERE
         to = EMITS.get(name)
         if to is not None:                   # only a downconverter states a centre
             dom, fc = to, (o.get("fc_hz") if to == IQ else None)

@@ -71,8 +71,9 @@ class Grid:
         if self.domain == "optical" and self.fc_hz is not None:
             raise ValueError(
                 "Grid: fc_hz is the centre frequency of an I/Q record. An optical field's "
-                "carrier is not a property of the grid -- nothing would read it -- and is "
-                "stated where it acts: fiber(wavelength_nm=). Drop fc_hz.")
+                "carrier is not a property of the grid, and is "
+                "stated where it acts: fiber(wavelength_nm=), or by the source that sweeps "
+                "it, laser(start_nm=...). Drop fc_hz.")
         if self.domain == "real" and self.fc_hz is not None:
             raise ValueError(
                 "Grid: fc_hz is the centre frequency of a complex baseband record and means "

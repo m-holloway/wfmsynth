@@ -35,7 +35,9 @@ meaning, as an attenuator, a shutter and a coupler: a `combine` of fields is COH
 |E1 + E2|^2 and not P1 + P2. A `gain` by a complex NUMBER is an arm's loss and phase; a
 factor that moves stays real (an I/Q sub-chain is an envelope about an RF centre, not a
 field's). The rest are refused there by name: a delayed field is also turned by its
-carrier's phase, and the grid of a field states no carrier to turn it by.
+carrier's phase, and the grid of a field states no carrier to turn it by. The field of a
+`laser` does state one, and there `delay` is the envelope's shift and the carrier's turn
+over the delay, as on I/Q (`wfmsynth.swept`).
 
 WHERE A SUM STOPS BEING TRUE. Adding two waveforms is superposition, and superposition holds
 exactly when neither source changes what the other one does: a coupled ripple, an interferer, a
@@ -334,7 +336,7 @@ def check_delay(max_rate=DELAY_MAX_RATE):
                          f"input would play backwards.")
 
 
-def delay(x, by, fs, max_rate=DELAY_MAX_RATE, fc_hz=None):
+def delay(x, by, fs, max_rate=DELAY_MAX_RATE, fc_hz=None, carrier=None):
     """`x(t - by(t))`: `by` in SECONDS, a number or a waveform on `x`'s grid.
 
     Causal (`by >= 0`), band-limited (see `delay_error`), and bounded in rate: `by` may not
@@ -342,9 +344,11 @@ def delay(x, by, fs, max_rate=DELAY_MAX_RATE, fc_hz=None):
     A delay of a whole number of samples is an exact shift.
 
     A complex `x` is an envelope about `fc_hz`, and comes out shifted and turned by
-    ``exp(-j*2*pi*fc_hz*by)`` (the module docstring, THE DELAY ON AN ENVELOPE)."""
+    ``exp(-j*2*pi*fc_hz*by)`` (the module docstring, THE DELAY ON AN ENVELOPE). With
+    `carrier` -- a `laser` op -- it is a field in that laser's frame, turned by the integral
+    of the moving carrier over the delay instead (`wfmsynth.swept`)."""
     x = _envelope_ok(x)
-    iq = np.iscomplexobj(x)
+    iq = np.iscomplexobj(x) and carrier is None
     if iq and fc_hz is None:
         raise ValueError(
             "delay: this I/Q record's centre frequency was never stated, and delaying a "
@@ -395,4 +399,7 @@ def delay(x, by, fs, max_rate=DELAY_MAX_RATE, fc_hz=None):
             y[a:b] = np.einsum("ij,ij->i", taps, _kernel(mu[a:b]))
     # the carrier's turn. fc*d is reduced to its fraction of a turn first: at 2.4 GHz a
     # microsecond is 2400 turns, and the phase that matters is what is left over
+    if carrier is not None:
+        from .swept import turn
+        return turn(y, d, fs, carrier)
     return y * np.exp(-2j * np.pi * np.mod(fc_hz * d, 1.0)) if iq else y

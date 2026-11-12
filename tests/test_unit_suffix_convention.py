@@ -45,6 +45,10 @@ EXCEPTIONS = {
 # must be added here, which is the moment to check that its suffix is honest.
 KNOWN_UNIT_PARAMS = frozenset({
     'D_ps_nm_km', 'ac_fc_hz', 'alpha_phi_rad', 'atten_db_km', 'band_hi_hz', 'band_lo_hz', 'bw_hz', 'c_bus_f',
+    # a swept laser and a resonator (wfmsynth/swept.py): wavelengths in nm, linewidths and a
+    # free spectral range in Hz. `speed_nm_per_s` reads as `drift_hz_per_s` does: per second
+    'bow_nm', 'coupling_hz', 'fsr_hz', 'intrinsic_hz', 'ripple_hz', 'ripple_nm',
+    'speed_nm_per_s', 'split_hz', 'start_nm', 'stop_nm',
     'c_load_f', 'dev_hz', 'dev_rad', 'diode_on_ohm', 'drift_hz_per_s', 'drift_ppm_per_s',
     'eb_n0_db', 'echo_db', 'es_n0_db',
     'echo_f_hp_hz', 'echo_td_ps', 'edge_frac', 'er_db', 'f0_frac', 'f0_ghz', 'f0_hz', 'f1_hz',
