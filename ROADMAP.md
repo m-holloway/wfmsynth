@@ -51,8 +51,6 @@ The highest-value work is reducing parallel implementations, not adding another 
   `Signal.acquire()` path without changing default outputs unexpectedly.
 - Add absolute rise-time input (`tr_ps`) and record requested, realized, and clamped rise
   time in provenance.
-- Separate trigger jitter from sample-clock/timebase jitter and model it only where the
-  distinction is observable.
 
 See backlog items #27, #48, and the rise-time follow-up.
 
@@ -77,7 +75,7 @@ implementations.
 Use `separability(synthetic, measured, grid)` and measured attribute comparisons to order
 this work. Candidate gaps include:
 
-- trigger behavior and other acquisition-specific timing effects;
+- acquisition-specific timing effects beyond the trigger and the timebase;
 - a fuller causal dielectric model;
 - mixed-mode S-parameters for differential channels;
 - parameterized connector, via, and stub discontinuities;

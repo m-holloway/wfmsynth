@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
-description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus or an instrument, or reproduce a waveform from a recipe.
-version: 6
+description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); a record can be complex baseband (I/Q, OFDM, fading and multipath) with RF impairments and measures, or an optical field with a swept laser and resonators; and wfmsynth.recipes ships realistic clutter (hum, ripple, 1/f, contact bounce) as visible chains. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
+version: 10
 ---
 
 # wfmsynth
@@ -18,8 +18,9 @@ python -c "import wfmsynth; print(wfmsynth.__version__)"
 Python 3.9+, numpy, scipy. `h5py` only for HDF5 export.
 
 **`REFERENCE.md`, beside this file, has the worked examples** — a record end to end, the sizing
-arithmetic, recipes and digests, the pattern registry, export, and validation snippets. Read it
-before writing code. This file is the shape of the thing and the mistakes that cost time.
+arithmetic, recipes and digests, the pattern registry, chains that meet, I/Q, export, and
+validation snippets. Read it before writing code. This file is the shape of the thing and the
+mistakes that cost time.
 
 ## The shape
 
@@ -34,6 +35,13 @@ before writing code. This file is the shape of the thing and the mistakes that c
                                               ▼
   instrument    probe ─► scope ─► sample_clock ─► digitize ─► scope ─► store
                    or: acquire(AcquisitionProfile(...))
+                   then, optionally: trigger(pre_s=, post_s=)   keeps the windows a scope would
+
+  a parameter that takes a signal takes a chain:   .crosstalk(aggressor=Signal().carrier(...).lossy(...))
+  several named chains are one record:             ws.Channels({...}, shared={...})  +  .use("name")
+  a record may be a complex envelope:              .iq("qam16", prbs=15) | .ofdm(...)  ...  .upconvert(fc_hz=)
+  or light:                                        .eo() | .laser(start_nm=, stop_nm=)  ...  .photodetect()
+  a useful arrangement is a function, not an op:   ws.recipes.hum(...) · multipath(...) · ring(...)
 ```
 
 Order is physical. A band limit before the sampler is a measurement; after it, an artefact. A
@@ -51,6 +59,48 @@ capacitance is what a scope shows at turn-on and release, and it was the last vi
 difference between a synthetic record and a measured one. The protocol above it is yours to
 write (`examples/i2c_bus.py`, `examples/multi_driver_bus.py` and
 `examples/inductive_handover.py` are worked ones); see `REFERENCE.md`.
+
+## When chains meet
+
+A chain is a line; these let lines meet, and all of them are data in the recipe. `REFERENCE.md`
+has each one worked.
+
+- **A sub-chain is a value.** Write it `Signal()` — no seed, no grid — and pass it wherever a
+  signal goes (`aggressor=`, `message=`, `by=`, `on=`, `others=`, a `sequence` segment). It
+  joins the record under a namespace (`crosstalk/1/aggressor`). `{"from": other.recipe()}`
+  embeds another record as rendered instead.
+- **Joins.** `combine(other)`; `gain`/`offset`/`gate`/`delay` with `by=` a number or a chain;
+  `sequence([...])` and `switch(select=, inputs=)` are sources made of chains.
+- **`ws.Channels({name: chain}, shared={name: chain}, seed=, grid=)`** is several channels from
+  one recipe; `.use(name)` applies a shared stage or stands for a shared signal.
+- **`law(kind, ...)` / `filter(kind, ...)`** are the shapes with no named op; **`trigger(pre_s=,
+  post_s=)`** cuts windows from a LONG render; **`ws.tol(nom, pct)`** in place of a number is
+  a toleranced part and `sig.unit(seed)` another unit.
+- **I/Q.** `.iq("qam16", prbs=15)` starts a complex envelope (the record's domain follows its
+  source; `Grid(fc_hz=)` states the centre). `upconvert()` / `downconvert(lpf=dict(pass_hz=))`
+  cross to a real passband voltage and back; `dac`, `iq_imbalance`, `iq_offset`,
+  `phase_noise`, `freq_offset`, `awgn`, `spur` impair it; `ws.rf` measures it; `ws.read_iq` /
+  `ws.to_sigmf` are files. `.ofdm(n_fft=, scs_hz=, cp=, active=)` is the multicarrier source
+  (`rf.evm(..., ofdm=)`). `delay`, a complex `gain`, `lossy`, `sparam` and
+  `law("saleh" | "rapp")` act on the envelope about `fc_hz`. An op or a measure handed the
+  wrong kind of record refuses by name and says what to use.
+- **The optical field** is a third domain between `eo()` (or `laser(...)`) and `photodetect()`.
+  A `laser`'s field is held in the frame of its own swept carrier, where `delay` makes
+  interferometer fringes and `resonator` is a ring; `ws.swept.wavelength_map` is the truth and
+  `ws.measure.swept_map` / `transmission` / `resonances` read a record as a bench does.
+- **`carrier("states", dwell=[...])`** dwells at levels for random times (burst noise, an
+  activity schedule for `gate`/`switch`); `ws.states.intervals(events, at=)` is what it drew.
+- **`ws.recipes`** is the shipped compositions, each a function returning a visible chain:
+  `hum`, `ripple`, `pickup`, `flicker` (for `combine`); `bounce`, `intermittent` (for
+  `gate`); `oscillator_startup`, `multitone`, `buck` (sources); `fading`, `multipath` (I/Q);
+  `mzi`, `stray_reflection`, `ring`, `gas_cell` (a laser's field).
+
+`sig.summary()` prints any of this as a tree. `sig.roles()` is exactly the randomness the
+record draws from, and `sig.contrast(name)` re-rolls one of them alone.
+
+**Do not add an op for an arrangement.** If it can be written as a chain, write a function
+that returns the `Signal()` sub-chain. An op is one mechanism nothing else expresses
+(`docs/ARCHITECTURE.md`, "What becomes an op").
 
 `ws.IMPAIRMENTS` and `ws.PATTERNS` list what exists; `Signal.stage_kinds()` says which stage each
 op in a chain belongs to.
@@ -100,7 +150,8 @@ was asked for.
    recorded in the recipe and does not scale the output. Convert with `x * 0.5 * v_full`.
 3. **`Signal(seed=)` does not seed the pattern phase.** `Signal(seed=7)` and `Signal(seed=99)`
    give bit-identical waveforms unless you pass `carrier(..., seed=)`. A thousand records from
-   one template otherwise share one PRBS phase, and a model learns the position.
+   one template otherwise share one PRBS phase, and a model learns the position. The same
+   holds for `iq(..., prbs=)`: seeds 1 and 99 transmit identical symbols; vary `prbs_seed=`.
 4. **Below about 8 samples across the transition you are measuring the grid, not the signal.**
    The delivered 10–90 % rise time is the one requested to within 1.2 % at k = 8 and 0.04 % at
    k = 32. Under `tr_frac × samples_per_ui = 2` the library clamps to two samples and warns, and
@@ -154,13 +205,14 @@ was asked for.
     rise time read off it describes the simulation. Put the probe, the front end, the sample rate
     and the converter in the chain before writing the file, and pass the STORED rate to the
     exporter. `REFERENCE.md` has the parameters.
-17. **After `acquire()`, `Signal.grid` is the SYNTHESIS grid — use `Signal.stored_grid(x)`.**
-    `Signal.grid` reports the rate and length the chain was built on, not the record in your
-    hand, and handing it to a measurement raises nothing: `measure` reads `samples_per_ui` off
-    it, folds at the wrong symbol period, and returns a plausible number. MEASURED on an
+17. **After `acquire()`, `trigger` or `downconvert(fs_out_hz=)`, `Signal.grid` is the SYNTHESIS
+    grid — use `Signal.stored_grid(x)`.** `Signal.grid` is the rate and length the chain was
+    built on, not the record in your hand, and handing it to a measurement raises nothing:
+    `measure` folds at the wrong symbol period and returns a plausible number. MEASURED on an
     80 → 40 GSa/s acquisition, `eye_height` reads 0.6184 against the true 0.5896 — 4.9 % out,
-    silently. `sig.stored_grid(x)` returns the grid that describes `x`, and RAISES rather than
-    guess if the chain changed the length in a way it cannot account for.
+    silently. The same rule for ops: the NAMED link and instrument ops (`scope`, `lossy`,
+    `events`, ...) placed AFTER an acquisition still read the synthesis rate, so put them
+    before it; `filter`, `law`, the joins and the I/Q impairments run at the stored rate.
 18. **A unipolar source (`cmos`, and any future one) stays in real volts, not the ±1 the rest of
     `carrier` uses.** `x * 0.5 * v_full` is the wrong conversion once a chain contains one — the
     array already IS volts. `cmos`'s `tr_s` is also an absolute edge time in seconds, unlike
@@ -190,16 +242,89 @@ was asked for.
     library (`carrier(tr_frac=...)`). `tr_s`/`tr_frac` here are absolute or a fraction of the
     RECORD, not of a UI, but the floor and the warning are the same mechanism.
 
-18. **On a shared net, size the grid from the fastest MODE, not the bit rate.** A 60 ohm
+24. **On a shared net, size the grid from the fastest MODE, not the bit rate.** A 60 ohm
     switch between two bus capacitances is a nanosecond redistribution on a microsecond bus —
     three decades apart, and a bit-rate-derived grid measures none of it. `Signal.net()` says
     so rather than returning a staircase. The same rule as #4, but the fast thing is no longer
     the edge you asked for.
-19. **An under-sampled RING does not go missing, it ALIASES.** A decay the grid cannot show is
+25. **An under-sampled RING does not go missing, it ALIASES.** A decay the grid cannot show is
     simply absent from the record; a ring the grid cannot show comes back at a frequency that
     is not the circuit's and looks entirely plausible. With an inductance on the net, size the
     grid for 8 samples per ring period (`f0 = 1/(2*pi*sqrt(L*C))`), not just for the edge. The
     solver warns below that and says explicitly when the record's ring is an alias.
+
+Composition and I/Q added these. Each renders, replays and digests cleanly, and is wrong.
+
+26. **A builder method MUTATES the Signal and returns it.** `base.lossy(...)` then
+    `base.rx_noise(...)` is one chain with both ops. Branch with `base.copy().lossy(...)`.
+27. **A `Signal()` sub-chain is drawn under the PARENT's seed and namespace**, so it is not
+    `that_signal.waveform()`; what was used is `sig.subchain("crosstalk/1/aggressor")`.
+    `{"from": recipe}` is the opposite trap: pinned, unit included, so a loop that varies the
+    parent's seed (or calls `unit()`) embeds the same lane in every record.
+28. **Keep samples per UI a whole number, and take jitter from `timing`.** An `nrz` / `pam<N>` /
+    `symbols` carrier puts each edge on a sample: MEASURED at 64 GSa/s, 1000 UI over 32768
+    samples carries 15.5 ps peak to peak that is the grid's, against under 1e-9 ps at 1024
+    UI, and `carrier(jitter=)` moves edges by whole samples. (`square` and `cmos` do not.)
+29. **Randomness inside a SHARED chain is the same draw on every channel that uses it.** Right
+    for a PLL, wrong for noise: put `rx_noise` on each channel.
+30. **`by=` is the quantity itself.** A 3 % ripple is `gain(by=)` a sine of amplitude 0.03 with
+    `offset=1.0`; without the offset the record is multiplied by a signal that crosses zero.
+    `delay(by=)` is seconds. And `combine` ADDS: two drivers on one node are `Signal.net()`.
+31. **Label from `events.on_record()`.** A loop over `events` also sees an aggressor's glitch,
+    an enable's edge and each trigger firing, none a defect on this record.
+32. **Split a unit dataset on `ws.unit_of(recipe)`**, never at random. And a tolerance is drawn
+    when the op is ADDED: changing `sig.seed` later redraws nothing, `sig.unit(seed)` does.
+33. **Raw EVM after any front end is a rotation, not distortion.** `rf.evm` fits nothing unless
+    asked: name `correct=("gain", "phase")` (and `"frequency"`), and read `["removed"]`. A
+    `reference="decided"` EVM reads LOW once decisions fail in noise.
+34. **`awgn`'s reference power is the record as it reaches the op**, start-up, leak and spurs
+    included: "Es/N0 = 25 dB" against a unit-power constellation needs `ref_power=1.0`.
+35. **An I/Q file's `scale` is the value of ONE COUNT, and a wrong one cannot be detected.**
+    Read with exactly what the writer returned.
+
+The last round (OFDM, envelope channels, dwelling sources, recipes, the optical field) added
+these.
+
+36. **State `prbs_seed=` on `ofdm` (and `iq`).** The default LFSR state emits almost only
+    zeros for its first few hundred bits, so the first OFDM symbols carry one constellation
+    point on every subcarrier and are impulses: MEASURED 15.5 dB peak-to-average on 52 QPSK
+    subcarriers with `prbs=31`, against 11.6 dB with a stated seed.
+37. **`ofdm`'s `cp=` and `window=` are samples at the FFT rate** (`n_fft * scs_hz`), not
+    seconds and not the grid's samples (a time is refused, with the count it comes to). And
+    the `"equalizer"` correction is ONE coefficient per subcarrier for the whole record: on a
+    channel that moves within it (fading), measure in blocks: `rf.evm(..., ofdm=, block=16)`.
+38. **EVM of a gated or bursty record counts what was never sent.** MEASURED on an OFDM burst
+    schedule: 76.5 % over every symbol against 5.6 % over the symbols inside an on interval.
+    Select the symbols from the schedule's own intervals: `rf.evm(..., ofdm=, symbols=mask)`.
+    And `dwell[i]` belongs to `levels[i]`, whose default is `[0.0, 1.0]`: `dwell=[a, b]` alone
+    is OFF for `a`, on for `b`.
+39. **A sub-chain that draws nothing is the SAME signal every time it is written.** Two
+    `Signal().carrier(...).eo()` peers in a `combine` are one laser, fully coherent (4x the
+    power, or none); two `recipes` paths of one transmitter are one transmission. Independence
+    needs something drawn (`eo(linewidth_hz=)`, a fade) under its own role.
+40. **`photodetect()` draws shot noise unless `shot=False`**, and a swept record through it is
+    noisy before any device is in the chain.
+41. **A deterministic recipe does not vary with the seed.** `hum`, `ripple`, `pickup`,
+    `bounce`, `multitone` and `oscillator_startup` draw nothing, so a thousand records from
+    one template carry the same hum at the same phase. Vary a number: `phase_rad=` on `hum`,
+    `ripple` and `pickup`; `t_s=` on `bounce`; `phase="random", seed=` on `multitone`;
+    `startup_s=` on `oscillator_startup`.
+42. **A state source's cut intervals are not draws.** The interval in force at t = 0 and the
+    last one carry `complete: False`; in a dwell histogram they bias it short. So does one
+    that a `sequence` segment, a `trigger` / `acquire` window or a `delay` ended: it stops at
+    the cut. After a moving `delay(by=<chain>)` every `dwell_s` is the delayed record's
+    (stretched or squeezed with the samples), so none is the draw. After `trigger`, or in a restarting `sequence` segment, the state in force at
+    the window's START is missing from the event list altogether.
+43. **`recipes.fading` averages to unit power only over many Doppler periods**: MEASURED
+    0.971 over 52 periods, and a first-path power of 1.34 over 10. Size the record from the
+    Doppler, as from the pattern period.
+44. **A mode hop moves the truth, and the reference interferometer cannot see it**: the
+    fringe count misses a step of whole fringes, so `measure.swept_map` is wrong after the
+    hop by about its size (MEASURED 28 pm for a 30 pm hop). That is the bench's failure
+    reproduced, not a bug: read `swept.wavelength_map` for the truth and the `mode_hop` event
+    for where.
+45. **`filter` on a laser's field tracks the moving carrier**; it is not a fixed optical
+    passband. `fiber` there still uses its own `wavelength_nm`.
 
 ## Where the boundary sits
 

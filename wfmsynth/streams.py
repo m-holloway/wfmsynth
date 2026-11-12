@@ -23,6 +23,7 @@ ablations possible.
 from __future__ import annotations
 
 import hashlib
+from typing import Optional
 
 import numpy as np
 
@@ -33,28 +34,76 @@ def _role_seed(name: str) -> int:
     return int.from_bytes(hashlib.blake2b(name.encode("utf-8"), digest_size=8).digest(), "big")
 
 
+class Made:
+    """Every generator a render handed out, with the state it started in. Shared by all the
+    `Streams` of one render (a several-channel record makes one per chain, a pinned
+    sub-record its own), each noting under the role's full name."""
+
+    def __init__(self, to=None, pre=""):
+        self._items = [] if to is None else to._items
+        self._pre = pre if to is None else to._pre + pre
+
+    def note(self, name, gen):
+        self._items.append((self._pre + name, gen, gen.bit_generator.state))
+
+    def under(self, pre):
+        """A view that notes under `pre`: for a sub-record with its own `Streams`."""
+        return Made(self, pre)
+
+    def drawn(self):
+        return {name for name, gen, start in self._items if gen.bit_generator.state != start}
+
+
 class Streams:
     """Independent RNG streams keyed by role name, all derived from one base seed.
 
     `overrides` re-seeds individual roles (used by `reroll`); every role not overridden
     stays bit-identical to the base. Streams are cached, so repeated `role(name)` calls
-    return the same generator (drawing continues where it left off)."""
+    return the same generator (drawing continues where it left off).
 
-    def __init__(self, seed: int = 0, overrides: dict | None = None):
+    `asked` collects every role name a render requested, and `made` every generator it was
+    handed, with the state it started in. An op is handed its stream whether or not its
+    parameters make it draw (`store` without dither, `acquire` without a noise floor), so
+    "asked" is not "drawn": `drawn()` is the roles whose generator has MOVED, which is how
+    `contrast()` tells a re-rolled role that changed the record from one that could not."""
+
+    def __init__(self, seed: int = 0, overrides: Optional[dict] = None):
         self.seed = int(seed)
         self._overrides = dict(overrides or {})
         self._cache: dict = {}
+        self.asked: set = set()
+        self.made = Made()
+
+    def drawn(self):
+        """The role names something actually drew from during the renders so far."""
+        return self.made.drawn()
+
+    def idle(self, known=()):
+        """The re-rolled roles nothing asked for and `known` does not list: names that match
+        no randomness in the record, so re-rolling them changed nothing. (A `unit/` role is a
+        toleranced part, re-drawn into the recipe rather than asked for here.)"""
+        return sorted(k for k in self._overrides
+                      if k not in self.asked and k not in known and "unit/" not in k)
+
+    def undrawn(self):
+        """The re-rolled roles an op was handed and did not draw from: a real name, on an op
+        whose parameters make it deterministic, so the sibling is the record again."""
+        drawn = self.drawn()
+        return sorted(k for k in self._overrides
+                      if k in self.asked and k not in drawn and "unit/" not in k)
 
     def role(self, name: str) -> np.random.Generator:
+        self.asked.add(name)
         r = self._cache.get(name)
         if r is None:
             sub = self._overrides.get(name, self.seed)
             ss = np.random.SeedSequence([int(sub), _role_seed(name)])
             r = np.random.default_rng(ss)
             self._cache[name] = r
+            self.made.note(name, r)
         return r
 
-    def reroll(self, *roles: str, seed: int | None = None) -> "Streams":
+    def reroll(self, *roles: str, seed: Optional[int] = None) -> "Streams":
         """A sibling `Streams` with the named roles re-seeded and everything else
         identical. With `seed=None` each named role advances to a fresh, deterministic
         stream; pass `seed` to choose the re-roll explicitly (reproducible siblings)."""

@@ -28,6 +28,7 @@ real, documented parameter — nothing is hidden or randomized-but-unrecorded. R
 order, which is what makes the round-trip exact.
 """
 from __future__ import annotations
+import dataclasses
 from dataclasses import asdict as _asdict, dataclass, field
 from typing import Optional
 import warnings
@@ -40,10 +41,26 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from . import physics as P
+from . import baseband as BB
 from . import opkeys as OPKEYS
+from . import subchain as SUB
+from . import tolerance as TOL
+from . import channels as CH
 from . import instrument as INST
+from . import domain as DOMAIN
+from . import trigger as TRIG
+from . import events as EV
 from .grid import Grid
 from .streams import Streams
+from .stages import LAW_KEYS as _LAW_KEYS, FILTER_KEYS as _FILTER_KEYS
+from . import rf as RF
+from .rf import AWGN_KEYS as _AWGN_KEYS, DAC_KEYS as _DAC_KEYS
+from . import states as STATES
+from .states import KEYS as _STATES_KEYS
+from . import ofdm as OFDM
+from .ofdm import KEYS as _OFDM_KEYS
+from . import swept as SW
+from .swept import LASER_KEYS as _LASER_KEYS, RESONATOR_KEYS as _RESONATOR_KEYS
 
 
 # --------------------------------------------------------------- op executors
@@ -108,12 +125,155 @@ def _carrier(p, streams, grid, idx):
         if p["kind"] == "noise" and "rng" in ok:
             kw2["rng"] = streams.role(f"carrier_noise/{idx}")
         return fn(**kw2)
+    if p["kind"] == "states":
+        return STATES.run(streams, grid, idx)         # refused: a bare spec has no event list
     raise ValueError(f"unknown carrier kind {p['kind']!r} (use 'nrz', 'pam4', 'pam<N>', "
-                     f"one of {P.ANALOG_KINDS}, one of {P.VOLTS_ANALOG_KINDS}, or 'arbitrary')")
+                     f"one of {P.ANALOG_KINDS}, one of {P.VOLTS_ANALOG_KINDS}, 'states', or "
+                     f"'arbitrary')")
+
+
+# ------------------------------------------------------------------ which roles an op draws
+# `Signal.roles()` is this table. It has to say exactly what the executors above and below do:
+# a role listed here that nothing draws makes `contrast()` return the record unchanged, which
+# reads as "this factor does not matter"; a draw under a role not listed here is randomness
+# that cannot be held or re-rolled by name. `tests/test_roles_complete.py` checks both
+# directions against the generators themselves, on a chain per role.
+def _warn_undrawn(who, st, listed):
+    """A re-rolled role that an op was handed and drew nothing from. It was always accepted
+    (the name is real), so it still is -- but the sibling is the record again, and that is
+    said rather than left to read as "this factor does not matter"."""
+    undrawn = st.undrawn()
+    if undrawn:
+        warnings.warn(
+            f"{who}: {undrawn} is handed to its op, but with these parameters the op draws "
+            f"nothing from it, so re-rolling it changed nothing and the sibling is this record "
+            f"again. roles() lists what this record draws: {listed}",
+            RuntimeWarning, stacklevel=3)
+
+
+def _spec_roles(spec, tag, default_kind="nrz"):
+    """The roles a BARE carrier spec draws (`aggressor=dict(n_ui=..., jitter=...)`), which is
+    rendered by `_carrier` under `tag`. A sub-chain lists its own, under its namespace."""
+    if not isinstance(spec, dict) or SUB.is_subchain(spec):
+        return []
+    kind = str(spec.get("kind", default_kind))
+    out = []
+    if (kind == "nrz" or re.fullmatch(r"pam\d+", kind)) and _rj(spec.get("jitter")):
+        out.append(f"jitter/{tag}")
+    if kind == "noise":
+        out.append(f"carrier_noise/{tag}")
+    return out
+
+
+def _rj(jitter):
+    """True when a `jitter=` dict draws: only `rj` is random (`pj` and `dcd` are stated)."""
+    return isinstance(jitter, dict) and float(jitter.get("rj") or 0.0) > 0.0
+
+
+def _op_roles(op, i):
+    """The role names op `op` at index `i` draws from, in a fixed order."""
+    name = op["op"]
+    if name == "carrier":
+        return [f"states/{i}"] if op.get("kind") == "states" else _spec_roles(op, i)
+    if name in ("symbols", "coded"):
+        return [f"jitter/{i}"] if _rj(op.get("jitter")) else []
+    if name == "crosstalk":
+        return _spec_roles(op.get("aggressor", {"n_ui": 32, "seed": 7}), f"xtalk{i}")
+    if name == "modulate":
+        return _spec_roles(op.get("message"), f"modulate_msg{i}", "sine")
+    if name == "hybrid_echo":
+        return _spec_roles(op.get("own", {"n_ui": 32, "seed": 7}), f"echo{i}")
+    if name == "open_drain":
+        return _spec_roles(op.get("second"), f"open_drain_second{i}")
+    if name == "pass_fet":
+        return _spec_roles(op.get("gate", {}), f"pass_fet_gate{i}", "square")
+    if name == "net":
+        return [r for d in op.get("drivers") or () if isinstance(d, dict)
+                for r in _spec_roles(d.get("source"), f"net/{i}/{d.get('id')}/carrier", "")]
+    if name == "trigger":
+        return [f"trigger/{i}"] if op.get("jitter_s") else []
+    if name == "digitize":
+        out = [f"noise/{i}"] if ("snr_db" in op or op.get("noise_rms")) else []
+        return out + ([f"interleave/{i}"] if op.get("interleave") else [])
+    if name == "events":
+        out = []
+        if op.get("on", "symbols") not in ("times", "intervals") and op.get("indices") is None:
+            out.append(f"events/{i}")
+        if op.get("on") == "aggressor":
+            out += _spec_roles(op.get("aggressor"), f"events_aggr{i}")
+        return out
+    if name == "probe":
+        return [f"probe/{i}"] if op.get("noise_rms") else []
+    if name == "timing":
+        return [f"timing/{i}"] if (op.get("rj_ps") or op.get("phase_noise")) else []
+    if name == "rx_noise":
+        return [] if op.get("rms") == 0.0 else [f"rx_noise/{i}"]
+    if name == "timebase":
+        return [f"timebase/{i}"] if op.get("rms_ps", 0.5) else []
+    if name in ("phase_noise", "awgn"):
+        return [f"{name}/{i}"]
+    if name == "nonlinearity":
+        return [f"nl_noise/{i}"] if float(op.get("level_noise") or 0.0) > 0.0 else []
+    if name == "optical":
+        return ([f"rin/{i}"] if "rin_db_per_hz" in op else []) + \
+               ([f"shot/{i}"] if op.get("shot") else [])
+    if name == "eo":
+        return [f"linewidth/{i}"] if op.get("linewidth_hz") else []
+    if name == "edfa":
+        return [f"ase/{i}"]
+    if name == "photodetect":
+        return [f"shot/{i}"] if op.get("shot", True) else []
+    if name == "tia":
+        return [f"tia/{i}"] if op.get("thermal_rms") else []
+    if name == "store":
+        return [f"store/{i}"] if op.get("dither_lsb") else []
+    if name == "acquire":
+        prof = op.get("profile") or {}
+        converter = (prof.get("bits") is not None and prof.get("enob") is not None
+                     and prof.get("clip_full_scale") is not None)
+        draws = (prof.get("sample_clock_jitter_rms_s") or prof.get("noise_floor")
+                 or converter or prof.get("interleave"))
+        return [f"acquire/{i}"] if draws else []
+    return []
 
 
 def _op_carrier(x, p, streams, grid, idx):
+    if p.get("kind") == "states":                 # a renewal process (`wfmsynth/states.py`)
+        STATES.check(p)
+        return STATES.run(streams, grid, idx, n=_grid_n(grid, p),
+                          **{k: p[k] for k in _STATES_KEYS if k in p})
+    _warn_default_n_ui(p, grid)
     return _carrier(p, streams, grid, idx)
+
+
+def _warn_default_n_ui(p, grid):
+    """`n_ui` defaults to 32 symbols stretched over the record, whatever the grid's baud. The
+    default cannot follow the grid without moving every record that relied on it, so it stays
+    -- and when the grid STATES a symbol rate and the 32 symbols come out at a different one,
+    that is said, once, with both rates and the value that would agree."""
+    if "n_ui" in p or grid is None or not getattr(grid, "baud", None):
+        return
+    if p.get("kind") != "nrz" and not re.fullmatch(r"pam\d+", str(p.get("kind"))):
+        return
+    n = _grid_n(grid, p)
+    if not n:
+        return
+    default = 32
+    want = n * grid.baud / grid.fs                      # UI in the record at the grid's baud
+    if abs(want - default) <= 1e-9 * max(want, default):
+        return
+    got_baud = default * grid.fs / n
+    whole = abs(want - round(want)) <= 1e-9 * max(want, 1.0)
+    fix = (f"n_ui={int(round(want))} matches the grid" if whole and round(want) >= 1 else
+           f"the grid's baud puts {want:.6g} UI in this record, not a whole number, so choose "
+           f"n_ui and the grid's n or baud together")
+    warnings.warn(
+        f"carrier({p.get('kind')!r}): n_ui was not stated, so the record is the default "
+        f"{default} symbols stretched over its {n} samples -- {got_baud:.6g} Bd, "
+        f"{n / default:.6g} samples per UI -- while the grid states baud={grid.baud:.6g} "
+        f"({grid.fs / grid.baud:.6g} samples per UI). Every op and measure that reads the "
+        f"grid's baud will disagree with the samples. State n_ui: {fix}.",
+        RuntimeWarning, stacklevel=2)
 
 
 # The `symbols` op carries its symbols one of two ways, and the pair IS the reproducibility
@@ -205,10 +365,20 @@ def _op_symbols(x, p, streams, grid, idx):
 
 def _op_capture(x, p, streams, grid, idx):
     from . import capture as CAP
+    dom = DOMAIN.of(grid)
     if p.get("values") is not None:
-        y = np.asarray(p["values"], float)
+        y = CAP.decode(p["values"], dom)
     else:
-        y = CAP.load_values(p["path"])
+        if p.get("format") is not None:                 # an I/Q file format: wfmsynth/iqfile.py
+            from . import iqfile as IQF
+            if dom != DOMAIN.IQ:
+                raise ValueError(CAP._COMPLEX_MSG.format(what=f"{p['path']!r} holds"))
+            y = IQF.read(p["path"], p["format"], dtype=p.get("dtype"),
+                         byteorder=p.get("byteorder"), scale=p.get("scale"),
+                         columns=p.get("columns"), variable=p.get("variable"),
+                         check=p.get("check", True))
+        else:
+            y = CAP.load_values(p["path"], dom)
         got = CAP.digest(y)
         want = p.get("sha256")
         if want is not None and got != want:
@@ -217,6 +387,7 @@ def _op_capture(x, p, streams, grid, idx):
                 f"{want} over the sample values, file now digests to {got}. The file changed "
                 f"since this recipe was made; re-embed it (capture(..., embed=True)) or point "
                 f"the recipe at the file that produced it.")
+    n_file = len(y)
     fs_hz = p.get("fs_hz")
     grid_fs = getattr(grid, "fs", None) if grid is not None else None
     if fs_hz is not None and grid_fs is None:
@@ -243,7 +414,140 @@ def _op_capture(x, p, streams, grid, idx):
                 f"(Grid.n or carrier n=); pass resample=True to resample onto it, or match "
                 f"the Grid's n to the file's own length")
         y = resample_poly(y, n_target, len(y))
+    if p.get("fc_hz") is not None or p.get("annotations"):
+        from . import iqfile as IQF
+        IQF.check_centre(p.get("fc_hz"), grid)
+        # a file's annotations are ground truth it arrived with: they join the event list
+        IQF.emit(p.get("annotations") or (), getattr(streams, "sink", None), n_file, len(y), grid)
     return y
+
+
+# --------------------------------------------------------------- complex baseband (wfmsynth.iq)
+def _iq_source(p):
+    """Which ONE of symbols= / bits= / prbs= an `iq` op takes its symbols from, refusing a
+    second source or a parameter that belongs to another: each would be recorded, change the
+    digest, and change nothing."""
+    given = [k for k in ("symbols", "bits", "prbs") if p.get(k) is not None]
+    if len(given) != 1:
+        raise ValueError(
+            "an 'iq' op needs its symbols from exactly one source: prbs=<order> (bits from a "
+            "PRBS, filling the record), bits=[...], or symbols=[...] (complex, any "
+            f"constellation); got {' and '.join(k + '=' for k in given) or 'none of them'}."
+            + (" One would win and the other be recorded and ignored." if given else ""))
+    src = given[0]
+    for k in ("prbs_seed", "prbs_phase", "n_bits"):
+        if k in p and src != "prbs":
+            does = ("sets how many PRBS bits are drawn" if k == "n_bits"
+                    else "sets where the PRBS starts")
+            raise ValueError(f"iq: {k}= goes with prbs= (it {does}), and this source is "
+                             f"{src}=, which states every "
+                             f"{'symbol' if src == 'symbols' else 'bit'} itself. Drop {k}=.")
+    if src == "symbols" and p.get("constellation") is not None:
+        raise ValueError("iq: pass a constellation (with bits= or prbs=) or symbols=, "
+                         "not both -- the symbols would win and the name would be a "
+                         "label on something it does not describe")
+    return src
+
+
+def _iq_symbols(p, grid):
+    """The complex symbols an `iq` source transmits: a literal list, or bits mapped onto a
+    constellation. This is the ground truth `Signal.transmitted()` hands back, resolved by the
+    same function that renders, so the two cannot disagree."""
+    from . import iq as IQ
+    if _iq_source(p) == "symbols":
+        return IQ.as_complex(p["symbols"])
+    con = p.get("constellation")
+    k = IQ.bits_per_symbol(con)
+    q = p
+    if p.get("bits") is None and "n_bits" not in p:
+        # only what the caller passed is recorded; an unstated count is "fill the record"
+        q = dict(p, n_bits=k * IQ.symbols_in_record(grid, _grid_n(grid, p)))
+    return IQ.map_bits(con, _coded_bits(q))
+
+
+def _constellations(ops, grid):
+    """The named constellations a chain's source transmits on, through a `sequence`."""
+    src = ops[0] if ops else {}
+    if src.get("op") == "iq":
+        return {src["constellation"]} if src.get("constellation") else set()
+    if src.get("op") == "sequence":
+        return set().union(*(_constellations(SUB.child(seg["chain"], grid).ops, grid)
+                             for seg in src["segments"]))
+    return set()
+
+
+def _sent(ops, grid, who):
+    """``(symbols, t_s)`` of the chain `ops` on `grid`: what `Signal.transmitted()` returns."""
+    from . import iq as IQ
+    from . import sequence as SEQ
+    src = ops[0] if ops else {"op": None}
+    if src["op"] == "iq":
+        a = _iq_symbols(src, grid)
+        return a, IQ.symbol_times(len(a), grid)
+    if src["op"] == "ofdm":                          # a resource grid, a row per OFDM symbol
+        rg = OFDM.resource_grid(src, grid, _grid_n(grid, src))
+        return rg["grid"], rg["t_s"]
+    if src["op"] == "sequence":
+        sym, t_s = [], []
+        for s, seg in zip(SEQ.layout(src["segments"], grid), src["segments"]):
+            sub = SUB.child(seg["chain"], grid)
+            a, t = _sent(sub.ops, sub.grid if sub.grid is not None else grid,
+                         f"{who}: segment {s['segment']} of the sequence")
+            if s["state"] != "continue":             # a restart counts from its own start
+                t = t + s["t_start_s"]
+            keep = (t >= s["t_start_s"]) & (t < s["t_stop_s"])
+            if sub.ops and sub.ops[0]["op"] == "ofdm":
+                # an OFDM symbol was sent only if its whole useful part is in the segment
+                keep &= t + 1.0 / sub.ops[0]["scs_hz"] <= s["t_stop_s"] + 0.5 / grid.fs
+            sym.append(a[keep]), t_s.append(t[keep])
+        if len({a.shape[1:] for a in sym}) > 1:
+            raise ValueError(f"{who}: the sequence's segments do not send one kind of symbol "
+                             f"-- single symbols from `iq`, rows of a resource grid from "
+                             f"`ofdm`, or grids of different active subcarriers -- so they "
+                             f"are not one array. Ask each segment for its own: "
+                             f"sig.subchains()[<namespace>].transmitted().")
+        return np.concatenate(sym), np.concatenate(t_s)
+    more = {
+        "switch": " A `switch` chooses among its inputs sample by sample, so no one symbol "
+                  "stream was sent; each input's own is sig.subchains()[<namespace>]"
+                  ".transmitted().",
+        "use": " Inside a several-channel record, ask the record: "
+               "rec.signal(<channel>).transmitted().",
+        "carrier": " A carrier's symbols are physics.carrier_symbols(kind, n_ui, seed, pattern).",
+    }.get(src["op"], "")
+    raise ValueError(f"{who}: the chain starts with `{src['op']}`, and transmitted symbols "
+                     f"come from an `iq` or `ofdm` source, or a `sequence` of chains that "
+                     f"start with one.{more}")
+
+
+def _op_iq(x, p, streams, grid, idx):
+    from . import iq as IQ
+    return IQ.shape(_iq_symbols(p, grid), grid, n=_grid_n(grid, p), pulse=p.get("pulse", "rrc"),
+                    beta=p.get("beta", IQ.RRC_BETA), span_ui=p.get("span_ui", IQ.RRC_SPAN_UI),
+                    amp=p.get("amp", 1.0))
+
+
+def _op_ofdm(x, p, streams, grid, idx):
+    return OFDM.run({k: p[k] for k in _OFDM_KEYS if k in p}, grid, idx, n=_grid_n(grid, p),
+                    sink=getattr(streams, "sink", None))
+
+
+def _op_upconvert(x, p, streams, grid, idx):
+    from . import iq as IQ
+    fc = p.get("fc_hz", getattr(grid, "fc_hz", None))
+    if fc is None:
+        raise ValueError("upconvert needs the carrier: fc_hz=..., or a centre frequency on the "
+                         "record (Grid(domain='iq', fc_hz=...))")
+    return IQ.upconvert(x, fc, grid.fs, phase_rad=p.get("phase_rad", 0.0),
+                        fold_db=p.get("fold_db", IQ.FOLD_DB))
+
+
+def _op_downconvert(x, p, streams, grid, idx):
+    from . import iq as IQ
+    if "fc_hz" not in p:
+        raise ValueError("downconvert needs fc_hz=, the frequency the I/Q is centred on")
+    return IQ.downconvert(x, p["fc_hz"], grid.fs, p.get("lpf"), fs_out_hz=p.get("fs_out_hz"),
+                          phase_rad=p.get("phase_rad", 0.0))
 
 
 def _op_burst(x, p, streams, grid, idx):
@@ -294,8 +598,8 @@ def _op_pass_fet(x, p, streams, grid, idx):
     for the gate DRIVE (the same nested-spec shape `open_drain`'s `second` and `crosstalk`'s
     `aggressor` already use), thresholded at `vth` to decide the boolean `gate_on`."""
     from .physics import pass_fet
-    spec = {"kind": "square", **p.get("gate", {})}
-    g = np.asarray(_carrier(spec, streams, grid, f"pass_fet_gate{idx}"), float)
+    g = SUB.signal(p, "gate", streams, grid, idx, n=len(x), default={}, carrier=lambda s: _carrier(
+        {"kind": "square", **s}, streams, grid, f"pass_fet_gate{idx}"))
     gate_on = g > float(p.get("vth", 0.0))
     return pass_fet(x, gate_on, rds_on_ohm=p.get("rds_on_ohm", 5.0),
                     r_load_ohm=p.get("r_load_ohm", 1e6), v_rail_hi=p.get("v_rail_hi"),
@@ -304,9 +608,9 @@ def _op_pass_fet(x, p, streams, grid, idx):
 
 
 def _op_modulate(x, p, streams, grid, idx):
-    """AM/ASK/OOK, FM/FSK, PM as one op -- `message` is a nested carrier spec (the same shape
-    `open_drain`'s `second` and `crosstalk`'s `aggressor` already take), so a caller reaches
-    every one of these by choosing the message's `kind`, not a new function per modulation.
+    """AM/ASK/OOK, FM/FSK, PM as one op -- `message` is a sub-chain (see `wfmsynth.subchain`)
+    or a bare carrier spec, so a caller reaches every one of these by choosing what the message
+    IS, not a new function per modulation.
 
     AM/ASK/OOK COMBINE with the upstream `x` (the already-rendered RF carrier -- build it with
     `carrier("sine", f_hz=fc, ...)` first). FM/FSK and PM GENERATE their own carrier at
@@ -316,8 +620,9 @@ def _op_modulate(x, p, streams, grid, idx):
     kind = p.get("kind", "am")
     if "message" not in p:
         raise ValueError("modulate needs message=<a carrier spec dict>")
-    spec = {"kind": "sine", **p["message"]}
-    msg = np.asarray(_carrier(spec, streams, grid, f"modulate_msg{idx}"), float)
+    msg = SUB.signal(p, "message", streams, grid, idx,
+                     n=len(x) if x is not None else _grid_n(grid, p), carrier=lambda s: _carrier(
+                         {"kind": "sine", **s}, streams, grid, f"modulate_msg{idx}"))
     if kind in ("am", "ask", "ook"):
         return P_.am_modulate(x, msg, depth=p.get("depth", 1.0),
                               suppressed=p.get("suppressed", False))
@@ -343,6 +648,8 @@ def _op_lossy(x, p, streams, grid, idx):
                             "method", "linear", "guard") if k in p}
     if "trend" in kw and kw["trend"] is not None:
         kw["trend"] = tuple(float(t) for t in kw["trend"])   # JSON round-trips it as a list
+    if np.iscomplexobj(x):                   # an envelope: the same law, read at fc + f
+        return BB.lossy(x, grid.fs, grid.fc_hz, **kw)
     return P.lossy_channel(x, grid=grid, **kw)
 
 
@@ -353,8 +660,9 @@ def _op_reflect(x, p, streams, grid, idx):
 
 
 def _op_crosstalk(x, p, streams, grid, idx):
-    aggr = _carrier({"kind": "nrz", **p.get("aggressor", {"n_ui": 32, "seed": 7})},
-                    streams, grid, f"xtalk{idx}")
+    aggr = SUB.signal(p, "aggressor", streams, grid, idx, n=len(x),
+                      default={"n_ui": 32, "seed": 7}, carrier=lambda s: _carrier(
+                          {"kind": "nrz", **s}, streams, grid, f"xtalk{idx}"))
     return P.crosstalk(x, aggr, coupling=p.get("coupling", 0.1),
                        kind=p.get("kind", "fext"), td_frac=p.get("td_frac", 0.05))
 
@@ -373,6 +681,15 @@ def _op_tx_ffe(x, p, streams, grid, idx):
 
 def _op_crosstalk_matrix(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("baud_offsets", "seeds", "kind", "synchronous") if k in p}
+    if "aggressors" in p:
+        made = sorted(k for k in kw if k != "kind")
+        if made:
+            raise ValueError(
+                f"crosstalk_matrix: `aggressors` gives the aggressor waveforms, and {made} "
+                f"describe the ones this op would otherwise MANUFACTURE, so nothing would read "
+                f"them. An aggressor's pattern, seed and symbol rate are set on its own "
+                f"carrier.")
+        kw["aggressors"] = SUB.signals(p, "aggressors", streams, grid, idx, n=len(x))
     return P.crosstalk_matrix(x, grid, p["couplings"], **kw)
 
 
@@ -403,8 +720,8 @@ def _multipair_lanes(p, grid, n, which, seed, role):
 def _op_hybrid_echo(x, p, streams, grid, idx):
     """Own transmit leaking into own receive. The `own` spec is a carrier spec, same shape as
     `crosstalk`'s `aggressor`, because the echo's source is a stream the recipe has to name."""
-    own = _carrier({"kind": "nrz", **p.get("own", {"n_ui": 32, "seed": 7})},
-                   streams, grid, f"echo{idx}")
+    own = SUB.signal(p, "own", streams, grid, idx, n=len(x), default={"n_ui": 32, "seed": 7},
+                     carrier=lambda s: _carrier({"kind": "nrz", **s}, streams, grid, f"echo{idx}"))
     kw = {k: p[k] for k in ("isolation_db", "td_ps", "td_samples", "f_hp_hz", "f_hp_frac")
           if k in p}
     return P.hybrid_echo(x, own, grid=grid, **kw)
@@ -462,11 +779,11 @@ def _op_open_drain(x, p, streams, grid, idx):
     v_dd = float(p.get("v_dd", 3.3))
     sink_b = None
     if p.get("second") is not None:
-        # a SECOND driver on the same net, same nested-spec shape `crosstalk`'s `aggressor`
-        # and `hybrid_echo`'s `own` already use -- a wired-AND second sink is just another
-        # composition of an existing mechanism, not a new one.
-        spec = {"kind": "nrz", **p["second"]}
-        xb = np.asarray(_carrier(spec, streams, grid, f"open_drain_second{idx}"), float)
+        # a SECOND driver on the same net, a sub-chain like `crosstalk`'s `aggressor` -- a
+        # wired-AND second sink is just another composition of an existing mechanism, not a
+        # new one.
+        xb = SUB.signal(p, "second", streams, grid, idx, n=len(xa), carrier=lambda s: _carrier(
+            {"kind": "nrz", **s}, streams, grid, f"open_drain_second{idx}"))
         mid_b = 0.5 * (np.percentile(xb, 1) + np.percentile(xb, 99))
         sink_b = xb < mid_b
     if not sink.any() and (sink_b is None or not sink_b.any()):
@@ -541,6 +858,22 @@ def _op_eo(x, p, streams, grid, idx):                        # E->O: electrical 
                               alpha=p.get("alpha", 0.0), adiabatic=p.get("adiabatic", 0.0),
                               linewidth_hz=p.get("linewidth_hz", 0.0), grid=grid,
                               rng=streams.role(f"linewidth/{idx}"))
+
+
+def _op_laser(x, p, streams, grid, idx):
+    """A swept laser: a field in the frame of its own carrier (`wfmsynth/swept.py`)."""
+    if x is not None:
+        raise ValueError("laser is a source and starts a chain; a waveform has already "
+                         "arrived here.")
+    return SW.laser({k: p[k] for k in _LASER_KEYS if k in p}, grid, idx,
+                    sink=getattr(streams, "sink", None))
+
+
+def _op_resonator(x, p, streams, grid, idx, carrier=None):
+    """A resonator solved in the laser's frame; `by` moves its resonance in nm."""
+    by = 0.0 if p.get("by") is None else _by(p, streams, grid, idx, len(_joined(x, p)))
+    return SW.resonator(_joined(x, p), grid.fs, carrier,
+                        {k: p[k] for k in _RESONATOR_KEYS if k in p}, shift_nm=by)
 
 
 def _op_fiber(x, p, streams, grid, idx):                     # fibre CD (physical β2·L) + attenuation
@@ -624,6 +957,19 @@ def _op_acquire(x, p, streams, grid, idx):
     return taps[p.get("tap", "stored")]
 
 
+def _op_trigger(x, p, streams, grid, idx, sink=None):
+    """Cut the triggered window(s) out of the long render. `grid` is the grid the record is on
+    NOW (after an `acquire`, the acquisition's)."""
+    kw = {k: p[k] for k in ("pre_s", "post_s", "condition", "level", "slope", "hysteresis",
+                            "width_s", "runt_level", "holdoff_s", "jitter_s", "n_segments",
+                            "average") if k in p}
+    # the condition is looked for on `on` when it is given -- the scope's trigger input is
+    # another channel -- and the window is cut out of `x` either way
+    on = SUB.signal(p, "on", streams, grid, idx, n=len(x)) if p.get("on") is not None else None
+    return TRIG.apply(x, grid.fs, on=on, rng=streams.role(f"trigger/{idx}"), events=sink,
+                      placement=f"trigger/{idx}", **kw)
+
+
 _EVENT_SKIP = {"op"}
 
 
@@ -633,9 +979,10 @@ def _op_events(x, p, streams, grid, idx, sink=None):
     from .events import apply_events, place_events
     kw = {k: v for k, v in p.items() if k not in _EVENT_SKIP}
     if kw.get("on") == "aggressor" and isinstance(kw.get("aggressor"), dict):
-        spec = {"kind": "nrz", **kw["aggressor"]}
         kw = dict(kw)
-        kw["aggressor"] = _carrier(spec, streams, grid, f"events_aggr{idx}")
+        kw["aggressor"] = SUB.signal(p, "aggressor", streams, grid, idx, n=len(x),
+                                     carrier=lambda s: _carrier({"kind": "nrz", **s}, streams,
+                                                                grid, f"events_aggr{idx}"))
     ev = place_events(len(x), grid=grid, rng=streams.role(f"events/{idx}"), x=x, **kw)
     y, _mask, ev = apply_events(x, ev, grid=grid)
     if sink is not None:
@@ -916,6 +1263,13 @@ def _op_sample_clock(x, p, streams, grid, idx):
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
     common = {k: p[k] for k in ("band", "dc", "band_tol", "linear", "guard", "method") if k in p}
+    if np.iscomplexobj(x):                   # an envelope: the measured transfer at fc + f
+        if "path" in p:
+            kw = {k: p[k] for k in ("n_ports", "mode", "term", "check", "z0", "ports") if k in p}
+            freqs, s21 = SP.touchstone_transfer(p["path"], **kw)
+        else:
+            freqs, s21 = p["freqs"], p["s21"]
+        return BB.sparam(x, grid.fs, grid.fc_hz, freqs, s21, **common)
     if "path" in p:
         # `ports` is passed THROUGH, not coerced: a mixed-mode pairing can be a STRING
         # ("13_24") or a tuple of pairs, and `tuple(...)`-wrapping a string shreds it into
@@ -933,25 +1287,6 @@ def _op_cascade(x, p, streams, grid, idx):
     from . import sparam as SP
     kw = {k: p[k] for k in ("method",) if k in p}
     return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"), **kw)
-
-
-class _Namespaced:
-    """A `Streams` view that prefixes every role name.
-
-    A nested chain asks for the same role names as the outer one -- `jitter/0`, `noise/1` --
-    keyed by its own op index, so handing it the parent's `Streams` would give a driver's jitter
-    the parent op 0's draws. Prefixing keeps each driver's randomness independent of the others
-    and of the chain the net sits in, while still deriving from the record's single seed, so one
-    `Signal(seed=)` moves the whole record coherently and `Streams.reroll` can still name a
-    driver's factor exactly (`reroll("net/3/host/jitter/0")`).
-    """
-    __slots__ = ("_st", "_pre")
-
-    def __init__(self, st, pre):
-        self._st, self._pre = st, pre
-
-    def role(self, name):
-        return self._st.role(self._pre + str(name))
 
 
 _NO_VOLTS = object()
@@ -1010,71 +1345,50 @@ def _source_volts(volts, y, did, last_kind):
 def _driver_source(src, x, streams, grid, idx, did, n):
     """One driver's `source` spec -> its Thevenin level in VOLTS, one sample per record sample.
 
-    Three bodies, exactly one of them: `from="chain"` (the waveform arriving at this op --
-    this driver IS the chain), `ops=[...]` (its own chain, any ops, rendered on this grid), or
-    a bare carrier spec by `kind` (the idiom `crosstalk(aggressor=)` and `open_drain(second=)`
-    already use). Plus `volts`, which says what level domain the result is in.
+    Exactly one body, resolved by `wfmsynth.subchain.render` like every other parameter that
+    holds a signal: `from="chain"` (the waveform arriving at this op -- this driver IS the
+    chain), `ops=[...]` (its own chain, any ops, rendered on this grid), `from=<recipe>`
+    (another record) or a bare carrier spec by `kind`. Plus `volts`, which says what level
+    domain the result is in.
     """
+    who = f"net: driver {did!r}'s `source`"
     if not isinstance(src, dict):
-        raise ValueError(f"net: driver {did!r}'s `source` is {src!r}; it is a spec dict -- "
-                         f"{{'from': 'chain', ...}}, {{'ops': [...], ...}} or a carrier spec "
-                         f"{{'kind': 'cmos', ...}} -- plus `volts`. An array does not belong in "
-                         f"a recipe; call `wfmsynth.net.solve(sources=...)` for one.")
+        raise ValueError(f"{who} is {src!r}; it is a spec dict -- {{'from': 'chain', ...}}, "
+                         f"{{'ops': [...], ...}} or a carrier spec {{'kind': 'cmos', ...}} -- "
+                         f"plus `volts`. An array does not belong in a recipe; call "
+                         f"`wfmsynth.net.solve(sources=...)` for one.")
     spec = dict(src)
     volts = spec.pop("volts", _NO_VOLTS)
-    frm, ops = spec.pop("from", None), spec.pop("ops", None)
-    bodies = [nm for nm, v in (("from", frm), ("ops", ops), ("kind", spec.get("kind")))
-              if v is not None]
-    if len(bodies) != 1:
+    if not any(spec.get(k) is not None for k in ("from", "ops", "kind")):
         raise ValueError(
-            f"net: driver {did!r}'s `source` needs exactly one of 'from' (the chain this op is "
-            f"in), 'ops' (its own chain) or 'kind' (one carrier); it has "
-            f"{bodies if bodies else 'none of them'}.")
-    last_kind = None
-    if frm is not None:
-        if frm != "chain":
-            raise ValueError(f"net: driver {did!r}'s source has from={frm!r}; the only value is "
-                             f"'chain', meaning the waveform arriving at this op.")
-        if x is None:
-            raise ValueError(f"net: driver {did!r}'s source is from='chain', but this net is the "
-                             f"first op so no waveform has arrived. Put a carrier before it, or "
-                             f"give the driver its own 'ops'/'kind'.")
-        y = np.asarray(x, float)
-    elif ops is not None:
-        sub = Signal(grid=grid)
-        sub.ops = [dict(o) for o in ops]
-        if not sub.ops:
-            raise ValueError(f"net: driver {did!r}'s source has an empty `ops`, so it renders "
-                             f"nothing. A driver that holds one level is `volts=` in its "
-                             f"description and needs no source.")
-        for o in sub.ops:
-            if o.get("op") not in _EXEC:
-                raise ValueError(f"net: driver {did!r}'s source chain has op {o.get('op')!r}, "
-                                 f"which does not exist. Known ops: {sorted(_EXEC)}")
-            OPKEYS.check(o["op"], o)         # the same gate the builders go through
-        if sub.ops and sub.ops[-1]["op"] == "carrier":
-            last_kind = sub.ops[-1].get("kind")
-        y = np.asarray(sub._run(_Namespaced(streams, f"net/{idx}/{did}/")), float)
-    else:
-        last_kind = spec.get("kind")
-        y = np.asarray(_carrier(spec, streams, grid, f"net/{idx}/{did}/carrier"), float)
-    if y.shape != (n,):
-        raise ValueError(
-            f"net: driver {did!r}'s source rendered {y.shape[0] if y.ndim == 1 else y.shape} "
-            f"samples but this net is solved over {n}. A driver's level is a waveform on the "
-            f"SAME grid as the net -- give it `n` or a grid that agrees, and keep the ops that "
-            f"resample or truncate a record (`acquire`, `digitize(n_out=)`, `sample_clock`) "
-            f"outside it.")
+            f"{who} needs exactly one of 'from' (the chain this op is in, or a recipe), 'ops' "
+            f"(its own chain) or 'kind' (one carrier); it has none of them.")
+    ops = spec.get("ops")
+    last_kind = spec.get("kind")
+    if ops and ops[-1].get("op") == "carrier":
+        last_kind = ops[-1].get("kind")
+    y = SUB.same_grid(
+        SUB.render(spec, streams, grid, f"net/{idx}/{did}", n, who, chain=x,
+                   carrier=lambda s: _carrier(s, streams, grid, f"net/{idx}/{did}/carrier")),
+        n, who)
     return _source_volts(volts, y, did, last_kind)
 
 
-def _flatten_driver(d):
+def _flatten_driver(d, parent=None):
     """One driver description on the way into a recipe, with a `Signal` source chain flattened.
 
     `source={"ops": Signal(...)}` is the pleasant thing to write and is not JSON; a recipe is
     provenance only if it serialises, so the op list is taken here rather than left to fail in
     whatever writes the archive. A driver with no source, or one whose `ops` is already a list,
     passes through unchanged -- including identically, so no existing recipe moves.
+
+    Only the Signal's OPS are taken. Its seed and grid are not: a driver's chain is part of
+    this record, drawn under this record's seed and rendered on this record's grid. The
+    generic sub-chain path refuses a Signal whose seed or grid would be dropped; this one has
+    always accepted it, and refusing now would break calls that render. So where the dropped
+    seed or grid DIFFERS from the record's -- the record is then not what was written -- it
+    warns, naming what is ignored and the fix; where they are the record's own, or were left
+    at their defaults, it is silent as before.
     """
     src = d.get("source")
     if not isinstance(src, dict):
@@ -1086,12 +1400,37 @@ def _flatten_driver(d):
                 f"net: driver {d.get('id')!r}'s source Signal sets a lead-in, which renders a "
                 f"LONGER record and discards the guard. A driver's level has to be the same "
                 f"length as the net it drives, so put the lead-in on the chain the net is in.")
-        ops = [dict(o) for o in ops.ops]
+        if parent is not None:
+            _warn_dropped(ops, parent, d.get("id"))
+        ops = TOL.stated(ops.ops)     # its tolerances are drawn by the record it joins
     elif ops is not None:
         ops = [dict(o) for o in ops]
     else:
         return d
     return {**d, "source": {**src, "ops": ops}}
+
+
+def _warn_dropped(sig, parent, did):
+    """Say what of a driver's source Signal is not used, when it is not the record's own."""
+    who = f"net: driver {did!r}'s source"
+    fix = (f"Pass {{'from': that_signal.recipe(), 'volts': ...}} to embed it as its own record, "
+           f"with its own seed and grid.")
+    if sig.seed not in (0, parent.seed):
+        warnings.warn(
+            f"{who} is a Signal with seed={sig.seed}, and that seed is IGNORED: a driver's "
+            f"chain is part of this record and draws from this record's seed ({parent.seed}), "
+            f"so its jitter and noise are not the ones that Signal renders by itself. Leave "
+            f"the seed off the driver's chain. {fix}", RuntimeWarning, stacklevel=4)
+    g, pg = sig.grid, parent.grid
+    same = g is None or (pg is not None and dataclasses.replace(
+        g, domain=pg.domain, fc_hz=pg.fc_hz) == pg)
+    if not same:
+        warnings.warn(
+            f"{who} is a Signal on {SUB._grid_words(g)}, and that grid is IGNORED: a driver's "
+            f"chain is rendered on this record's grid, {SUB._grid_words(pg)}, and nothing is "
+            f"resampled, so its edges, rates and length are not the ones that Signal renders "
+            f"by itself. Build it on this record's grid, or with no grid. {fix}",
+            RuntimeWarning, stacklevel=4)
 
 
 def _op_net(x, p, streams, grid, idx):
@@ -1188,6 +1527,182 @@ def _op_digitize(x, p, streams, grid, idx, win=None):
     return x
 
 
+def _op_law(x, p, streams, grid, idx, sink=None):
+    """A named transfer law (`wfmsynth/stages.py`). `sink` collects a comparator's transitions
+    for `Signal.realize()`, the way `_op_events` collects placed events."""
+    from . import stages as ST
+    if x is None:
+        raise ValueError("law: a transfer law acts on a waveform -- put a carrier before it.")
+    return ST.apply_law(x, fs=None if grid is None else grid.fs, events=sink,
+                        placement=f"law/{idx}", **{k: p[k] for k in _LAW_KEYS if k in p})
+
+
+def _op_filter(x, p, streams, grid, idx):
+    """A stated linear filter (`wfmsynth/stages.py`)."""
+    from . import stages as ST
+    if x is None or grid is None:
+        raise ValueError("filter: a filter acts on a waveform at a known sample rate -- put a "
+                         "carrier before it and give the Signal a grid (Grid(fs=...)).")
+    return ST.apply_filter(x, grid.fs, grid_baud=grid.baud,
+                           **{k: p[k] for k in _FILTER_KEYS if k in p})
+
+
+def _by_given(op, by):
+    if by is None or isinstance(by, (bool, str, bytes, list, tuple, np.ndarray)):
+        got = by if by is None or isinstance(by, bool) else type(by).__name__
+        raise ValueError(f"{op} needs by=: a number, or a sub-chain (a Signal, "
+                         f"{{'ops': [...]}} or {{'from': <recipe>}}); got {got!r}. A measured "
+                         f"waveform comes in through a `capture` op in a sub-chain.")
+    return float(by) if isinstance(by, (int, float, np.integer, np.floating)) else by
+
+
+def _by(p, streams, grid, idx, n, domain=DOMAIN.REAL):
+    """A signal-driven parameter: `by` is a number, or a sub-chain rendered on this grid."""
+    by = _by_given(p["op"], p.get("by"))
+    if isinstance(by, float):
+        return by
+    return SUB.signal(p, "by", streams, grid, idx, n=n, domain=domain)
+
+
+def _complex_by(by):
+    """A complex gain as the recipe holds it: ``[re, im]``, two finite numbers. None for
+    anything else."""
+    if isinstance(by, (complex, np.complexfloating)):
+        by = [by.real, by.imag]
+    if (isinstance(by, (list, tuple)) and len(by) == 2 and all(
+            isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool)
+            for v in by)):
+        return [float(by[0]), float(by[1])]
+    return None
+
+
+def _joined(x, p):
+    if x is None:
+        raise ValueError(f"{p['op']}: there is no waveform yet for it to act on -- put a "
+                         f"carrier before it.")
+    return x
+
+
+def _op_combine(x, p, streams, grid, idx, carrier=None):
+    """Peer signals joined sample by sample (`wfmsynth/joins.py`)."""
+    from . import joins as JN
+    x = _joined(x, p)
+    JN.check_combine(p.get("how", "sum"), p.get("gains"), len(p.get("others") or ()))
+    # on an envelope the peers are envelopes about the same centre; on a field, fields; on a
+    # voltage, voltages
+    dom = DOMAIN.held(x, grid)[0]
+    JN.check_domain(p.get("how", "sum"), dom)
+    if dom == DOMAIN.OPTICAL:                 # ... and fields about the SAME carrier
+        SW.same_carrier(p.get("others") or (), carrier, grid, getattr(streams, "record", None))
+    return JN.combine(x, SUB.signals(p, "others", streams, grid, idx, n=len(x), domain=dom),
+                      how=p.get("how", "sum"), gains=p.get("gains"))
+
+
+def _op_gain(x, p, streams, grid, idx):
+    """On an I/Q record `by` may be complex: ``[re, im]``, or a sub-chain that renders an
+    envelope (`wfmsynth/joins.py`). On an optical field the complex NUMBER is an arm's loss
+    and phase; a factor that moves there is real, as it is on a voltage, since an I/Q
+    sub-chain is not a field's."""
+    from . import joins as JN
+    x = _joined(x, p)
+    pair = _complex_by(p.get("by"))
+    if pair is not None:
+        return JN.gain(x, complex(*pair))
+    is_iq = DOMAIN.held(x, grid)[0] == DOMAIN.IQ
+    return JN.gain(x, _by(p, streams, grid, idx, len(x),
+                          domain=DOMAIN.BOTH if is_iq else DOMAIN.REAL))
+
+
+def _op_offset(x, p, streams, grid, idx):
+    from . import joins as JN
+    return JN.offset(_joined(x, p), _by(p, streams, grid, idx, len(x)))
+
+
+def _op_gate(x, p, streams, grid, idx):
+    """An ideal switch on an enable. Its switching instants go to the event list a collecting
+    render carries on its streams, as `switch`'s changes and a capture's annotations do."""
+    from . import joins as JN
+    return JN.gate(_joined(x, p), _by(p, streams, grid, idx, len(x)),
+                   threshold=p.get("threshold", 0.5), off=p.get("off", "zero"),
+                   fs=None if grid is None else grid.fs, events=getattr(streams, "sink", None),
+                   placement=f"gate/{idx}")
+
+
+def _op_delay(x, p, streams, grid, idx, carrier=None):
+    """A delay moves the labels with the samples: every event already on the waveform is
+    later by the delay AT that event, and one pushed past the end is gone with its samples.
+    `carrier` is the laser a field is in the frame of (`wfmsynth/swept.py`)."""
+    from . import joins as JN
+    sink = getattr(streams, "sink", None)
+    upstream = list(sink or ())               # before `by` renders: its own events stay put
+    by = _by(p, streams, grid, idx, len(_joined(x, p)))
+    y = JN.delay(x, by, None if grid is None else grid.fs,
+                 max_rate=p.get("max_rate", JN.DELAY_MAX_RATE),
+                 fc_hz=getattr(grid, "fc_hz", None), carrier=carrier)
+    if upstream:
+        gone = {id(e) for e in upstream}
+        EV.shift(upstream, by, grid.fs, len(y))
+        gone -= {id(e) for e in upstream}
+        sink[:] = [e for e in sink if id(e) not in gone]
+    return y
+
+
+def _op_sequence(x, p, streams, grid, idx):
+    """Chains joined in time (`wfmsynth/sequence.py`). A source: it starts the chain."""
+    from . import sequence as SEQ
+    SEQ.refuse_after(x, "sequence", "segments")
+    return SEQ.run_sequence(streams, grid, idx,
+                            **{k: p[k] for k in ("segments", "join", "t_join_s") if k in p})
+
+
+def _op_switch(x, p, streams, grid, idx):
+    """Chains selected by a signal (`wfmsynth/sequence.py`). A source: it starts the chain."""
+    from . import sequence as SEQ
+    SEQ.refuse_after(x, "switch", "inputs")
+    return SEQ.run_switch(streams, grid, idx, **{
+        k: p[k] for k in ("select", "inputs", "threshold", "t_switch_s") if k in p})
+
+
+def _op_use(x, p, streams, grid, idx):
+    return CH.use(x, p["name"], streams)
+
+
+# --------------------------------------------------------------- I/Q impairments (wfmsynth.rf)
+def _op_iq_imbalance(x, p, streams, grid, idx):
+    return RF.iq_imbalance(x, **{k: p[k] for k in ("gain_db", "phase_deg") if k in p})
+
+
+def _op_iq_offset(x, p, streams, grid, idx):
+    return RF.iq_offset(x, **{k: p[k] for k in ("i", "q") if k in p})
+
+
+def _op_freq_offset(x, p, streams, grid, idx):
+    return RF.freq_offset(x, grid.fs, **{k: p[k] for k in ("f_hz", "drift_hz_per_s", "fold_db")
+                                         if k in p})
+
+
+def _op_phase_noise(x, p, streams, grid, idx):
+    return RF.phase_noise(x, grid.fs, p.get("profile"), rng=streams.role(f"phase_noise/{idx}"))
+
+
+def _op_awgn(x, p, streams, grid, idx):
+    if x is None:                   # it starts the chain: noise with no signal under it
+        x = RF.silence(getattr(grid, "n", None), p.get("ref_power"))
+    return RF.awgn(x, grid.fs, grid.baud, rng=streams.role(f"awgn/{idx}"),
+                   **{k: p[k] for k in _AWGN_KEYS if k in p})
+
+
+def _op_spur(x, p, streams, grid, idx):
+    if x is None:                   # it starts the chain: a tone with no signal under it
+        x = RF.silence(getattr(grid, "n", None), p.get("ref_power"), "spur")
+    return RF.spur(x, grid.fs, **{k: p[k] for k in ("f_hz", "dbc", "phase_rad", "ref_power")
+                                  if k in p})
+
+
+def _op_dac(x, p, streams, grid, idx):
+    return RF.dac(x, **{k: p[k] for k in _DAC_KEYS if k in p})
+
+
 _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "capture": _op_capture, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
@@ -1201,12 +1716,22 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "timing": _op_timing, "optical": _op_optical, "dispersion": _op_dispersion,
          "eo": _op_eo, "fiber": _op_fiber, "optical_mpi": _op_optical_mpi, "edfa": _op_edfa,
          "photodetect": _op_photodetect, "tia": _op_tia,
+         "laser": _op_laser, "resonator": _op_resonator,
          "drift": _op_drift, "scope": _op_scope, "timebase": _op_timebase, "store": _op_store,
          "de_emphasis": _op_de_emphasis, "acquire": _op_acquire, "probe": _op_probe,
          "events": _op_events,
          "dcd": _op_dcd, "agc": _op_agc, "rx_noise": _op_rx_noise,
          "sample_clock": _op_sample_clock, "burst": _op_burst, "pass_fet": _op_pass_fet,
-         "modulate": _op_modulate}
+         "modulate": _op_modulate, "law": _op_law, "filter": _op_filter,
+         "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert,
+         "ofdm": _op_ofdm,
+         "combine": _op_combine, "gain": _op_gain, "offset": _op_offset, "gate": _op_gate,
+         "delay": _op_delay,
+         "sequence": _op_sequence, "switch": _op_switch, "use": _op_use,
+         "trigger": _op_trigger,
+         "iq_imbalance": _op_iq_imbalance, "iq_offset": _op_iq_offset,
+         "freq_offset": _op_freq_offset, "phase_noise": _op_phase_noise, "awgn": _op_awgn,
+         "spur": _op_spur, "dac": _op_dac}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1218,6 +1743,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
 # is preserved (a stable sort), because same-kind ops do not generally commute.
 # A probe sits BETWEEN the channel and the instrument -- it is what the instrument observes
 # through -- so it gets its own rank rather than sharing the instrument's.
+# `law` and `filter` are GENERAL stages: a comparator belongs after the probe and a soft limiter
+# inside the transmitter, so the op name does not say where it sits and they have no home kind.
 KIND_RANK = {"source": 0, "shape": 1, "supply": 2, "channel": 3, "probe": 4, "instrument": 5}
 OP_KIND = {
     "carrier": "source", "symbols": "source", "coded": "source", "capture": "source",
@@ -1225,19 +1752,33 @@ OP_KIND = {
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
     "dcd": "shape", "open_drain": "shape", "net": "channel", "burst": "shape", "pass_fet": "shape",
     "modulate": "shape",
+    "iq": "source", "upconvert": "shape", "downconvert": "instrument", "ofdm": "source",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
     "cascade": "channel",
     "crosstalk_matrix": "channel", "hybrid_echo": "channel", "multipair": "channel",
     "sparam": "channel", "dispersion": "channel", "ac_couple": "channel",
     "optical": "channel", "fiber": "channel", "optical_mpi": "channel", "edfa": "channel",
+    "laser": "source", "resonator": "channel",
     "probe": "probe",
     "rx_noise": "instrument", "agc": "instrument",
     "ctle": "instrument", "dfe": "instrument", "rx_ffe": "instrument", "tia": "instrument",
     "sample_clock": "instrument",
     "photodetect": "instrument", "scope": "instrument", "digitize": "instrument",
     "timebase": "instrument", "acquire": "instrument", "store": "instrument",
+    "law": "general", "filter": "general",
+    "combine": "general", "gain": "general", "offset": "general", "gate": "general",
+    "delay": "general",
+    "sequence": "source", "switch": "source",
+    "use": "general",
+    "trigger": "instrument",
+    # an I/Q impairment belongs to whichever end of the link it is written at -- imbalance
+    # before a frequency offset is the transmitter's, after it the receiver's -- so, like
+    # `law` and `filter`, where it sits is the meaning
+    **{op: "general" for op in RF.OPS},
 }
+# `use` is whatever the named chain is -- a source, a timing source, a supply -- so, like the
+# general stages, where it sits is its meaning and it has no home kind.
 
 
 def op_kind(op_name):
@@ -1247,6 +1788,13 @@ def op_kind(op_name):
 def canonicalize(ops):
     """Stable-sort an op list into canonical stage-kind order (source->shape->supply->channel->
     instrument). Order within a kind is preserved. Returns a new list."""
+    general = sorted({o["op"] for o in ops if op_kind(o["op"]) == "general"})
+    if general:
+        raise ValueError(
+            f"canonical order: {' and '.join(repr(g) for g in general)} is a general stage with "
+            f"no home in source -> shape -> supply -> channel -> probe -> instrument -- where "
+            f"it sits is the meaning (a comparator after the probe is not one before the "
+            f"channel), so it cannot be sorted. Keep this chain in the order it was written.")
     return sorted(ops, key=lambda o: KIND_RANK[op_kind(o["op"])])
 
 
@@ -1318,7 +1866,14 @@ LEAD_SOURCE_TR = 32.0                     # multiples of the source's rise time 
 # The ops the extent probe runs: LTI, deterministic, length-preserving, real-valued. These are the
 # ops that HAVE an impulse response, and they are exactly the ops that ring on a turn-on.
 _LEAD_LTI = {"lossy", "reflect", "resonant_reflect", "ac_couple", "sparam", "cascade", "tx_ffe",
-             "de_emphasis", "ctle", "rx_ffe", "scope", "probe", "intra_pair_skew"}
+             "de_emphasis", "ctle", "rx_ffe", "scope", "probe", "intra_pair_skew",
+             # every `filter` kind is LTI; `integrate` alone has no end to its memory and is
+             # refused in `_lead_check_ops`
+             "filter",
+             # a CONSTANT `delay` is a shift through a 32-tap interpolator, so it has an impulse
+             # response and the guard is where it reads its history from. One driven by a
+             # sub-chain never gets here: `SUB.refuse_lead_in` refuses any op holding one.
+             "delay"}
 # Ops that are skipped by the probe rather than rejected: memoryless (or a fraction of a UI of
 # interpolation), so they do not lengthen the chain's memory, or nonlinear/stochastic, so they have
 # no impulse response to measure. An OPTICAL chain is skipped because the field is complex and this
@@ -1337,10 +1892,18 @@ _LEAD_SKIP = {"carrier", "symbols", "coded", "nonlinearity", "crosstalk", "cross
               # and the caveat is the same one they already carry: a lead-in changes WHERE in
               # the on/off cycle the delivered window begins, not what the cycle is.
               "burst",
+              # `gain`, `offset` and `gate` by a NUMBER and are per-sample; with a sub-chain
+              # they, and `combine` always, are refused by `SUB.refuse_lead_in` first.
+              "combine", "gain", "offset", "gate",
               # `pass_fet` is a nonlinear per-sample decision (gate threshold, then either a
               # divider or a diode clamp) with no impulse response of its own -- the same
               # bucket `dcd`/`agc` are already in.
-              "pass_fet"}
+              "pass_fet",
+              # every `law` is a per-sample curve; the comparator's one bit of state is set by
+              # the guard's own samples, which is the history a running signal would have had
+              "law",
+              # per-sample on the envelope (two rails mixed, a constant added) or stochastic
+              "iq_imbalance", "iq_offset", "phase_noise"}
 # Ops with REAL memory but no probeable impulse response, whose extent is known in closed form.
 #
 # This category exists because `open_drain` fits none of the other three and putting it in the wrong
@@ -1415,9 +1978,44 @@ _LEAD_REJECT = {
                "extending the message backward for a lead-in would change that integral, so "
                "the op is refused uniformly rather than being silently right for one kind and "
                "wrong for another",
+    "use": "the chain it names belongs to a several-channel record (`wfmsynth.channels`), "
+           "whose chains are all rendered on the one grid a lead-in would lengthen for this "
+           "chain alone",
     "capture": "a captured record has no synthesized pattern to extend backward in time -- "
                "unlike `carrier`, which renders more of the SAME periodic sequence for the "
                "guard, a lead-in here would have to invent history the capture never had",
+    "iq": "its pulses are placed from the record's start and a burst has no earlier symbols to "
+          "render; the record's head IS the transmitter turning on",
+    "ofdm": "its symbols are placed from the record's start and a burst has no earlier symbols "
+            "to render; the record's head IS the transmitter turning on",
+    "laser": "its sweep is counted from the record's start, which a lead-in moves: the "
+             "delivered window would open on another wavelength under the same recipe",
+    "resonator": "it is solved against the laser's sweep, which is counted from the record's "
+                 "start",
+    "upconvert": "the carrier's phase is counted from the record's start, which a lead-in "
+                 "moves -- the delivered window would open on a different carrier phase under "
+                 "the same recipe",
+    "downconvert": "the local oscillator's phase is counted from the record's start, which a "
+                   "lead-in moves, and fs_out_hz changes the record length so the window cannot "
+                   "be sliced back out",
+    "sequence": "its segments are placed at absolute times in the record, which a lead-in "
+                "moves; give the guard to a segment's own record and embed it with "
+                "{'from': recipe}",
+    "switch": "its selector and inputs are sub-chains on the record's own grid, which a "
+              "lead-in lengthens without extending them",
+    "trigger": "it already cuts its window out of a longer render, so the record it returns is "
+               "not the extended render's length and a second window cannot be sliced out of "
+               "it. It does not need one: a trigger past the turn-on leaves the turn-on in the "
+               "part it discards",
+    "freq_offset": "the offset's phase and its drift are counted from the record's start, "
+                   "which a lead-in moves",
+    "spur": "the tone's phase is counted from the record's start, which a lead-in moves, and "
+            "its level is relative to the power of the record it is given",
+    "awgn": "its noise level is relative to the power of the record it is given, and a guard "
+            "is part of that record -- state ref_power= and the level no longer depends on it, "
+            "but the classification is per op name",
+    "dac": "its full scale is taken from the record it is given, and a guard is part of that "
+           "record",
     "acquire": "it resamples the record onto a second rate, so the guard's sample count is not the "
                "record's and the window cannot be sliced back out",
     "events": "it places a localized mechanism at an absolute position in the record, and a lead-in "
@@ -1463,8 +2061,17 @@ def _lead_source_geometry(ops, grid):
         raise ValueError("a lead-in needs a source op (add a carrier first)")
     src = ops[0]
     if src["op"] not in ("carrier", "symbols", "coded"):
+        if src["op"] in ("sequence", "switch", "iq", "ofdm", "laser"):   # cannot extend
+            raise ValueError(f"lead_in: the {src['op']!r} op cannot be rendered with a "
+                             f"lead-in because {_LEAD_REJECT[src['op']]}")
         raise ValueError(f"a lead-in needs the first op to be the source; ops[0] is "
                          f"{src['op']!r}. The lead-in is rendered BY the source.")
+    if src.get("kind") == "states":
+        raise ValueError(
+            "lead_in: a 'states' source has no pattern for a lead-in to extend, and the "
+            "interval in force when the record starts would lose its event. With "
+            "start='stationary' (the default) the process is already running at t = 0; for "
+            "the stages after it, render a longer record and discard its head.")
     n = _grid_n(grid, src)
     if n is None:
         raise ValueError("a lead-in needs the record length: pass grid=Grid(n=...) or n= on the "
@@ -1483,6 +2090,7 @@ def _lead_check_ops(ops):
     nonlinear or stochastic, so it does not) or `_LEAD_REJECT` (a lead-in would change what it
     means). A new op therefore has to be reasoned about before it can be rendered with a lead-in,
     rather than defaulting into the safe-looking pile."""
+    SUB.refuse_lead_in(ops)
     for o in ops:
         if (o["op"] not in _LEAD_LTI and o["op"] not in _LEAD_SKIP
                 and o["op"] not in _LEAD_REJECT and o["op"] not in _LEAD_ANALYTIC):
@@ -1499,6 +2107,11 @@ def _lead_check_ops(ops):
             if o["op"] == key[0] and o.get(key[1]) is not None:
                 raise ValueError(f"lead_in: {o['op']}({key[1]}=...) is relative to the record, "
                                  f"which a lead-in lengthens -- {fix}")
+        if o["op"] == "filter" and o.get("kind") == "integrate":
+            raise ValueError("lead_in: filter('integrate') is the running integral FROM THE "
+                             "RECORD'S FIRST SAMPLE, and a lead-in moves that origin -- the "
+                             "guard's own area would be delivered as an offset. Integrate "
+                             "without a lead-in.")
         if o["op"] == "crosstalk" and o.get("kind", "fext") == "next":
             raise ValueError("lead_in: crosstalk(kind='next') delays the aggressor by td_frac, a "
                              "fraction of the record, which a lead-in lengthens")
@@ -1592,6 +2205,68 @@ def _lead_size(spec, ops, grid, seed, n, p_quantum, measured=None, floor=0):
     return L, k, measured
 
 
+# the ops that store the record at another rate or length: what `_stored_rate` walks
+_RESTORES = ("acquire", "digitize", "sample_clock", "downconvert")
+
+
+def _stored_rate(ops, fs, n, peak_ok=False):
+    """``(fs, n)`` of the record after `ops`, starting from a grid of `fs` and `n`: the ops
+    that store at their own rate, resample or shorten the record, walked in order. `peak_ok`
+    lets a peak-hold acquisition through as the rate of its (min, max) pairs, which is what an
+    event's sample index needs; a timebase for a measurement it is not."""
+    for op in ops:
+        name = op["op"]
+        if name == "acquire":
+            prof = op.get("profile", {})
+            fs, n = float(prof["sample_rate_hz"]), int(prof["record_length"])
+            dec = prof.get("decimation") or {}
+            if dec.get("depth"):
+                if dec.get("mode", "sample") == "peak_hold" and not peak_ok:
+                    raise ValueError(
+                        "stored_grid: acquire(decimation=peak_hold) returns a (2, depth) "
+                        "min/max record, not a waveform on a timebase, so there is no grid "
+                        "for it. Measure the two channels yourself.")
+                depth = int(dec["depth"])
+                fs, n = fs * depth / n, depth
+        elif name == "digitize" and op.get("n_out"):
+            n_out = int(op["n_out"])                  # a genuine resample_poly
+            fs, n = fs * n_out / n, n_out
+        elif name == "sample_clock" and op.get("n_out"):
+            n = int(op["n_out"])                      # a TRUNCATION, not a resample
+        elif name == "downconvert" and op.get("fs_out_hz"):
+            step = int(round(fs / float(op["fs_out_hz"])))   # keeps every step-th sample
+            fs, n = float(op["fs_out_hz"]), len(range(0, n, step))
+        elif name == "trigger":
+            n = TRIG.record_length(op, fs)                # the window(s), at the rate it is on
+    return fs, n
+
+
+# The ops that are stated in Hz or seconds, or render a sub-chain beside the record, and so run
+# on the grid the record is on NOW (`_grid_now`) rather than the one the chain started on. The
+# general stages and the I/Q impairments; the named link and instrument ops are placed before
+# an acquisition and keep the synthesis grid.
+_RATE_NOW = RF.RATE_AWARE + ("filter", "law", "delay", "gate", "gain", "offset", "combine",
+                             "resonator")
+# ... of which these, on an optical field, are handed the carrier it is an envelope about
+_CARRIER_NOW = DOMAIN.READS_CARRIER + ("combine",)
+# ... and the channel ops that, on an ENVELOPE, are read about its centre frequency
+_CENTRE_NOW = ("lossy", "sparam")
+
+
+def _grid_now(ops, grid, x, dom, fc):
+    """The grid describing the record `x` after `ops`: its rate and length as they are at that
+    point, not as the chain started, in the domain and about the centre (`dom`, `fc`) the
+    chain has reached there."""
+    if grid is None:
+        raise ValueError("upconvert/downconvert need a sample rate: Signal(grid=Grid(fs=...))")
+    fs, n = _stored_rate(ops, float(grid.fs), int(grid.n))
+    if fs == grid.fs:
+        fs = grid.fs                         # untouched: the number the chain was given
+    import dataclasses
+    return dataclasses.replace(grid, fs=fs, n=n if x is None else len(x), domain=dom,
+                               fc_hz=fc if dom == DOMAIN.IQ else None)
+
+
 @dataclass
 class LeadPlan:
     """What a lead-in render will do, resolved and reportable BEFORE it is rendered: the guard
@@ -1621,6 +2296,11 @@ class LeadPlan:
                 f"source's own {self.floor}-sample settling, quantised to {self.quantum} (1 UI)")
 
 
+def _stated(params):
+    """An op's parameters without its annotations (`_unit`, `_prov`)."""
+    return {k: v for k, v in params.items() if not k.startswith("_")}
+
+
 # --------------------------------------------------------------- the Signal builder
 @dataclass
 class Signal:
@@ -1634,8 +2314,43 @@ class Signal:
     # stages that are still circular wrap the record's tail onto its head, so both ends need guard.
     lead_in: object = None
     lead_out: object = None
+    # ``(record, chain name)`` for a chain handed out by `Channels.signal(name)`: it renders
+    # as that channel does inside its record -- the record's seed and the chain's namespace --
+    # and its recipe is the record's.
+    within: object = field(default=None, repr=False, compare=False)
 
-    def _add(self, op, **params):
+    def copy(self):
+        """An independent Signal with the same seed, grid and ops: the way to BRANCH a chain.
+
+        A builder method appends to the Signal it is called on and returns that same Signal,
+        so `base.lossy(...)` followed by `base.rx_noise(...)` is ONE chain holding both ops,
+        not two variants. Branch from a copy:
+
+            base = Signal(seed=1, grid=g).carrier("nrz", n_ui=1024)
+            short = base.copy().lossy(loss_db=3, loss_at_ghz=8)
+            long = base.copy().lossy(loss_db=12, loss_at_ghz=8)       # base still has one op
+
+        The copy renders and digests exactly as the original does at the moment of copying
+        (same recipe, same samples, toleranced parts as drawn), and nothing done to either
+        afterwards reaches the other."""
+        import copy as _copy
+        return dataclasses.replace(self, ops=_copy.deepcopy(self.ops))
+
+    def _streams(self, collect=False):
+        """The streams this chain draws from when none are handed in."""
+        if self.within is None:
+            return Streams(self.seed)
+        rec, name = self.within
+        return CH._Render(rec, None, collect).view(name)
+
+    def _alone(self, what, instead):
+        if self.within is not None:
+            rec, name = self.within
+            raise ValueError(
+                f"{what}: this Signal is channel {name!r} of a several-channel record, and "
+                f"renders under that record's seed and names. {instead}")
+
+    def _add(self, op, /, **params):
         """Append one op, rejecting a parameter this op does not read.
 
         An op takes its parameters as a dict, so an invented or misspelled name would otherwise
@@ -1646,8 +2361,45 @@ class Signal:
         shared and the rule is: `op` is reserved, anything beginning with an underscore is
         annotation, and everything else is a parameter this op has to read.
         """
-        OPKEYS.check(op, params)
-        self.ops.append({"op": op, **params}); return self
+        if "op" in params:
+            raise TypeError(f"op {op!r} does not take 'op': that key is the op's own name in "
+                            f"the recipe, and the builder writes it.")
+        params = SUB.flatten(op, params, self)                   # a sub-chain -> data
+        new = TOL.resolve(len(self.ops), {"op": op, **params}, self.seed)   # a tolerance -> its number
+        OPKEYS.check(op, new)
+        if not self.ops:                              # the source: a grid that did not state
+            self.grid = DOMAIN.follow(self.grid, new)     # its domain takes the source's
+        DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
+        TRIG.check_chain(self.ops + [new])
+        self.ops.append(new); return self
+
+    def _drawn(self, params):
+        """`params` with any toleranced value drawn, as `_add` will draw it for the op about to
+        be added -- for a builder that checks a design, which needs the unit's number."""
+        return TOL.resolve(len(self.ops), params, self.seed)
+
+    def _rate_at(self, i):
+        """The sample rate the record is at when op `i` runs: the grid's, unless an op before
+        it stored or decimated the record (`acquire`, `downconvert(fs_out_hz=)`)."""
+        return _stored_rate(self.ops[:i], self.grid.fs, int(self.grid.n))[0]
+
+    def unit(self, seed):
+        """The same design as ANOTHER UNIT: every toleranced parameter (`ws.tol`, `ws.corners`)
+        drawn again under `seed`, everything else -- ops, seed, noise -- the same. Returns a
+        Signal, so the new unit's values are in its recipe. See `wfmsynth.tolerance`.
+
+        A `{"from": recipe}` sub-chain is a pinned record and stays pinned: `unit()` does not
+        move its toleranced parts, and `roles()` does not list them."""
+        self._alone("unit()", "Another unit is another record: rec.unit(seed).signal(<name>).")
+        return TOL.as_unit(self, seed)
+
+    def use(self, name):
+        """The chain called `name` in the several-channel record this chain belongs to
+        (`ws.Channels`), at this point: as the first op it IS that chain's waveform (a shared
+        bit stream, another channel); after a source it is that chain's ops APPLIED here (a
+        shared timing source, a shared supply). Its randomness is drawn under ITS name, not
+        this channel's, so every channel that uses it sees the same realisation."""
+        return self._add("use", name=name)
 
     def annotate(self, **prov):
         """Attach provenance metadata (e.g. ``stage="channel", node="TP2"``) to the most
@@ -1731,7 +2483,8 @@ class Signal:
         is recorded, so the day a default is corrected every record moves with it."""
         return self._add("coded", scheme=scheme, **params)
 
-    def capture(self, path=None, values=None, fs_hz=None, n=None, resample=False, embed=False):
+    def capture(self, path=None, values=None, fs_hz=None, n=None, resample=False, embed=False,
+                format=None, fc_hz=None, **layout):
         """First op: import a REAL capture from disk (or literal samples) as the start of a
         chain, so it can take the same later ops a synthesized carrier takes --
         `lossy`/`probe`/`events`/`scope`, anything downstream of a source.
@@ -1759,9 +2512,56 @@ class Signal:
         If the loaded length does not match the Grid's `n` (or an explicit `n=`), that is a
         named error unless `resample=True` is passed -- silently truncating or padding a
         captured record is exactly the failure mode `sample_clock`'s `n_out` warning exists to
-        prevent, and a capture gets the same refusal instead."""
+        prevent, and a capture gets the same refusal instead.
+
+        I/Q: on a `Grid(domain="iq", fc_hz=...)` the same call starts a COMPLEX BASEBAND chain
+        -- `values=<complex array>` (recorded as ``[[re, im], ...]``), a complex ``.npy`` /
+        ``.npz``, or a three-column ``.csv`` (time, I, Q). Complex samples offered to a real
+        record are refused by name; nothing takes the real part for you. On a
+        `Grid(domain="optical")` complex samples are an OPTICAL FIELD instead (one rendered
+        elsewhere, or by a chain that ended before `photodetect`), and the field ops follow.
+
+        An I/Q RECORDING in an exchange format is read with `format=`:
+
+            capture(path="rec.iq", format="iq_interleaved", dtype="int16", fs_hz=250e6, fc_hz=1e9)
+            capture(path="rec", format="sigmf")     # rate, centre and annotations from the metadata
+            capture(path="rec.csv", format="csv", columns=("I", "Q"))
+            capture(path="rec.mat", format="mat", variable="x")
+
+        `ws.read_iq(path, format=...)` is the same call on a grid taken from the file, and is
+        the one-line route. The layout parameters (`dtype`, `byteorder`, `scale`, `columns`,
+        `variable`, `check`), the byte-order check and what a SigMF annotation becomes are in
+        `wfmsynth/iqfile.py`. `fc_hz` states the file's centre frequency and must be the
+        grid's. The digest and `embed=True` behave exactly as above; a file's annotations are
+        copied into the recipe and come back from `realize()` as events."""
+        from . import capture as CAP
+        # a grid that did not state its domain takes the file's: complex samples make the
+        # record complex baseband, centred where the file says it is
+        follows = (self.grid is not None and not self.grid.domain_stated and not self.ops)
+        if format is not None or fc_hz is not None or layout:
+            from . import iqfile as IQF
+            if path is None or values is not None or format is None:
+                raise ValueError(
+                    "capture: format=, fc_hz= and the layout parameters "
+                    f"({', '.join(IQF._LAYOUT)}) describe an I/Q FILE: pass path= with "
+                    "format= (one of " + ", ".join(IQF.FORMATS) + "), and not values=.")
+            params = IQF.capture_params(self.grid, path, format, fs_hz=fs_hz, fc_hz=fc_hz,
+                                        embed=embed, **layout)
+            if follows:
+                self.grid = dataclasses.replace(self.grid, domain=DOMAIN.IQ,
+                                                fc_hz=params.get("fc_hz"))
+            if n is not None:
+                params["n"] = n
+            if resample:
+                params["resample"] = True
+            return self._add("capture", **params)
+        if follows:
+            self.grid = DOMAIN.follow(self.grid, {"op": "capture", "path": path} if values is None
+                                      else {"op": "capture", "values": [[0, 0]]
+                                            if np.iscomplexobj(np.asarray(values)) else [0]})
+        dom = DOMAIN.of(self.grid)
         if values is not None:
-            params = {"values": [float(v) for v in values]}
+            params = {"values": CAP.encode(values, dom)}
             if fs_hz is not None:
                 params["fs_hz"] = fs_hz
             if n is not None:
@@ -1772,12 +2572,10 @@ class Signal:
         if path is None:
             raise ValueError("capture needs path=... or values=[...]")
         if embed:
-            from . import capture as CAP
-            y = CAP.load_values(path)
-            params = {"values": [float(v) for v in y], "sha256": CAP.digest(y)}
+            y = CAP.load_values(path, dom)
+            params = {"values": CAP.encode(y, dom), "sha256": CAP.digest(y)}
         else:
-            from . import capture as CAP
-            params = {"path": str(path), "sha256": CAP.digest(CAP.load_values(path))}
+            params = {"path": str(path), "sha256": CAP.digest(CAP.load_values(path, dom))}
         if fs_hz is not None:
             params["fs_hz"] = fs_hz
         if n is not None:
@@ -1786,9 +2584,268 @@ class Signal:
             params["resample"] = True
         return self._add("capture", **params)
 
+    def iq(self, constellation=None, **params):
+        """First op of a COMPLEX BASEBAND chain: symbols on a constellation, pulse-shaped.
+        Needs `Grid(fs=..., baud=..., n=...)`; the record is I/Q because this is its source,
+        so the grid need not say `domain="iq"` (one that says `domain="real"` is refused).
+        `fc_hz=` on the grid states the centre frequency, for `upconvert` and for files.
+
+            Signal(seed=1, grid=g).iq("qpsk", prbs=9)             # PRBS bits, fills the record
+            Signal(seed=1, grid=g).iq("qam16", bits=[...])        # your bits
+            Signal(seed=1, grid=g).iq(symbols=[1+0j, 1j, ...])    # your symbols, any alphabet
+
+        `constellation` is 'bpsk' | 'qpsk' | 'qam16' | 'qam64' -- Gray-mapped, unit average
+        power (`wfmsynth.iq.map_bits` states the mapping). The bits come from `prbs=<order>`
+        (with `prbs_seed=` / `prbs_phase=`, and `n_bits=` if the record should not be filled)
+        or a literal `bits=[...]`, exactly as on `coded`. `symbols=[...]` skips the mapping:
+        complex values, recorded as ``[[re, im], ...]``.
+
+        The pulse is a ROOT-RAISED-COSINE: `beta=` (roll-off, default 0.35), `span_ui=` (its
+        truncated length in symbols, default 16); `amp=` scales the envelope. Symbol k is
+        centred at ``(k + 0.5) / baud`` and samples-per-symbol need not be an integer. A grid
+        too slow for the pulse's bandwidth, and symbols that do not fit the record, are
+        refused.
+
+        GROUND TRUTH is `Signal.transmitted()`: the symbols and their centre times."""
+        from . import iq as IQ
+        OPKEYS.check("iq", params)
+        if params.get("symbols") is not None:
+            params = dict(params, symbols=IQ.as_pairs(params["symbols"]))
+        if constellation is not None:
+            params = dict(constellation=constellation, **params)
+        if params.get("symbols") is None and constellation is None:
+            raise ValueError("iq needs a constellation ('bpsk'/'qpsk'/'qam16'/'qam64') with "
+                             "prbs= or bits=, or literal symbols=[...]")
+        if _iq_source(params) != "symbols":
+            IQ.bits_per_symbol(constellation)
+        return self._add("iq", **params)
+
+    def ofdm(self, name=None, **params):
+        """First op of a COMPLEX BASEBAND chain: OFDM symbols -- an inverse FFT of each row
+        of a resource grid, a cyclic prefix in front of it. Needs `Grid(fs=..., n=...)` with
+        ``fs = n_fft * scs_hz`` or a whole multiple of it (any other rate is refused, naming
+        the rate; nothing is resampled).
+
+            Signal(seed=1, grid=g).ofdm(n_fft=64, scs_hz=312.5e3, cp=16, active=52,
+                                        constellation="qam16", prbs=15)
+            Signal(seed=1, grid=g).ofdm("my_20mhz", constellation="qpsk", prbs=15)   # a named set
+
+        `n_fft` subcarriers `scs_hz` apart; `cp` the cyclic prefix and `window` a
+        raised-cosine edge inside it, both in samples at the FFT rate (`cp` may be a list,
+        cycled over the symbols); `active` a count of subcarriers about the centre (the
+        centre left out) or a list of signed subcarrier numbers; `pilots` the known elements
+        (a list of subcarriers, or dicts of `subcarriers` / `values` / `every` / `first`);
+        `constellation` that of the data elements ('bpsk' | 'qpsk' | 'qam16' |
+        'qam64'), filled from `prbs=<order>` (`prbs_seed=`, `prbs_phase=`) or `bits=[...]`;
+        `n_symbols` how many symbols (default: as many as fit); `amp` scales the envelope,
+        whose mean power is otherwise one.
+
+        `name` is a parameter set registered with `wfmsynth.ofdm.register`: the recipe then
+        holds the name AND its numbers. Conventions, and what composes instead of being a
+        parameter (frames, gaps, a preamble, per-subcarrier constellations):
+        `wfmsynth/ofdm.py`.
+
+        GROUND TRUTH is `Signal.transmitted()`: the resource grid ``[symbol, subcarrier]``
+        and the time each symbol's useful part starts; `wfmsynth.ofdm.resource_grid` adds
+        which elements are pilots and the data bits. Each symbol boundary is an
+        ``ofdm_symbol`` event. `wfmsynth.ofdm.demodulate` is the receiver and
+        `rf.evm(..., ofdm=sig.ops[0])` the error per resource element."""
+        OPKEYS.check("ofdm", params)
+        if name is not None:
+            params = OFDM.named(name, params)
+        params = OFDM.jsonable(params)
+        OFDM.check(_stated(self._drawn(params)))     # refused where it is written
+        return self._add("ofdm", **params)
+
+    def upconvert(self, **params):
+        """Complex baseband -> a REAL PASSBAND record: ``Re{x * exp(j*2*pi*fc_hz*t)}``, on the
+        same grid. After this the record is an ordinary voltage, so `probe`, `scope`,
+        `acquire`, `digitize` and every other op model an instrument looking at RF.
+
+            .upconvert()                    # at the grid's own fc_hz
+            .upconvert(fc_hz=2.4e9)         # or state the carrier
+
+        params: `fc_hz` (default: the record's centre frequency), `phase_rad` (carrier phase
+        at t = 0), `fold_db` (default -40). The grid must be fast enough for the carrier and
+        the envelope together; one that is not is REFUSED with the numbers, never resampled
+        -- see `wfmsynth.iq.upconvert`."""
+        return self._add("upconvert", **params)
+
+    def downconvert(self, **params):
+        """A real passband record -> COMPLEX BASEBAND about `fc_hz`: mix down, then a STATED
+        low-pass. The receiver, or the analysis an instrument does on what it captured.
+
+            .downconvert(fc_hz=2.4e9, lpf=dict(pass_hz=20e6))                  # passband edge
+            .downconvert(fc_hz=2.4e9, lpf=dict(pass_hz=20e6, stop_hz=45e6, atten_db=70),
+                         fs_out_hz=250e6)
+
+        `lpf` is required: a dict of `pass_hz` and, where twice that and 80 dB are not what
+        is meant, `stop_hz` and `atten_db`. `wfmsynth.iq.lowpass_error(lpf, fs)` returns the
+        passband error and stopband those numbers actually deliver. `fs_out_hz` decimates by
+        a whole number (the same filter is the anti-alias filter); `phase_rad` is the local
+        oscillator's phase at t = 0. A filter that would pass the mixing image, or alias on
+        decimation, is refused -- see `wfmsynth.iq.downconvert`. It reads the rate the record
+        is ACTUALLY at, so it is correct after `acquire`. `fc_hz` may be left off on a chain
+        whose grid states the centre (`Grid(domain="iq", fc_hz=)`): it is then that one, and
+        is written into the recipe."""
+        from . import iq as IQ
+        if "fc_hz" not in params:
+            fc = getattr(self.grid, "fc_hz", None)
+            if fc is None:
+                raise ValueError("downconvert needs fc_hz=, the frequency the I/Q is centred "
+                                 "on: this chain's grid states no centre to take it from.")
+            params = dict(fc_hz=fc, **params)
+        IQ.lowpass_spec(_stated(self._drawn(params)).get("lpf"))   # refused where it is written
+        return self._add("downconvert", **params)
+
+    def transmitted(self):
+        """``(symbols, t_s)`` -- the complex symbols this chain's source sent and the time of
+        each one's centre, in seconds from sample 0. The ground truth for a demodulator, an
+        EVM or a bit-error count, resolved by the same code that renders the record.
+
+        The source is an `iq` op, or a `sequence` of chains that each start with one (a
+        preamble, then a payload): then every segment's symbols whose centres fall inside it,
+        in time order, on the record's clock. For an `ofdm` source `symbols` is the RESOURCE
+        GRID, complex ``[symbol, subcarrier]`` over the active subcarriers in ascending
+        order, and `t_s` the start of each symbol's useful part (where a receiver's FFT
+        opens); in a `sequence`, the symbols whose useful part lies wholly inside their
+        segment. `wfmsynth.sequence.layout` gives each segment's
+        `t_start_s` / `t_stop_s`, so `t_s` says which segment a symbol belongs to.
+
+        Times are the transmitter's: anything downstream with group delay (a channel, a
+        front end) moves the record against them, and nothing here estimates that."""
+        ops = self.ops
+        if self.within is not None:                  # a channel: its `use`s stand for chains
+            ops = self.within[0].expand(self.within[1])[1]
+        return _sent(ops, self.grid, "transmitted()")
+
+    # ---- I/Q impairments: one op per effect, conventions in `wfmsynth/rf.py` ----
+    def iq_imbalance(self, **params):
+        """The modulator's two rails do not match: the Q rail has gain `gain_db` and sits
+        `phase_deg` off quadrature, relative to the I rail. Every component at +f gains an
+        IMAGE at -f.
+
+            .iq_imbalance(gain_db=0.5, phase_deg=3.0)
+            .iq_imbalance(**ws.rf.imbalance_for(30))     # the gain error with a 30 dB image
+
+        `rf_report()` gives the image rejection the two numbers come to."""
+        return self._add("iq_imbalance", **params)
+
+    def iq_offset(self, **params):
+        """A DC term on each rail, `i` and `q` in the record's units: at RF, the carrier
+        leaking through.
+
+            .iq_offset(i=0.02, q=-0.01)
+
+        `rf_report()` gives the leak in dBc. For a leak STATED in dBc: `spur(f_hz=0, dbc=)`."""
+        return self._add("iq_offset", **params)
+
+    def freq_offset(self, **params):
+        """The two ends' oscillators disagree: the envelope turns at `f_hz`, drifting by
+        `drift_hz_per_s`. Positive moves the spectrum up.
+
+            .freq_offset(f_hz=12e3)
+            .freq_offset(f_hz=12e3, drift_hz_per_s=5e6)
+
+        An offset that would wrap content past Nyquist is refused (`fold_db`, default -40, is
+        how much may). `lo_phase()` is the phase it added at every sample."""
+        return self._add("freq_offset", **params)
+
+    def phase_noise(self, profile, **params):
+        """The oscillator's PHASE NOISE: the envelope is rotated by a Gaussian phase whose
+        spectrum is `profile`, a list of (offset in Hz, L(f) in dBc/Hz) points joined by
+        straight lines on a log-frequency axis.
+
+            .phase_noise(profile=[(1e4, -80), (1e5, -100), (1e6, -120)])
+
+        Nothing is drawn outside the stated offsets, and an offset the record cannot resolve
+        (below 1/duration, above Nyquist) is refused. Its role is `phase_noise/<op index>`;
+        `lo_phase()` is the phase at every sample and `rf_report()` its rms."""
+        from .stages import plain
+        return self._add("phase_noise", profile=plain(profile), **params)
+
+    def awgn(self, **params):
+        """White Gaussian noise on both rails, at ONE stated ratio to the signal:
+
+            .awgn(es_n0_db=20)                    # per symbol, against the grid's baud
+            .awgn(eb_n0_db=8)                      # per bit; bits/symbol from the iq source
+            .awgn(snr_db=25, bw_hz=30e6)          # in a stated bandwidth -- bw_hz is required
+
+        The signal power is the record's mean |x|**2 where the op sits, or `ref_power=` to
+        state it (a burst's idle time, or noise already added, would otherwise count). Role
+        `awgn/<op index>`. `rf_report()` gives the reference power and noise density used.
+
+        As the FIRST op it is a complex Gaussian noise SOURCE, with `ref_power` required:
+        `Signal().awgn(snr_db=0, bw_hz=B, ref_power=1.0)` has unit power in a band B."""
+        if params.get("eb_n0_db") is not None and "bits_per_symbol" not in params:
+            from . import iq as IQ
+            cons = _constellations(self.ops, self.grid)
+            if len(cons) == 1:                     # several (a QPSK preamble, a QAM payload)
+                params["bits_per_symbol"] = IQ.bits_per_symbol(cons.pop())   # have no one Eb
+        return self._add("awgn", **params)
+
+    def spur(self, **params):
+        """One unwanted tone, `f_hz` from the centre frequency (negative is below) and `dbc`
+        relative to the signal's power.
+
+            .spur(f_hz=3.1e6, dbc=-45)
+
+        params: `phase_rad` (at t = 0), `ref_power` (as for `awgn`).
+
+        As the FIRST op it is an unmodulated carrier, with `ref_power` required:
+        `Signal().spur(f_hz=1e6, dbc=0, ref_power=1.0)` is a unit-power tone 1 MHz above the
+        centre, and a row of them is a multitone (`wfmsynth.recipes.multitone`)."""
+        return self._add("spur", **params)
+
+    def dac(self, bits, **params):
+        """The transmit converter: each rail rounded onto 2**`bits` codes and limited to its
+        full scale.
+
+            .dac(bits=12)                         # full scale at the record's rail peak
+            .dac(bits=12, headroom_pct=10)        # 10 % above it
+            .dac(bits=8, headroom_pct=-30, clip="hard")     # driven 30 % into clipping
+            .dac(bits=12, full_scale=2.0)         # or state the range
+
+        A record beyond full scale is refused unless `clip="hard"`. `rf_report()` gives the
+        crest factor, back-off, LSB, clipped fraction and the quantisation SNR."""
+        return self._add("dac", bits=bits, **params)
+
+    def rf_report(self):
+        """What each I/Q impairment op came to on THIS record: one dict per op, in chain
+        order, ``{"op": index, "name": op name, ...}`` with
+
+            iq_imbalance  image_rejection_db
+            iq_offset     leak_dbc
+            freq_offset   f_start_hz, f_end_hz
+            phase_noise   rms_rad (the profile's), realised_rms_rad (this draw's)
+            awgn          ref_power, n0 (per Hz), noise_power, snr_db (over the whole record
+                          band), es_n0_db
+            spur          ref_power, amplitude
+            dac           full_scale, lsb, rail_peak, crest_factor_db (envelope peak over mean
+                          power), backoff_db, clipped_fraction, sqnr_db (signal over the
+                          uniform-step noise of both rails)
+
+        Powers are measured on the record as it reaches the op. For a channel of a
+        several-channel record (`rec.signal(name)`) the impairments of the chains it `use`s
+        are listed too, each with ``"chain": <that chain's name>``."""
+        return RF.report(self)
+
+    def lo_phase(self, streams=None):
+        """The oscillator's phase at every sample, in rad: what `freq_offset` and
+        `phase_noise` multiplied the envelope by, summed over those ops. The ground truth for
+        a carrier-recovery loop."""
+        return RF.lo_phase(self, streams)
+
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
         pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter.
+
+        STATE `n_ui`. It is the number of symbols in the record and it defaults to 32,
+        stretched over the whole record whatever `Grid(baud=)` says: the symbol rate of the
+        samples is ``n_ui * fs / n``, and the grid's `baud` is what every later op and measure
+        ASSUMES it is. `n_ui = n * baud / fs` makes the two agree. Leaving it out on a grid
+        that states a baud the 32 symbols do not come out at warns once, with both rates and
+        that value; the default itself is unchanged, since records rely on it.
 
         pattern is carrier-specific and defaults to 'legacy' for both: NRZ takes
         'legacy' (== 'prbs7'), 'prbs7'/'prbs9'/'prbs11'/'prbs13'/'prbs15'/'prbs23'/
@@ -1807,13 +2864,284 @@ class Signal:
         not the +/-1 amp/offset the rest of these share (tr_s is an absolute edge time in
         seconds, unlike every tr_frac above -- a real gate's edge does not shrink with
         frequency). Compose `probe(r_source=..., c_load_f=...)` after it for a loaded-output
-        RC pole rather than reaching for a knob here."""
+        RC pole rather than reaching for a knob here.
+
+        'states' is a level that dwells in one of a few states and jumps between them -- burst
+        noise when added with `combine`, an activity schedule as `gate(by=)` or
+        `switch(select=)`: levels, dwell (seconds: a mean, or a named distribution per state),
+        transitions, start, tr_s. Its intervals are `state` events. See `wfmsynth.states`."""
+        if kind == "states":
+            STATES.check(_stated(self._drawn(params)))
         return self._add("carrier", kind=kind, **params)
 
     def nonlinearity(self, **params):
         """Nominal (always-on) transmitter imperfections so the unfaulted class isn't
         suspiciously perfect. params: compression, level_noise, rise_fall_ratio, a_base."""
         return self._add("nonlinearity", **params)
+
+    def sequence(self, segments, join="cut", t_join_s=None, **params):
+        """Chains joined in TIME: a preamble then a payload, power-up then steady state.
+
+            pre  = Signal(grid=g).carrier("sine", f_hz=1e6)
+            data = Signal(grid=g).carrier("nrz", n_ui=400)
+            Signal(seed=1, grid=g).sequence([{"chain": pre, "duration_s": 2e-6}, {"chain": data}])
+
+        segments: [{"chain": <sub-chain>, "duration_s": <seconds>,
+                    "state": "restart"|"continue"}, ...] in order. A chain is a Signal, {"ops": [...]} or {"from": recipe} (see
+                  `crosstalk`). Durations must land on the grid and fill the record exactly;
+                  the last segment may leave `duration_s` off to take the rest. A segment
+                  may add "label": a few words for what it is, kept in its `segment` event
+                  and quoted by a refusal about it.
+        state:    "restart" (default) -- the segment is its chain from the chain's own t=0;
+                  nothing is carried in. "continue" -- the segment is the chain as it would be
+                  at that time had it run since the record began: phase, pattern position and
+                  filter memory all run on.
+        join:     "cut" | "crossfade" | "hold", over the `t_join_s` after each boundary: a
+                  raised-cosine move from the outgoing chain (which runs on) to the incoming,
+                  or the outgoing segment's last value held.
+
+        A SOURCE: ops after it act on the joined record. Outside the join windows the record is
+        exactly the segments spliced. Each boundary comes back from `realize()` /
+        `event_list()` as a `segment` event; `wfmsynth.sequence.layout` gives every segment's
+        samples. See `wfmsynth.sequence`."""
+        from . import sequence as SEQ
+        OPKEYS.check("sequence", params)
+        SEQ.refuse_after(self.ops, "sequence", "segments")
+        if self.grid is not None:        # a chain of a `Channels` record is checked on ITS grid
+            SEQ.check_sequence(segments, join, t_join_s, self.grid)
+        return self._add("sequence", segments=segments, join=join,
+                         **({} if t_join_s is None else {"t_join_s": t_join_s}))
+
+    def switch(self, select, inputs, threshold=0.5, t_switch_s=0.0, **params):
+        """Chains selected by a SIGNAL, sample by sample: an analog multiplexer.
+
+            Signal(seed=1, grid=g).switch(select=gate, inputs=[idle, data], threshold=0.5)
+
+        `inputs[k]` is on the line while `select` is above k of the thresholds: one `threshold`
+        for two inputs (0.5 unless stated, as for `gate`: right for a 0/1 selector and a +/-1
+        one alike), an ascending list of N-1 for N. A change of selection takes
+        `t_switch_s`, a raised-cosine move from what the line was carrying to the new input (0
+        is an ideal switch). `select` and each input are sub-chains (see `crosstalk`), all
+        running for the whole record.
+
+        A SOURCE: ops after it act on the multiplexed record. Each change comes back from
+        `realize()` / `event_list()` as a `switch` event whose `t_s` is when `select` crossed
+        the threshold, between two samples. There is no hysteresis: end a noisy `select` chain
+        on `law("comparator", hysteresis=...)`. See `wfmsynth.sequence`."""
+        from . import sequence as SEQ
+        OPKEYS.check("switch", params)
+        SEQ.refuse_after(self.ops, "switch", "inputs")
+        if not isinstance(inputs, (list, tuple)):
+            raise ValueError("switch: `inputs` is a list of sub-chains to choose between.")
+        if self.grid is not None:        # a chain of a `Channels` record is checked on ITS grid
+            SEQ.check_switch(len(inputs), threshold, t_switch_s, self.grid)
+        return self._add("switch", select=select, inputs=inputs, threshold=threshold,
+                         t_switch_s=t_switch_s)
+
+    def law(self, kind, **params):
+        """A named TRANSFER LAW, for a nonlinear shape that has no op of its own.
+
+            .law("comparator", threshold=1.65, hysteresis=0.2, v_lo=0.0, v_hi=3.3)
+
+        kind: tanh (gain, sat) | poly (coeffs) | limiter (lo, hi) | deadzone (width, center) |
+              rectify (mode) | quantize (bits, lo, hi) | comparator (threshold, hysteresis,
+              v_lo, v_hi, initial) | diode (r_load_ohm, i_sat, ideality, v_thermal)
+        on an I/Q record, an amplifier's AM/AM and AM/PM acting on the envelope's magnitude:
+              saleh (alpha_a, beta_a, alpha_phi_rad, beta_phi) | rapp (gain, sat, smoothness)
+
+        A kind is a name with parameters, never a callable, so the recipe stays data. Every
+        kind is memoryless except `comparator`, whose state is the level it is holding; its
+        transitions come back from `realize()` / `event_list()` as `transition` events with
+        the sub-sample time of each crossing -- the bridge from an analog signal to a digital
+        one. `nonlinearity`, `digitize` and `pass_fet` stay the named ops for a transmitter,
+        a converter and a switch; see `wfmsynth.stages` for each curve and which is which."""
+        from . import stages as ST
+        params = self._drawn(ST.plain(params))
+        ST.check_law(kind, **_stated(params))
+        # a voltage law on a voltage, an envelope law on I/Q; on an optical field no law
+        # applies, which the domain trace says in `_add`. A chain not yet on a record whose
+        # ops do not say (it starts with `use`, or is a stage of filters) cannot know:
+        # `stages.apply_law` refuses the wrong kind when it renders
+        if self.ops and (self.grid is not None or DOMAIN.needs(self.ops) is not None):
+            dom = DOMAIN.trace(self.ops, self.grid)[-1][0]
+            if dom in DOMAIN.BOTH and (kind in ST.ENVELOPE_LAWS) != (dom == DOMAIN.IQ):
+                raise ValueError(ST.refuse_law(kind, dom))
+        return self._add("law", kind=kind, **params)
+
+    def filter(self, kind, **params):
+        """A stated LINEAR FILTER, for a response that has no op of its own.
+
+            .filter("butter", f_hz=20e6, order=3)
+
+        kind: butter | bessel | cheby1 (ripple_db) | elliptic (ripple_db, stop_db) -- each
+              with f_hz, order=4, btype="low"|"high"|"bandpass"|"bandstop";
+              rrc (beta, span_ui=16, baud) | fir (taps) | sos (sos) | zpk (zeros, poles, gain) |
+              integrate (tau_s) | differentiate (tau_s) |
+              doppler (f_hz, shape="jakes"|"flat") -- a fading process's spectrum, for noise
+
+        Causal by default, and a causal filter DELAYS: `filter_delays()` reports by how much
+        (a slow feature by its group delay, a fast edge by its step delay), so the time of an
+        event placed upstream can be corrected. `zero_phase=True` is the
+        opt-in, recorded in the recipe, and keeps the stated magnitude. A design that is
+        unstable or not resolved on the grid is refused here, on the line that wrote it.
+        `scope`, `probe`, `ctle` and `ac_couple` stay the named ops for the instrument, the
+        equaliser and a coupling capacitor; see `wfmsynth.stages`."""
+        from . import stages as ST
+        params = self._drawn(ST.plain(params))
+        if self.grid is None:
+            ST.check_filter(kind, **_stated(params))
+        else:
+            ST.design_filter(self._rate_at(len(self.ops)), kind, grid_baud=self.grid.baud,
+                             **_stated(params))
+        return self._add("filter", kind=kind, **params)
+
+    def filter_delays(self):
+        """The delay of every `filter` op in this chain, in order: a list of
+        `{"op": index, "kind", "zero_phase", "group_delay_s", "at_hz", "step_delay_s"}`.
+        `group_delay_s` is how much later a feature SLOW against the filter arrives (a ramp,
+        an envelope); `step_delay_s` how much later the midpoint of an edge FAST against it
+        does -- a different number, None for a filter that blocks DC. An event placed before
+        op `i` is delivered later by the sum, over the filters after it, of the one that
+        matches the edge that carried it. Only `filter` ops report here -- the named channel
+        and instrument ops have delays of their own. See `stages.describe_filter`."""
+        from . import stages as ST
+        if self.grid is None:
+            raise ValueError("filter_delays: a delay in seconds needs the sample rate -- give "
+                             "the Signal a grid (Grid(fs=...)).")
+        return [{"op": i, **ST.describe_filter(self._rate_at(i), grid_baud=self.grid.baud,
+                                               **{k: o[k] for k in _FILTER_KEYS if k in o})}
+                for i, o in enumerate(self.ops) if o["op"] == "filter"]
+
+    def combine(self, others=None, how="sum", gains=None, **params):
+        """Join this chain with other signals, sample by sample.
+
+            hum = Signal(grid=g).carrier("sine", f_hz=50.0, amp=0.02)
+            sig.combine(hum)                                   # superposition
+            sig.combine([lo], how="product")                   # an ideal mixer
+            sig.combine([a, b], how="max", gains=[1.0, 0.5])   # an ideal diode-OR
+
+        others: one sub-chain or a list of them -- a Signal, {"ops": [...]} or
+                {"from": recipe} (see `Signal.crosstalk` for the three forms). Each is rendered
+                on this record's grid; one on another grid, or a complex one, is refused.
+        how:    "sum" | "product" | "min" | "max".
+        gains:  one number per entry of `others`, applied before the join. The chain itself is
+                taken as it stands.
+
+        Each sub-chain's randomness and events sit under `combine/<op index>/others/<k>`, so
+        `roles()`, `contrast()`, `subchain()` and the event list reach inside.
+
+        A SUM IS SUPERPOSITION, which is true where the sources do not load one another: a
+        coupled ripple, an interferer, a tone on a supply. Two drivers fighting on one node is
+        not a sum -- each loads the other -- and is `net`. `crosstalk` (a coupled sum) and
+        `modulate` (AM/OOK is a product) stay the named ops for those effects. See
+        `wfmsynth.joins`."""
+        from . import joins as JN
+        OPKEYS.check("combine", params)
+        if SUB.is_subchain(others) or isinstance(others, Signal):
+            others = [others]
+        if isinstance(others, (str, bytes, dict, np.ndarray)) or not hasattr(others, "__len__"):
+            raise ValueError(f"combine: others is a sub-chain or a list of them (a Signal, "
+                             f"{{'ops': [...]}} or {{'from': recipe}}), got "
+                             f"{type(others).__name__}.")
+        gains = JN.check_combine(how, gains, len(others))
+        if self.ops:                                # on an I/Q record a combine is a sum
+            JN.check_domain(how, DOMAIN.trace(self.ops, self.grid)[-1][0])
+        for k, o in enumerate(others):
+            if not isinstance(o, (Signal, dict)):
+                raise ValueError(f"combine: others[{k}] is {type(o).__name__}; each entry is a "
+                                 f"sub-chain. A measured waveform comes in through a `capture` "
+                                 f"op: Signal(grid=g).capture(values=...).")
+        return self._add("combine", others=list(others), how=how,
+                         **({} if gains is None else {"gains": gains}))
+
+    def gain(self, by=None, **params):
+        """Multiply by `by`: a number, or a sub-chain for a gain that moves.
+
+            ripple = Signal(grid=g).carrier("sine", f_hz=120.0, amp=0.03, offset=1.0)
+            sig.gain(by=ripple)                    # a gain riding on a supply ripple
+
+        `by` is the factor itself, so 1 leaves the signal alone. `drift(kind="gain")` is this
+        with a ramp or half-sine across the record.
+
+        On an I/Q record `by` may be COMPLEX -- `gain(by=0.5j)`, or an I/Q sub-chain -- and
+        then turns the envelope as well as scaling it: a path's amplitude and phase, or a
+        fade (`wfmsynth.recipes.fading`). On an optical field the complex number is an arm's
+        loss and phase (`gain(by=1j)` before a `combine` is a quarter-wave arm). See
+        `wfmsynth.joins`."""
+        OPKEYS.check("gain", params)
+        pair = _complex_by(by) if isinstance(by, (complex, np.complexfloating)) else None
+        if pair is not None:
+            if not all(np.isfinite(pair)):
+                raise ValueError(f"gain: by={by!r} is not a finite number.")
+            # a chain not yet on a record whose ops do not say (it starts with `use`) cannot
+            # know; `joins.gain` refuses a voltage when it renders
+            known = self.grid is not None or DOMAIN.needs(self.ops) is not None
+            if self.ops and known and \
+                    DOMAIN.trace(self.ops, self.grid)[-1][0] not in DOMAIN.COMPLEX:
+                raise ValueError(
+                    f"gain: by={by!r} is complex and the record is a real voltage here, which "
+                    f"has no phase to turn. A complex gain acts on an I/Q record or an optical "
+                    f"field; on a voltage give a real factor.")
+            return self._add("gain", by=pair)
+        return self._add("gain", by=_by_given("gain", by))
+
+    def offset(self, by=None, **params):
+        """Add `by`, in the waveform's own units: a number, or a sub-chain for a baseline that
+        moves. `drift(kind="dc")` is this with a ramp scaled to the signal's swing; a second
+        signal in its own right is `combine`. See `wfmsynth.joins`."""
+        OPKEYS.check("offset", params)
+        return self._add("offset", by=_by_given("offset", by))
+
+    def gate(self, by=None, threshold=0.5, off="zero", **params):
+        """Let the signal through where `by > threshold`: an ideal switch on an enable.
+
+            enable = Signal(grid=g).carrier("square", f_hz=1e3, amp=0.5, offset=0.5)
+            sig.gate(by=enable)
+
+        off: "zero" (0 while closed) or "hold" (the last value let through). Each switching
+        instant comes back from `realize()` / `event_list()` as a `transition` event with the
+        sub-sample time `by` crossed the threshold. `burst` is the named op for a periodic
+        cadence with ramped edges. See `wfmsynth.joins`."""
+        from . import joins as JN
+        OPKEYS.check("gate", params)
+        JN.check_gate(threshold, off)
+        return self._add("gate", by=_by_given("gate", by), threshold=threshold, off=off)
+
+    def delay(self, by=None, max_rate=0.5, **params):
+        """Delay by `by` SECONDS: a number, or a sub-chain for a delay that moves.
+
+            wobble = Signal(grid=g).carrier("sine", f_hz=1e6, amp=5e-12, offset=20e-12)
+            sig.delay(by=wobble)                   # 5 ps of periodic jitter on a 20 ps delay
+
+        Causal and band-limited: `by` is never negative, changes by less than `max_rate`
+        seconds per second (default 0.5), and the interpolation error is stated by
+        `delay_errors()`. Each of those is refused by name when it does not hold. `timing` is
+        the named op for clock jitter about zero.
+
+        On an I/Q record the envelope is shifted AND the carrier turned by
+        -2*pi*fc_hz*by, as delaying the passband signal would: a constant delay is also a
+        phase, and a moving one a Doppler shift of -fc_hz * d(by)/dt. See `wfmsynth.joins`.
+
+        On the field of a `laser` the same holds with the laser's own moving carrier: the
+        field is turned by the integral of nu(t) over the delay, so a delayed copy beats
+        against the direct path at (sweep rate) x delay. See `wfmsynth.swept`."""
+        from . import joins as JN
+        OPKEYS.check("delay", params)
+        JN.check_delay(max_rate)
+        return self._add("delay", by=_by_given("delay", by), max_rate=max_rate)
+
+    def delay_errors(self):
+        """What every `delay` op in this chain promises, in order: a list of
+        `{"op": index, "taps", "error", "below_hz", "max_rate"}`. A tone below `below_hz` comes
+        out within `error` times its amplitude of the exact delayed tone; for one frequency
+        ask `wfmsynth.joins.delay_error(f_hz, fs)`."""
+        from . import joins as JN
+        if self.grid is None:
+            raise ValueError("delay_errors: the error is stated against the sample rate -- "
+                             "give the Signal a grid (Grid(fs=...)).")
+        return [{"op": i, **JN.describe_delay(self._rate_at(i),
+                                              o.get("max_rate", JN.DELAY_MAX_RATE))}
+                for i, o in enumerate(self.ops) if o["op"] == "delay"]
 
     def tx_ffe(self, taps, pre=1, **params):
         """Transmitter FFE pre-emphasis (place after carrier, before the channel). `taps`
@@ -1832,9 +3160,59 @@ class Signal:
 
     def eo(self, **params):
         """Electro-optic modulation: electrical drive -> COMPLEX optical field (start of an E/O/E link).
+        The record is in domain 'optical' from here to `photodetect` (`wfmsynth.domain`): the
+        field ops and the general stages that mean something on a field (`filter`, `gain`,
+        `gate`, `combine`, `use`) act on it, and an electrical op is refused by name.
         params: kind('mzm'|'dml'), vpi, bias, er_db, p_avg, alpha (chirp), adiabatic. Follow with
         `fiber`/`edfa`/`photodetect` — NOT the real-valued electrical ops."""
         return self._add("eo", **params)
+
+    def laser(self, **params):
+        """First op of a SWEPT-WAVELENGTH chain: a tunable laser, as an optical field held in
+        the frame of its own moving carrier (`wfmsynth.swept`).
+
+            Signal(grid=Grid(fs=1e6, n=1 << 17)).laser(start_nm=1549.0, stop_nm=1551.0)
+            Signal(grid=g).laser(start_nm=1550.0)                     # standing still
+            Signal(grid=g).laser(start_nm=1549.0, speed_nm_per_s=40.0, ripple_nm=2e-3,
+                                 ripple_hz=300.0, hops=[{"t_s": 0.02, "by_nm": 0.05}])
+
+        `start_nm` is the wavelength at the record's start. `stop_nm` is reached at its end,
+        or state `speed_nm_per_s`; with both the laser parks at `stop_nm`. `bow_nm` (a bow
+        that peaks at mid-sweep) and `ripple_nm` with `ripple_hz` (a periodic wobble) are the
+        sweep's nonlinearity; `hops` its mode hops, each a step in wavelength at a stated
+        time and a `mode_hop` event. `power` is |E|^2 (default 1). It draws nothing.
+
+        The samples are a constant: everything is in the carrier nu(t), which
+        `ws.swept.wavelength_map(sig)` returns as the ground-truth map from time to wavelength. On
+        this field `delay` turns the carrier by its integral over the delay, so a delayed
+        copy beats against the direct path (`ws.recipes.mzi`, `stray_reflection`), and
+        `resonator` is solved in the same frame. `photodetect` is the bridge out."""
+        if self.ops:
+            raise ValueError("laser is a source and starts a chain; this one already has "
+                             f"{self.ops[0]['op']!r}. A second laser is a second chain.")
+        if self.grid is not None:
+            SW.Carrier(_stated(self._drawn(params)), self.grid.fs, self.grid.n)
+        return self._add("laser", **params)
+
+    def resonator(self, by=None, **params):
+        """A resonator coupled to the bus -- a ring, a disc, an absorption line -- on the
+        field of a `laser`, solved in the laser's frame by coupled-mode theory
+        (`wfmsynth.swept`).
+
+            laser.resonator(wavelength_nm=1550.0, intrinsic_hz=1e9, coupling_hz=1e9)
+
+        `intrinsic_hz` and `coupling_hz` are its two loss rates as linewidths: the dip is
+        their sum wide (full width at half depth) and reaches
+        ((intrinsic - coupling)/(intrinsic + coupling))**2, zero when they are equal.
+        `fsr_hz` repeats it every free spectral range; `split_hz` splits each resonance in
+        two (backscatter). `by` moves the resonance while the sweep runs, in nm: a number, or
+        a sub-chain (a ring warming up). A slow sweep traces the Lorentzian; a fast one
+        leaves light in the ring, and the record shows the ring-down beating with the laser.
+        From a Q and an extinction: `ws.recipes.ring`."""
+        SW.check_resonator(_stated(self._drawn(params)))
+        if by is not None:
+            params["by"] = _by_given("resonator", by)
+        return self._add("resonator", **params)
 
     def fiber(self, **params):
         """Single-mode fibre on the optical field: physical chromatic dispersion (β2·L) + attenuation.
@@ -1975,11 +3353,12 @@ class Signal:
         return self._add("probe", **params)
 
     def modulate(self, **params):
-        """AM/ASK/OOK, FM/FSK, or PM -- one op, `kind` and the message's own carrier `kind`
-        picking which. `message` is a nested carrier spec, the same shape `open_drain`'s
-        `second` and `crosstalk`'s `aggressor` already take (e.g.
-        ``message=dict(kind="sine", f_hz=1e3)`` for analog, or a `cmos`/digital carrier for
-        ASK/OOK/FSK's two-level message).
+        """AM/ASK/OOK, FM/FSK, or PM -- one op, `kind` and what the message is picking which.
+        `message` is a bare carrier spec (``message=dict(kind="sine", f_hz=1e3)`` for analog,
+        or a `cmos`/digital carrier for ASK/OOK/FSK's two-level message) or a SUB-CHAIN, when
+        the message has a chain of its own -- band-limited noise, a filtered data stream:
+        ``message=Signal().carrier("noise", rms=0.3).scope(bw_hz=2e4)``. A sub-chain is used at
+        the level it renders (see `crosstalk` for the form).
 
         params: kind ('am' default, or 'ask'/'ook' -- the same physics, a two-level message;
         'fm'/'fsk'; 'pm'), message (required), depth/suppressed (AM), fc_hz/dev_hz (FM/FSK,
@@ -2099,9 +3478,9 @@ class Signal:
         stops reaching the input-high threshold inside a bit, which is how these buses actually
         fail and which a symmetric slow-edge model cannot produce.
 
-        `second=` adds a SECOND driver sharing this net -- a nested carrier spec, the same shape
-        `crosstalk`'s `aggressor` and `hybrid_echo`'s `own` already take (e.g.
-        ``second=dict(kind="nrz", n_ui=32, seed=9)``), with its own on-resistance `r_sink_b_ohm`
+        `second=` adds a SECOND driver sharing this net -- a bare carrier spec (e.g.
+        ``second=dict(kind="nrz", n_ui=32, seed=9)``) or a sub-chain (a `Signal`; see
+        `crosstalk` for the form), with its own on-resistance `r_sink_b_ohm`
         (defaults to `r_sink_ohm`). This resolves the wired-AND at the ANALOG level: when both
         devices sink together the target is the divider against their PARALLEL on-resistance, an
         analog mid-level dominated by whichever sink is stronger -- not the logic-level OR
@@ -2123,7 +3502,11 @@ class Signal:
         1.2x, which is what decides whether a deep record renders in a GUI at all. It is not the
         default because the two paths differ by about 1e-5 of peak-to-peak -- a behaviour change
         by this repo's own gate, not round-off -- so it is recorded in the recipe and replays on
-        the path it was rendered with. See `physics.apply_transfer`."""
+        the path it was rendered with. See `physics.apply_transfer`.
+
+        On an I/Q record the same law is read at fc_hz + f -- the channel's baseband
+        equivalent, so `loss_at_ghz` still means RF and the grid need not hold the carrier
+        (`wfmsynth.baseband`; `method` is then refused)."""
         return self._add("lossy", **params)
 
     def sparam(self, **params):
@@ -2136,7 +3519,10 @@ class Signal:
         Reproduces resonances/structure the analytic model can't.
 
         `method="auto"|"overlap"` trades a ~1e-5 behaviour change for a large cut in peak
-        memory -- see `Signal.lossy` and `physics.apply_transfer`."""
+        memory -- see `Signal.lossy` and `physics.apply_transfer`.
+
+        On an I/Q record the file is read at fc_hz + f: a transfer measured around the
+        carrier is applied to the envelope as it is (`wfmsynth.baseband`)."""
         return self._add("sparam", **params)
 
     def cascade(self, path, **params):
@@ -2191,8 +3577,9 @@ class Signal:
                     "source": {"kind": "nrz", "n_ui": 64, "seed": 5, "volts": [0.0, 1.8]}}])
 
         A source body is exactly one of `from="chain"` (the waveform arriving at this op, so
-        this driver IS the chain), `ops=` (its own op list, or a `Signal` to take it from), or a
-        carrier spec by `kind=` -- the idiom `crosstalk(aggressor=)` already uses. `volts` is
+        this driver IS the chain), `ops=` (its own op list, or a `Signal` to take it from),
+        `from=<recipe>` (another record, with its own seed) or a carrier spec by `kind=` -- the
+        sub-chain form every parameter that holds a signal takes (see `crosstalk`). `volts` is
         REQUIRED and says the level domain: `True` for a chain already in volts, or `[lo, hi]`
         to map the +/-1 carrier convention onto those two volts. Without it a normalised carrier
         would make a driver a thousand times too weak and the solve would be perfectly correct
@@ -2214,7 +3601,7 @@ class Signal:
         # whatever wrote the archive.
         from . import scenario as SC
         if "drivers" in params:
-            params["drivers"] = [_flatten_driver(d) for d in params["drivers"]]
+            params["drivers"] = [_flatten_driver(d, self) for d in params["drivers"]]
         if "holds" in params:
             params["holds"] = [SC.Hold.from_dict(h).to_dict() for h in params["holds"]]
         if "agents" in params:
@@ -2242,17 +3629,45 @@ class Signal:
         return self._add("resonant_reflect", **params)
 
     def crosstalk(self, **params):
-        """Crosstalk. params: coupling, kind('fext'|'next'), td_frac, aggressor=dict(carrier spec)."""
+        """Crosstalk from one aggressor. params: coupling, kind('fext'|'next'), td_frac,
+        aggressor.
+
+        `aggressor` is a bare carrier spec (``aggressor=dict(n_ui=512, seed=9)``, an `nrz` unless
+        it names a `kind`) -- or a SUB-CHAIN, when the aggressor is a signal with a chain of
+        its own, "the neighbouring lane after its own channel":
+
+            lane = (Signal(grid=g).carrier("nrz", n_ui=512, seed=9)
+                    .lossy(loss_db=6.0, loss_at_ghz=8.0))
+            sig = Signal(seed=1, grid=g).carrier("nrz", n_ui=512).crosstalk(aggressor=lane)
+
+        Every parameter that takes a signal takes the same three things (`wfmsynth.subchain`):
+
+          a Signal            its chain becomes PART OF THIS RECORD -- rendered on this grid and
+                              drawing from this record's seed, so one seed moves everything.
+                              Stored in the recipe as ``{"ops": [...]}``.
+          {"ops": [...]}      the same, written as data.
+          {"from": recipe}    ANOTHER RECORD as recorded, with its own seed (a `Signal.recipe()`,
+                              a `Signal`, or the path of a saved recipe, which is read and
+                              embedded so the record still replays with no extra files).
+
+        Nothing is resampled or cut to fit: a sub-chain that does not render this record's
+        length at this record's sample rate is refused by name. Its randomness is namespaced by
+        the parameter holding it -- ``crosstalk/1/aggressor/jitter/0`` -- which `roles()` lists
+        and `contrast()` re-rolls; `summary()` prints the tree and `subchain(namespace)` returns
+        the sub-chain's waveform exactly as it was used."""
         return self._add("crosstalk", **params)
 
     def crosstalk_matrix(self, **params):
         """Multiple aggressors from a coupling vector, ASYNCHRONOUS by default. params:
-        couplings=[...], kind, baud_offsets, seeds, synchronous.
+        couplings=[...], kind, baud_offsets, seeds, synchronous, aggressors.
 
-        It MANUFACTURES its aggressors -- one `nrz` per coupling, at a seed and a baud offset --
-        and has NO parameter that takes a waveform. Right when the neighbours are unknown
-        traffic; wrong when they are the other lanes of a known link, which is what `multipair`
-        is for."""
+        By default it MANUFACTURES its aggressors -- one `nrz` per coupling, at a seed and a
+        baud offset -- which is right when the neighbours are unknown traffic. When they are
+        known, give them: `aggressors=[...]` is one sub-chain per coupling (a `Signal`,
+        ``{"ops": [...]}`` or ``{"from": recipe}``; see `crosstalk`), each coupled exactly as a
+        manufactured one would be. Their timing is then their own, so `baud_offsets`, `seeds`
+        and `synchronous` are refused alongside it. The four lanes of one transmitter with a
+        cabling standard's coupling budget are `multipair`."""
         return self._add("crosstalk_matrix", **params)
 
     def hybrid_echo(self, **params):
@@ -2300,6 +3715,37 @@ class Signal:
         back into a continuum. `store` is the lattice the FILE is on, and it is what gives a
         real capture its noise floor -- see `instrument.store_record`."""
         return self._add("store", **params)
+
+    def trigger(self, **params):
+        """A triggered acquisition: find a condition on the record so far and keep the window a
+        scope would, `pre_s` before the trigger to `post_s` after it.
+
+            Signal(seed=1, grid=long_grid).carrier("nrz").lossy(loss_db=6).trigger(
+                pre_s=1e-9, post_s=4e-9)
+
+        The grid is the LONG render; this op shortens the record to the window. Each window is
+        a slice of the long render, unresampled, so the crossing sits at `pre_s` to within half
+        a sample and `realize()` reports exactly where.
+
+        params: pre_s, post_s (required, seconds);
+                condition "edge" (default) | "width" | "runt";
+                level (default: midway between the record's extremes), slope "rising" |
+                "falling" | "either", hysteresis;
+                width_s=[min, max] for "width"; runt_level for "runt";
+                holdoff_s; jitter_s (rms trigger jitter, role `trigger/<i>`);
+                n_segments (windows laid end to end: `x.reshape(n_segments, -1)`);
+                average (triggers averaged into each window);
+                on (a sub-chain: the waveform the condition is looked for ON when the trigger
+                input is another channel -- `on=clock` cuts this record where the clock
+                fires. In a `Channels` record, a shared stage holding
+                `trigger(on=Signal().use("clk"), ...)` gives every channel that uses it the
+                same windows).
+
+        Refused, with the render length that would do: no trigger found, or too few for
+        `n_segments * average`. After an `acquire` it triggers on the acquired record, as a
+        digital-trigger scope does. See `wfmsynth.trigger` for the arming rules and the ground
+        truth each trigger emits."""
+        return self._add("trigger", **params)       # checked there, by `TRIG.check_chain`
 
     def events(self, kind, on="symbols", **params):
         """Place a localized mechanism on the current waveform (a needle, not a
@@ -2422,24 +3868,77 @@ class Signal:
         plan = self.lead_plan()
         if plan is None:
             return self._run(streams), None
+        if streams is not None:
+            self = TOL.redrawn(self, streams)     # as `_run` does; the plan is the sibling's
+            plan = self.lead_plan()
         return self._run(streams, _extended=True, _plan=plan), plan
 
-    def _run(self, streams=None, collect_events=False, _extended=False, _plan=None):
+    def _run(self, streams=None, collect_events=False, _extended=False, _plan=None, _x=None,
+             _events=(), _carrier=None):
         from .events import EventList
-        st = streams if streams is not None else Streams(self.seed)
+        if streams is not None and _plan is None:
+            self = TOL.redrawn(self, streams)     # a re-rolled unit/* role is a sibling record
+        st = streams if streams is not None else self._streams(collect_events)
         plan = _plan if _plan is not None else self.lead_plan()
         ops = self.ops if plan is None else plan.ops
         grid = self.grid if plan is None else plan.grid
         win = None if plan is None else plan.window
-        x = None
-        sink = [] if collect_events else None
+        x = _x                                  # a shared chain applied by `use` starts from one
+        # `_events` are those already on the waveform `_x` arrives with, so that an op here
+        # which re-times events (a `trigger`) moves or drops them with its own
+        sink = list(_events) if collect_events else None
+        if collect_events:
+            st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
+        # where the chain starts: on its grid's domain, or -- a shared stage applied by `use`
+        # -- on whatever the waveform it is handed is; a `use` in it is whatever it names
+        was = None if _x is None else DOMAIN.held(_x, grid)
+        if _carrier is not None:                # ... a field, about the carrier it came with
+            was = (was[0], _carrier)
+        rec = getattr(st, "record", None)
+        doms = DOMAIN.trace(ops, grid, start=was,
+                            expand=None if rec is None else rec.rec.expand)
+        TRIG.check_chain(ops)
         for i, op in enumerate(ops):
-            if collect_events and op["op"] == "events":
+            if i:
+                was = doms[i - 1]
+            elif was is None:
+                was = (DOMAIN.of(grid), getattr(grid, "fc_hz", None))
+            name = op["op"]
+            # a channel stated at RF needs the centre the envelope has reached (`baseband`)
+            at_now = (name in DOMAIN.MIXERS or name in _RATE_NOW
+                      or (name in _CENTRE_NOW and was[0] == DOMAIN.IQ))
+            if at_now or name == "trigger":
+                # the rate the record is at NOW, which after an `acquire` or a decimating
+                # `downconvert` is not the synthesis grid's: what a mixer needs, and anything
+                # stated in Hz or seconds (a corner, a delay, a crossing's time)
+                now = (None if grid is None and name in _RATE_NOW
+                       else _grid_now(ops[:i], grid, x, *was))
+            if name == "trigger":
+                x = _op_trigger(x, op, st, now, i, sink=sink)
+            elif name == "law":
+                x = _op_law(x, op, st, now, i, sink=sink)
+            elif name in _CARRIER_NOW and was[0] == DOMAIN.OPTICAL:
+                x = _EXEC[name](x, op, st, now, i, carrier=was[1])
+            elif at_now:
+                x = _EXEC[name](x, op, st, now, i)
+            elif name == "use":                # a stage it names acts in the domain reached
+                x = CH.use(x, op["name"], st, dom=was[0], carrier=was[1])
+            elif collect_events and name == "events":
                 x = _op_events(x, op, st, grid, i, sink=sink)
-            elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
-                x = _EXEC[op["op"]](x, op, st, grid, i, win=win)   # range the vertical to the window
+            elif win is not None and name in _LEAD_WINDOW_RANGED:
+                x = _EXEC[name](x, op, st, grid, i, win=win)   # range the vertical to the window
             else:
-                x = _EXEC[op["op"]](x, op, st, grid, i)
+                x = _EXEC[name](x, op, st, grid, i)
+            if sink and name in _RESTORES:
+                # the labels follow the samples onto the stored record: its rate, its length
+                was_fs, now_fs = (_stored_rate(ops[:k], float(grid.fs), int(grid.n),
+                                               peak_ok=True)[0] for k in (i, i + 1))
+                EV.rescale(sink, now_fs / was_fs, x.shape[-1], now_fs)
+            if doms[i][0] in DOMAIN.COMPLEX and not np.iscomplexobj(x):
+                raise ValueError(f"{op['op']} (op {i}) returned a real array for a complex "
+                                 f"baseband record: it dropped the imaginary part. An op "
+                                 f"listed in wfmsynth.domain.ACCEPTS for 'iq' or 'optical' "
+                                 f"must return complex samples.")
         if x is None:
             raise ValueError("empty Signal: add a carrier first")
         if win is not None:
@@ -2448,6 +3947,9 @@ class Signal:
                                  f"{plan.n_ext}-sample render, so the window cannot be sliced out")
             if not _extended:
                 x = x[win].copy()
+                if sink:                                   # a comparator's transitions, on
+                    from .stages import window_events      # the delivered window's own clock
+                    sink = window_events(sink, win, grid.fs)
         if collect_events:
             return x, EventList(sink, n=len(x), grid=self.grid)
         return x
@@ -2479,33 +3981,16 @@ class Signal:
         rate is not modelled here must fail loudly, since the whole point is to stop a wrong
         timebase from travelling silently into a measurement."""
         n_have = len(x) if hasattr(x, "__len__") else int(x)
-        fs, n = float(self.grid.fs), int(self.grid.n)
-        for op in self.ops:
-            name = op["op"]
-            if name == "acquire":
-                prof = op.get("profile", {})
-                fs, n = float(prof["sample_rate_hz"]), int(prof["record_length"])
-                dec = prof.get("decimation") or {}
-                if dec.get("depth"):
-                    if dec.get("mode", "sample") == "peak_hold":
-                        raise ValueError(
-                            "stored_grid: acquire(decimation=peak_hold) returns a (2, depth) "
-                            "min/max record, not a waveform on a timebase, so there is no grid "
-                            "for it. Measure the two channels yourself.")
-                    depth = int(dec["depth"])
-                    fs, n = fs * depth / n, depth
-            elif name == "digitize" and op.get("n_out"):
-                n_out = int(op["n_out"])                  # a genuine resample_poly
-                fs, n = fs * n_out / n, n_out
-            elif name == "sample_clock" and op.get("n_out"):
-                n = int(op["n_out"])                      # a TRUNCATION, not a resample
+        fs, n = _stored_rate(self.ops, float(self.grid.fs), int(self.grid.n))
         if n != n_have:
             raise ValueError(
                 f"stored_grid: derived {n} samples from this chain's ops but the record has "
                 f"{n_have}. An op here changes the record length in a way stored_grid does not "
                 f"model, so it cannot state the rate either. Build the grid explicitly: "
                 f"Grid(fs=<stored rate>, baud={self.grid.baud!r}, n={n_have}).")
-        return Grid(fs=fs, baud=self.grid.baud, n=n_have)
+        # the domain and centre frequency the record ENDS in, which a mixer may have changed
+        dom, fc = DOMAIN.trace(self.ops, self.grid)[-1] if self.ops else (DOMAIN.REAL, None)
+        return Grid(fs=fs, baud=self.grid.baud, n=n_have, domain=dom, fc_hz=fc)
 
     def realize(self, streams=None):
         """One-pass ``(waveform, EventList)`` — use this when an external segmenter
@@ -2523,29 +4008,72 @@ class Signal:
     def roles(self):
         """The re-rollable random factors in this signal, as role names — the valid
         arguments to `contrast()`. Deterministic channel/reflection ops draw no
-        randomness and so contribute none."""
+        randomness and so contribute none. A toleranced parameter (`ws.tol`, `ws.corners`)
+        contributes `unit/<op index>/<parameter>`, or `unit/<group>` when it is grouped.
+
+        The list is EXACTLY what this record draws from: a role is listed only when the op's
+        parameters make it draw (`store` with a `dither_lsb`, `acquire` with a noise floor,
+        clock jitter or interleave, `tia` with a `thermal_rms`, a carrier with `rj` jitter),
+        so every name here moves samples when re-rolled and nothing is drawn under a name that
+        is not here. A `{"from": recipe}` sub-chain is a pinned record: its noise is listed and
+        can be re-rolled by name; its toleranced parts are not listed, because `unit()` and
+        `contrast("unit/*")` do not move a pinned record."""
         out = []
         for i, op in enumerate(self.ops):
-            if op["op"] == "carrier" and op.get("jitter"):
-                out.append(f"jitter/{i}")
-            elif op["op"] == "crosstalk":
-                out.append(f"jitter/xtalk{i}")
-            elif op["op"] == "digitize":
-                if "snr_db" in op or "noise_rms" in op:
-                    out.append(f"noise/{i}")
-                if op.get("interleave"):
-                    out.append(f"interleave/{i}")
-            elif op["op"] == "events":
-                out.append(f"events/{i}")
-            elif op["op"] == "probe" and op.get("noise_rms"):
-                out.append(f"probe/{i}")
-        return out
+            out.extend(_op_roles(op, i))
+        return out + SUB.roles(self) + TOL.roles(self.ops)
+
+    def summary(self):
+        """The chain as text, one op per line with its parameters -- and each SUB-CHAIN indented
+        under the parameter that holds it, headed by its namespace:
+
+            Signal  seed=1  fs=6.4e+10 Hz, baud=1.6e+10, n=4096
+              0  carrier    kind='nrz', n_ui=1024
+              1  crosstalk  coupling=0.1
+                   aggressor  [crosstalk/1/aggressor]
+                     0  carrier  kind='nrz', n_ui=1024, seed=9
+                     1  lossy    loss_db=6.0, loss_at_ghz=8.0
+
+        The namespace is the prefix of that sub-chain's role names in `roles()` and the argument
+        `subchain()` takes. A long value prints as its size and a long number to six figures;
+        the recipe has the values. A toleranced parameter (`ws.tol`) prints the value this unit
+        drew, followed by its role: `r_source=1043.7 (unit/1/r_source)`."""
+        return SUB.tree(self)
+
+    def subchains(self):
+        """``{namespace: Signal}`` for every sub-chain this signal holds, nested ones included."""
+        return SUB.children(self)
+
+    def subchain(self, path, streams=None):
+        """The waveform of the sub-chain at namespace `path` EXACTLY as it is rendered inside
+        this record -- the aggressor that was coupled, the message that modulated -- so the
+        second signal is ground truth too rather than something to re-derive. Pass the same
+        `streams` as `waveform()` to follow a re-roll. For a `net` driver (`net/<idx>/<id>`)
+        this is its chain's own output, before the driver's `volts` maps it."""
+        return SUB.render_at(self, path, streams)
 
     def contrast(self, *factors, seed=None):
         """A sibling waveform with ONLY the named factors re-rolled and every other
         factor bit-identical — a valid contrastive pair / clean ablation. `factors` are
-        role names from `roles()`; `seed` makes the re-roll reproducible."""
-        return self.waveform(streams=Streams(self.seed).reroll(*factors, seed=seed))
+        role names from `roles()`; `seed` makes the re-roll reproducible. `"unit/*"` is every
+        toleranced parameter at once: another unit under the same noise (`unit(seed)` returns
+        that unit as a Signal, with its values in the recipe).
+
+        A name that matches no randomness in this record is refused: re-rolling it would
+        return the record unchanged, which reads as "this factor does not matter". A name
+        that IS an op's role, on an op whose parameters draw nothing from it (`jitter/0` on a
+        carrier with no `rj`, `store/2` without dither), is accepted as it always was and
+        warns that the sibling is the record again; `roles()` does not list it."""
+        self._alone("contrast()", "Re-roll through the record: rec.contrast('<chain>/<role>').")
+        st = Streams(self.seed).reroll(*factors, seed=seed)
+        x = self.waveform(streams=st)
+        idle = st.idle(self.roles())
+        if idle:
+            raise ValueError(f"contrast: {idle} names no randomness this record draws, so the "
+                             f"sibling would be this record again. roles() lists what can be "
+                             f"re-rolled: {self.roles()}")
+        _warn_undrawn("contrast", st, self.roles())
+        return x
 
     def ground_truth(self, levels=None):
         """Ground-truth labels MEASURED from this signal's waveform (never read off the
@@ -2568,6 +4096,7 @@ class Signal:
         """A JSON-serializable dict: engine version, seed, grid, and the ordered ops
         with their exact knob values. This IS the ground truth for the waveform."""
         from wfmsynth import __version__
+        self._alone("recipe()", "The recipe that reproduces it is the record's: rec.recipe().")
         r = {"wfmsynth_version": __version__, "seed": int(self.seed),
              "ops": [dict(o) for o in self.ops]}
         # only when a lead-in is actually set, so an existing recipe's JSON -- and therefore its
@@ -2579,11 +4108,28 @@ class Signal:
         if self.grid is not None:
             g = self.grid
             r["grid"] = {"fs": g.fs, "baud": g.baud, "n": g.n, "v_full": g.v_full}
+            # only for a complex baseband record, so a real record's JSON -- and its sha256 --
+            # is byte-identical to what it was before the domain existed
+            if g.domain != DOMAIN.REAL:
+                r["grid"]["domain"] = g.domain
+                r["grid"]["fc_hz"] = g.fc_hz
         return r
 
-    def stage_kinds(self):
-        """The stage kind of each op, in order (source/shape/supply/channel/instrument)."""
-        return [op_kind(o["op"]) for o in self.ops]
+    def stage_kinds(self, domains=False):
+        """The stage kind of each op, in order (source/shape/supply/channel/instrument).
+
+        `domains=True` returns ``(kind, domain)`` pairs instead, the domain being what the
+        record is AFTER that op -- 'real', 'iq' or 'optical' -- so a chain's mixers show as
+        the points where it changes: ``[('source', 'iq'), ('shape', 'real'), ...,
+        ('instrument', 'iq')]``, and an optical link reads ``[('source', 'real'),
+        ('shape', 'optical'), ('channel', 'optical'), ('instrument', 'real')]`` from `eo` to
+        `photodetect`. The last pair's domain is what `waveform()` returns."""
+        kinds = [op_kind(o["op"]) for o in self.ops]
+        if self.ops and self.ops[0]["op"] in ("awgn", "spur"):
+            kinds[0] = "source"               # with no signal under it, it is one
+        if not domains:
+            return kinds
+        return [(k, d) for k, (d, _) in zip(kinds, DOMAIN.trace(self.ops, self.grid))]
 
     def canonical(self):
         """A new Signal with the ops homed into canonical stage-kind order (a stable sort). The
@@ -2610,15 +4156,25 @@ class Signal:
     def from_recipe(cls, r):
         """Reconstruct a Signal from a recipe; `.waveform()` reproduces bit-for-bit.
 
+        A recipe may be WRITTEN with tolerances in place of numbers (`wfmsynth.tolerance`);
+        they are drawn here under the recipe's seed. One whose values are already resolved --
+        anything `recipe()` returned -- draws nothing.
+
         WARNS if the recipe was written by a version whose numerics differ for an op it
         contains. `recipe()` has always recorded `wfmsynth_version`, and this never read it,
         which made the record write-only provenance -- see `NUMERIC_CHANGES`."""
+        if "channels" in r and "ops" not in r:
+            raise ValueError("Signal.from_recipe: this recipe has several channels, so it is "
+                             "not one Signal. ws.Channels.from_recipe(recipe).waveforms() "
+                             "renders all of them.")
         grid = Grid(**r["grid"]) if r.get("grid") else None
         s = cls(seed=r["seed"], grid=grid, lead_in=r.get("lead_in"), lead_out=r.get("lead_out"))
-        ops = [dict(o) for o in r["ops"]]
+        ops = TOL.resolve_ops([dict(o) for o in r["ops"]], r["seed"])
         for o in ops:                       # the same gate the builders go through: a recipe
             OPKEYS.check(o.get("op"), o)    # carrying a dead parameter says what it is not
         _warn_on_numeric_drift(r.get("wfmsynth_version"), ops)
+        if ops:                             # a hand-written recipe may leave the domain to
+            s.grid = DOMAIN.follow(s.grid, ops[0])        # its source, as a builder may
         s.ops = ops
         return s
 
@@ -2676,6 +4232,19 @@ NUMERIC_CHANGES = (
      "put one sample late depending on how the generator accumulated. Affected recipes shift "
      "the odd switching instant by one sample; `net` was never in a tagged release, so this "
      "can only reach a recipe rendered from main between 2026-10-19 and 0.43.0."),
+    ("0.46.0", "carrier/square",
+     "each edge is placed at its own time to a fraction of a sample, instead of on the next "
+     "sample after it. A square whose period or duty is not a whole number of samples had "
+     "every edge late by a different amount, one sample peak to peak, and one whose edges "
+     "are all on samples had the odd edge one sample late through rounding of the phase. "
+     "Affected recipes move by up to one sample at each such edge; a record whose edges were "
+     "all on samples and correctly placed is unchanged bit for bit."),
+    ("0.46.0", "carrier/cmos",
+     "each edge is placed at its own time to a fraction of a sample, instead of on the next "
+     "sample after it, exactly as for `square` in the same release. Affected recipes move by "
+     "up to one sample at each edge that is not on a sample, or that rounding had put one "
+     "sample late; a record whose edges were all on samples and correctly placed is unchanged "
+     "bit for bit."),
 )
 
 
@@ -2700,6 +4269,33 @@ def _version_tuple(v):
     return tuple(parts) if parts else None
 
 
+def _ops_present(ops):
+    """What a `NUMERIC_CHANGES` entry can name: every top-level op, and ``carrier/<kind>`` for
+    every carrier of that kind ANYWHERE in the recipe -- the source, a sub-chain, a bare
+    carrier spec (``gate=dict(kind="square", ...)``), a `net` driver's source. A change to
+    one kind of carrier must not warn every recipe that has a carrier at all."""
+    present = {o.get("op") for o in ops}
+
+    def walk(v):
+        if isinstance(v, dict):
+            kind = v.get("kind")
+            if isinstance(kind, str) and (v.get("op") == "carrier" or "op" not in v):
+                present.add(f"carrier/{kind}")
+            if v.get("op") == "pass_fet":
+                # its gate is a square whether or not the spec says so, or is there at all
+                gate = v.get("gate") or {}
+                if isinstance(gate, dict) and "ops" not in gate and "from" not in gate:
+                    present.add(f"carrier/{gate.get('kind', 'square')}")
+            for w in v.values():
+                walk(w)
+        elif isinstance(v, (list, tuple)):
+            for w in v:
+                walk(w)
+
+    walk(list(ops))
+    return present
+
+
 def _warn_on_numeric_drift(recipe_version, ops):
     """Warn when a recipe predates a change to the numerics of an op it contains.
 
@@ -2710,7 +4306,7 @@ def _warn_on_numeric_drift(recipe_version, ops):
     have = _version_tuple(recipe_version)
     if have is None:
         return
-    present = {o.get("op") for o in ops}
+    present = _ops_present(ops)
     for changed_in, op, what in NUMERIC_CHANGES:
         if op in present and have < _version_tuple(changed_in):
             warnings.warn(
@@ -2720,19 +4316,39 @@ def _warn_on_numeric_drift(recipe_version, ops):
                 RuntimeWarning, stacklevel=3)
 
 
-def op_params(recipe, op, which=None):
+def op_params(recipe, op, which=None, chain=None):
     """The parameters of one op in a recipe -- the labelling route for `dataset()`.
 
         y = np.array([op_params(r, "lossy")["loss_db"] for r in recipes])
+        op_params(rec.recipe(), "lossy", chain="data")      # a several-channel recipe
 
     This is a one-liner by hand (`[o for o in r["ops"] if o["op"] == "lossy"][0]`) and it is
     worth a function for one reason: that `[0]` silently takes the FIRST match. A chain with two
     `lossy` stages -- a package and a board, which is an ordinary thing to model -- would label
     every record from whichever happened to come first, and the labels would look fine. Here
-    that is an error naming the count, and `which=` resolves it deliberately.
+    that is an error naming the count, and `which=` resolves it deliberately. A `Channels`
+    recipe has several chains: `chain=` names the one, and may be left off when only one of
+    them holds the op.
 
     Raises `KeyError` when the op is absent, rather than returning None for a caller to index
     into: a missing label should stop a dataset build, not become a null in a training set."""
+    if "channels" in recipe and "ops" not in recipe:
+        named = {**recipe["channels"], **recipe.get("shared", {})}
+        holds = [n for n, c in named.items() if any(o.get("op") == op for o in c["ops"])]
+        if chain is None and len(holds) > 1:
+            raise ValueError(
+                f"this recipe has several chains and {holds} each hold a {op!r} op. Pass "
+                f"chain=<name> to say which.")
+        if chain is not None and chain not in named:
+            raise KeyError(f"no chain {chain!r} in this recipe; it has: {list(named)}")
+        if chain is None and not holds:
+            raise KeyError(f"no {op!r} op in any chain of this recipe; its chains are: "
+                           + ", ".join(f"{n} ({sorted({o.get('op') for o in c['ops']})})"
+                                       for n, c in named.items()))
+        recipe = named[chain if chain is not None else holds[0]]
+    elif chain is not None:
+        raise ValueError(f"chain={chain!r} names a chain of a several-channel recipe, and "
+                         f"this recipe is one Signal's.")
     ops = [o for o in recipe.get("ops", []) if o.get("op") == op]
     if not ops:
         present = sorted({o.get("op") for o in recipe.get("ops", [])})
@@ -2750,7 +4366,9 @@ def dataset(build, n, seed=0):
     """Ground-truth dataset builder. `build(rng)` returns a Signal (sample its knobs from
     `rng` however you like — the SAMPLED values are baked into the Signal's ops, hence
     recorded). Returns (X, recipes): X is (n, L) stacked waveforms, recipes is a list of n
-    per-sample recipes. Each waveform is exactly reproducible from its recipe.
+    per-sample recipes. Each waveform is exactly reproducible from its recipe. An I/Q record
+    is stacked as complex64; a builder that returns a `ws.Channels` gives ``{name: (n, L)}``,
+    one stack per channel, and one recipe per record.
 
     WHERE `y` COMES FROM: the recipe, not a list you keep alongside. There is deliberately no
     label argument, because the sampled knob values are already baked into the ops — so the
@@ -2793,10 +4411,14 @@ def dataset(build, n, seed=0):
     # it costs is released with it. See the comment above `_RESPONSE_CACHE`.
     with P.response_cache():
         for i, s in enumerate(sigs):
-            w = s.waveform()
+            several = isinstance(s, CH.Channels)
+            got = s.waveforms() if several else {None: s.waveform()}
             if X is None:
-                L = len(w)
-                X = np.empty((n, L), np.float32)
-            X[i] = w[:L] if len(w) >= L else np.pad(w, (0, L - len(w)))
-            del w
+                X = {k: np.empty((n, len(w)), np.complex64 if np.iscomplexobj(w) else np.float32)
+                     for k, w in got.items()}
+            for k, w in got.items():
+                L = X[k].shape[1]
+                X[k][i] = w[:L] if len(w) >= L else np.pad(w, (0, L - len(w)))
+            del got
+    X = X if several else X[None]
     return X, [s.recipe() for s in sigs]

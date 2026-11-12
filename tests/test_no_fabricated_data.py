@@ -66,6 +66,8 @@ STAGES = {
                           {"line": {"length_in": 3.0}}]),
     "sparam": dict(freqs=_SP_FREQS, s21=_SP_S21),
     "intra_pair_skew": dict(skew_ps=3.0, gain_imbalance=0.02),
+    "filter": dict(kind="cheby1", f_hz=20e9, order=3, ripple_db=1.0),
+    "delay": dict(by=23.4e-12),                          # a constant, fractional delay
     # U-09/U-12/U-13. `sample_clock` is LINEAR (the sample positions are a function of k, not of
     # x) but not time-invariant, so it belongs in LTI below and not in CORNER_CASES. `agc` is
     # deliberately NOT in LTI: its gain is a functional of the input's own level, so

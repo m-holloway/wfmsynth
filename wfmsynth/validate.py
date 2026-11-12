@@ -1742,12 +1742,16 @@ for _qk in (2.1227e-4, 4.8904e-4):
           abs(_meas - _pred) < 0.2, f"predicted {_pred:.2f}, measured {_meas:.2f} dB/Hz")
 
 # THE MECHANISM. Same recipe, rendered twice: without the export step and with it.
+# (`n_ui=32` is stated here and in the lead-in and filter checks below because that is what
+# these chains always rendered: the default 32 symbols, on a grid that says 16 GBd. Nothing
+# they assert -- a lattice, a lead-in, a filter's response -- depends on the symbol rate, and
+# stating it keeps their numbers and says so instead of tripping `carrier`'s warning.)
 _gst = Grid(fs=_fs_store, baud=16e9, n=1 << 16, v_full=0.846)
-_base = (Signal(seed=17, grid=_gst).carrier(kind="nrz", pattern="prbs13")
+_base = (Signal(seed=17, grid=_gst).carrier(kind="nrz", n_ui=32, pattern="prbs13")
          .lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
          .scope(bw_hz=110e9).digitize(noise_rms=0.0032, enob=10.0).scope(bw_hz=32e9))
 _smeared = _base.waveform()
-_stored = (Signal(seed=17, grid=_gst).carrier(kind="nrz", pattern="prbs13")
+_stored = (Signal(seed=17, grid=_gst).carrier(kind="nrz", n_ui=32, pattern="prbs13")
            .lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
            .scope(bw_hz=110e9).digitize(noise_rms=0.0032, enob=10.0).scope(bw_hz=32e9)
            .store(bits=11, full_scale=1.0)).waveform()
@@ -2010,7 +2014,7 @@ _lchain = dict(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
 
 def _lfull(**kw):
     return (Signal(**_lchain, **kw)
-            .carrier(kind="nrz", pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
+            .carrier(kind="nrz", n_ui=32, pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
             .scope(bw_hz=110e9).digitize(noise_rms=_sig_c, bits=10, full_scale=_A))
 
 
@@ -2425,6 +2429,3109 @@ for _dth, _want, _lbl in ((0.0, 0.0, "a BARE store lands on q^2/12 -- where the 
     check(f"  ... and it is still a lattice ({_dth:.4f} LSB of dither does not smear it)",
           _on_lattice(_r, _qs) > 0.9999 and 1851 <= len(_u) <= 2035,
           f"{len(_u)} distinct, on-lattice {_on_lattice(_r, _qs):.4f}")
+
+# ---- a sub-chain is a value: one nested-signal form for every op that takes one (GitHub #75) ----
+# `crosstalk(aggressor=)`, `modulate(message=)`, `open_drain(second=)`, `crosstalk_matrix(
+# aggressors=)` and a `net` driver's `source` all take {"ops": [...]}, {"from": <recipe>} or a
+# Signal, through ONE resolver (`wfmsynth.subchain`). The claims are that the second signal is
+# exactly the chain it says it is, that its randomness is its own and separately re-rollable, and
+# that nothing is fitted to the record behind the caller's back. Each is checked against something
+# that does not go through the resolver.
+from wfmsynth import subchain as _SUB
+from wfmsynth.compose import _carrier as _scar
+_sg = Grid(fs=64e9, baud=4e9, n=1 << 13)
+_sj = dict(rj=0.4)
+_sat = "crosstalk/1/aggressor"
+
+
+def _svic():
+    return Signal(seed=1, grid=_sg).carrier("nrz", n_ui=512, jitter=_sj)
+
+
+def _slane(loss_db, noise_rms=0.02):
+    s = Signal(grid=_sg).carrier("nrz", n_ui=512, seed=9, jitter=_sj)
+    if loss_db:
+        s = s.lossy(loss_db=loss_db, loss_at_ghz=2.0)
+    return s.digitize(noise_rms=noise_rms) if noise_rms else s
+
+
+def _salone(ops, at=_sat, seed=1):
+    """A sub-chain's ops rendered WITHOUT the resolver, under the role names it should have."""
+    s = Signal(grid=_sg)
+    s.ops = [dict(o) for o in ops]
+    return s._run(_SUB.Namespaced(_St(seed), at + "/"))
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _ssig = _svic().crosstalk(aggressor=_slane(12.0), coupling=0.1).digitize(noise_rms=0.01)
+    _sx, _sv = _ssig.waveform(), _svic().waveform()
+    _sa = _salone(_slane(12.0).ops)
+    _sown = _sx - P.crosstalk(_sv, _sa, coupling=0.1)          # the record's own digitizer noise
+    _sbare = _svic().crosstalk(aggressor=_slane(12.0), coupling=0.1).waveform()
+    check("an aggressor given as a sub-chain IS that chain rendered separately and coupled by hand",
+          np.array_equal(_sbare, P.crosstalk(_sv, _sa, coupling=0.1))
+          and np.array_equal(_ssig.subchain(_sat), _sa),
+          f"max |op - by hand| = {float(np.abs(_sbare - P.crosstalk(_sv, _sa, coupling=0.1)).max()):.1e} "
+          f"on a coupled term of {float(np.abs(_sbare - _sv).max()):.3f} peak; `subchain()` returns "
+          f"the same {len(_sa)} samples")
+
+    # THE EFFECT, not the call: the aggressor's own channel must be visible in what the victim
+    # receives. FEXT couples the aggressor's derivative, so an aggressor that has been through
+    # 12 dB of loss -- slower edges -- couples a lower-frequency term than the same lane raw.
+    _sc = [spectral_centroid(_svic().crosstalk(aggressor=_slane(_l, 0), coupling=0.1).waveform()
+                             - _sv) for _l in (0.0, 12.0)]
+    check("the aggressor's OWN channel reaches the victim: a lane after 12 dB of loss couples a "
+          "lower-frequency term than the same lane raw",
+          _sc[1] < 0.8 * _sc[0],
+          f"spectral centroid of the coupled term {_sc[0]:.4f} -> {_sc[1]:.4f} of fs "
+          f"({_sc[1] / _sc[0]:.2f}x)")
+
+    # ONE factor inside the sub-chain re-rolls and nothing else moves.
+    _srole = f"{_sat}/noise/2"
+    _sa1 = _ssig.subchain(_sat, streams=_St(1).reroll(_srole, seed=11))
+    _sclean = _salone(_slane(12.0).ops[:2])
+    _sd = float(np.std(_sa1 - _sa)) / (np.sqrt(2.0) * 0.02)
+    _sres = float(np.abs(_ssig.contrast(_srole, seed=11)
+                         - (P.crosstalk(_sv, _sa1, coupling=0.1) + _sown)).max())
+    check("contrast() reaches inside: re-rolling the aggressor's noise changes the aggressor's "
+          "noise and nothing else",
+          _srole in _ssig.roles() and abs(_sd - 1.0) < 0.05 and _sres < 1e-12
+          and abs(float(np.std(_sa1 - _sclean)) / 0.02 - 1.0) < 0.05,
+          f"roles {_ssig.roles()}; the aggressor moved by {_sd:.3f}x the sqrt(2)*20 mV two "
+          f"independent draws differ by (8192 samples estimate an rms to 0.8 %), and the record equals "
+          f"victim + coupling of the NEW aggressor + its own unchanged noise to {_sres:.1e}")
+
+    _sother = (Signal(seed=4, grid=Grid(fs=_sg.fs, baud=2.5e9, n=_sg.n))
+               .carrier("pam4", n_ui=320, jitter=_sj).lossy(loss_db=3.0, loss_at_ghz=2.0))
+    _sfrom = _svic().crosstalk(aggressor={"from": _sother}, coupling=0.2)
+    _srt = Signal.from_recipe(_json.loads(_sfrom.to_json()))
+    _sknob = _slane(12.0)
+    _sknob.ops[1]["loss_db"] = 12.5
+    check("a recipe under `from` is that record bit for bit -- its own seed, its own symbol rate "
+          "-- and the nested recipe replays from JSON alone, under a digest that covers it",
+          np.array_equal(_sfrom.subchain(_sat), _sother.waveform())
+          and np.array_equal(_srt.waveform(), _sfrom.waveform())
+          and np.array_equal(Signal.from_recipe(_json.loads(_ssig.to_json())).waveform(), _sx)
+          and _svic().crosstalk(aggressor=_sknob).sha256()
+          != _svic().crosstalk(aggressor=_slane(12.0)).sha256(),
+          f"a 2.5 GBd PAM4 lane inside a 4 GBd record on one {_sg.fs / 1e9:.0f} GSa/s grid; "
+          f"0.5 dB of loss inside the sub-chain changes the record's sha256")
+
+    _srefused = []
+    for _sbad in ({"from": Signal(grid=Grid(fs=32e9, baud=4e9, n=_sg.n)).carrier("nrz", n_ui=1024)
+                   .recipe()},
+                  {"ops": [{"op": "carrier", "kind": "nrz", "n_ui": 512},
+                           {"op": "digitize", "n_out": _sg.n // 2}]},
+                  {"ops": [{"op": "carrier", "kind": "nrz", "n_ui": 512},
+                           {"op": "acquire", "profile": {"sample_rate_hz": 32e9,
+                                                         "record_length": _sg.n}}]},
+                  {"ops": [{"op": "carrier", "kind": "nrz", "n_ui": 512}, {"op": "eo"}]}):
+        _sb = Signal(seed=1, grid=_sg)
+        _sb.ops = [{"op": "carrier", "kind": "nrz", "n_ui": 512},
+                   {"op": "crosstalk", "aggressor": _sbad}]
+        try:
+            _sb.waveform()
+            _srefused.append("RENDERED")
+        except ValueError as _se:
+            _srefused.append(next((w for w in ("SAME grid", "different timebase", "COMPLEX",
+                                               "never resampled")
+                                   if w in str(_se)), "UNNAMED"))
+    check("a sub-chain at another rate, another length, another timebase or complex is REFUSED "
+          "by name -- never resampled, cut or stripped to fit",
+          _srefused == ["never resampled", "SAME grid", "different timebase", "COMPLEX"],
+          f"{_srefused}")
+
+    _sspec = dict(n_ui=512, seed=9, jitter=_sj)
+    _sleg = _svic().crosstalk(aggressor=_sspec, coupling=0.2)
+    _swant = P.crosstalk(_sv, _scar({"kind": "nrz", **_sspec}, _St(1), _sg, "xtalk1"),
+                         coupling=0.2)
+    check("the carrier-spec shorthand is untouched: same recipe, same role stream, same samples",
+          np.array_equal(_sleg.waveform(), _swant)
+          and _sleg.ops[1] == {"op": "crosstalk", "aggressor": _sspec, "coupling": 0.2}
+          and _sleg.roles() == ["jitter/0", "jitter/xtalk1"],
+          f"max |op - primitive on role 'jitter/xtalk1'| = "
+          f"{float(np.abs(_sleg.waveform() - _swant).max()):.1e}")
+
+# ---------------------------------------------------------------------------------------------
+# #80: TWO GENERAL STAGES. `law` is a named transfer law and `filter` a stated linear filter, for
+# a shape that has no op of its own. Each law is checked against its analytic curve by a property
+# of a SINE through it (a harmonic, a mean, a duty, a noise floor) rather than by re-evaluating
+# the formula it was written with, and each filter by its magnitude MEASURED on an impulse sent
+# down a chain, against the design's closed form at the bilinear transform's own frequency map.
+from scipy import special as _zsp
+from scipy.optimize import brentq as _zbrentq
+from wfmsynth import stages as _ZS
+
+_zfs, _zn = 1e9, 1 << 14
+_zg = Grid(fs=_zfs, n=_zn)
+_zcyc = 37                                        # whole cycles in the record: bin 37, no leakage
+_zf0 = _zcyc * _zfs / _zn
+
+
+def _zsine(amp, **law):
+    s = Signal(seed=1, grid=_zg).carrier("sine", cycles=_zcyc, amp=amp)
+    return (s.law(**law) if law else s).waveform()
+
+
+def _zharm(y, k):
+    return float(2.0 * np.abs(np.fft.rfft(y)[k * _zcyc]) / _zn)
+
+
+_zA = 0.05
+_zy = _zsine(_zA, kind="tanh", gain=3.0, sat=0.8)
+_zwant = (3.0 * _zA) ** 3 / (12.0 * 0.8 ** 2)
+check("law tanh: the small-signal gain is `gain` and the first distortion product is the cubic "
+      "term's, (gain A)^3 / (12 sat^2)",
+      abs(_zharm(_zy, 1) / (3.0 * _zA) - 1.0) < 0.01 and abs(_zharm(_zy, 3) / _zwant - 1.0) < 0.02
+      and abs(_zsine(50.0, kind="tanh", gain=3.0, sat=0.8)).max() <= 0.8,
+      f"fundamental {_zharm(_zy, 1) / _zA:.4f}x against gain 3 (compressed "
+      f"{(1 - _zharm(_zy, 1) / (3 * _zA)) * 100:.2f} %), HD3 {_zharm(_zy, 3) * 1e6:.2f} uV "
+      f"against {_zwant * 1e6:.2f} uV, and a 50x overdrive stays inside +/-0.8")
+
+_zy = _zsine(0.5, kind="poly", coeffs=[0.0, 1.0, 0.2, -0.4])
+check("law poly: 0.2 x^2 - 0.4 x^3 on a sine makes exactly the second and third harmonics the "
+      "identities give, c2 A^2 / 2 and c3 A^3 / 4",
+      abs(_zharm(_zy, 2) - 0.2 * 0.25 / 2) < 1e-12 and abs(_zharm(_zy, 3) - 0.4 * 0.125 / 4) < 1e-12
+      and _zharm(_zy, 4) < 1e-12,
+      f"HD2 {_zharm(_zy, 2):.6f} (0.025000), HD3 {_zharm(_zy, 3):.6f} (0.012500), "
+      f"HD4 {_zharm(_zy, 4):.1e}")
+
+_zy = _zsine(1.0, kind="limiter", lo=-0.3, hi=0.6)
+_zwant = (0.5 - np.arcsin(0.6) / np.pi, 0.5 - np.arcsin(0.3) / np.pi)
+_zgot = (float(np.mean(_zy == 0.6)), float(np.mean(_zy == -0.3)))
+check("law limiter: a sine spends the arcsine's share of its time on each rail, and is untouched "
+      "between them",
+      abs(_zgot[0] - _zwant[0]) < 2e-3 and abs(_zgot[1] - _zwant[1]) < 2e-3
+      and np.array_equal(_zy[(_zy > -0.3) & (_zy < 0.6)],
+                         _zsine(1.0)[(_zy > -0.3) & (_zy < 0.6)]),
+      f"{_zgot[0] * 100:.2f} % at +0.6 (analytic {_zwant[0] * 100:.2f} %), "
+      f"{_zgot[1] * 100:.2f} % at -0.3 ({_zwant[1] * 100:.2f} %)")
+
+_zy = _zsine(1.0, kind="deadzone", width=0.5)
+_zwant = 2.0 * np.arcsin(0.25) / np.pi
+check("law deadzone: the output is zero for the arcsine's share of a cycle and the peak is "
+      "moved in by half the width",
+      abs(float(np.mean(_zy == 0.0)) - _zwant) < 2e-3 and abs(_zy.max() - 0.75) < 1e-6
+      and abs(_zy.min() + 0.75) < 1e-6,
+      f"{np.mean(_zy == 0.0) * 100:.2f} % of the record at zero (analytic {_zwant * 100:.2f} %), "
+      f"peaks {_zy.min():+.4f} / {_zy.max():+.4f}")
+
+_zh, _zf = _zsine(1.0, kind="rectify", mode="half"), _zsine(1.0, kind="rectify", mode="full")
+check("law rectify: the mean of a rectified sine is A/pi (half) and 2A/pi (full), and a "
+      "full-wave rectifier doubles the frequency",
+      abs(_zh.mean() - 1 / np.pi) < 1e-6 and abs(_zf.mean() - 2 / np.pi) < 1e-6
+      and _zharm(_zf, 1) < 1e-9 and abs(_zharm(_zf, 2) - 4 / (3 * np.pi)) < 1e-6,
+      f"means {_zh.mean():.6f} (0.318310) and {_zf.mean():.6f} (0.636620); full-wave fundamental "
+      f"{_zharm(_zf, 1):.1e}, second harmonic {_zharm(_zf, 2):.6f} (4/3pi = 0.424413)")
+
+_zb = 10
+_zstep = 2.0 / 2 ** _zb
+_zx = _zsine(1.0 - _zstep)
+_zy = _zsine(1.0 - _zstep, kind="quantize", bits=_zb, lo=-1.0, hi=1.0)
+_zsqnr = 10 * np.log10(np.mean(_zx ** 2) / np.mean((_zy - _zx) ** 2))
+_zover = _zsine(3.0, kind="quantize", bits=_zb, lo=-1.0, hi=1.0)
+check("law quantize: a full-scale sine comes out 6.02 N + 1.76 dB above its own quantisation "
+      "error, on 2^N codes, and an overdrive SATURATES at the end codes",
+      abs(_zsqnr - (6.02 * _zb + 1.76)) < 0.3
+      and len(np.unique(_zover)) == 2 ** _zb
+      and _zover.min() == -1.0 and _zover.max() == 1.0 - _zstep,
+      f"SQNR {_zsqnr:.2f} dB at {_zb} bits (ideal {6.02 * _zb + 1.76:.2f}); a 3x overdrive "
+      f"uses {len(np.unique(_zover))} codes from {_zover.min():+.4f} to {_zover.max():+.6f}")
+
+_zy = _zsine(2.0, kind="diode", r_load_ohm=1e3)
+_zx = _zsine(2.0)
+_zfw = _zy > 1e-6
+_zres = float(np.abs(_zy[_zfw] + 0.025852 * np.log(_zy[_zfw] / (1e3 * 1e-12) + 1.0)
+                     - _zx[_zfw]).max())
+_zbig = _ZS.apply_law(np.array([5.0, 50.0, 500.0]), "diode", r_load_ohm=1e3)
+_zbres = float(np.abs(_zbig + 0.025852 * np.log(_zbig / 1e-9 + 1.0)
+                      - np.array([5.0, 50.0, 500.0])).max())
+check("law diode: the output satisfies the circuit it claims to be -- v_in = v_diode + v_load "
+      "with the Shockley current in the load -- and blocks in reverse",
+      _zres < 1e-12 and _zbres < 1e-10 and abs(_zy.min() + 1e3 * 1e-12) < 1e-15,
+      f"Kirchhoff residual {_zres:.1e} V over the forward half of a 2 V sine and {_zbres:.1e} V "
+      f"at 5 / 50 / 500 V; peak {_zy.max():.4f} V (a {2.0 - _zy.max():.3f} V drop at "
+      f"{_zy.max():.2f} mA), reverse {_zy.min():.1e} V = -R * I_sat")
+
+# THE COMPARATOR. It is the bridge from an analog signal to a digital one, so what it must get
+# right is the COUNT and the TIME of its transitions, against a signal whose crossings are known.
+_zthr, _zhys, _zrms = 0.2, 0.3, 0.02
+_zclean = Signal(seed=5, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0)
+_znoisy = (Signal(seed=5, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0)
+           .rx_noise(rms=_zrms))
+_zpeak = float(np.abs(_znoisy.waveform() - _zclean.waveform()).max())
+_zwith = _znoisy.law("comparator", threshold=_zthr, hysteresis=_zhys).event_list()
+_znone = (Signal(seed=5, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0).rx_noise(rms=_zrms)
+          .law("comparator", threshold=_zthr).event_list())
+check("law comparator: with hysteresis wider than the noise there is EXACTLY one transition per "
+      "crossing, and without it the same record chatters",
+      _zhys > 2 * _zpeak and len(_zwith) == 2 * _zcyc and len(_znone) > 2 * _zcyc
+      and all(a.direction != b.direction for a, b in zip(_zwith.events, _zwith.events[1:])),
+      f"{len(_zwith)} transitions for {2 * _zcyc} crossings at {_zhys:.2f} of hysteresis against "
+      f"{2 * _zpeak:.3f} peak-to-peak of noise; {len(_znone)} with none")
+_zev = _zclean.law("comparator", threshold=_zthr, hysteresis=_zhys).event_list().events
+_zw = 2 * np.pi * _zf0
+_zwant = np.array([((np.arcsin((_zthr + 0.5 * _zhys * e.direction)) if e.direction > 0
+                     else np.pi - np.arcsin(_zthr - 0.5 * _zhys)) + 2 * np.pi * (i // 2)) / _zw
+                   for i, e in enumerate(_zev)])
+_zterr = float(np.abs(np.array([e.t_s for e in _zev]) - _zwant).max())
+_zbound = (_zw / _zfs) ** 2 / 8.0 / (_zw * np.sqrt(1 - 0.35 ** 2))     # chord error / slope
+check("  ... and each transition's time is the INPUT's crossing of the trip level, to the error "
+      "of a straight line between two samples and not to a sample",
+      len(_zev) == 2 * _zcyc and _zterr < _zbound,
+      f"worst |t_event - arcsin| = {_zterr * 1e12:.3f} ps against a chord bound of "
+      f"{_zbound * 1e12:.3f} ps, on a {1e12 / _zfs:.0f} ps grid")
+
+# THE FILTERS. One impulse down a chain, and the ratio of the two spectra.
+_zimp = np.zeros(_zn)
+_zimp[_zn // 8] = 1.0
+_zfreq = np.fft.rfftfreq(_zn, 1 / _zfs)
+
+
+def _zmeas(**flt):
+    y = Signal(seed=1, grid=_zg).capture(values=_zimp, fs_hz=_zfs).filter(**flt).waveform()
+    return np.abs(np.fft.rfft(y) / np.fft.rfft(_zimp))
+
+
+_zfc = 60e6
+_zr = np.tan(np.pi * _zfreq[:-1] / _zfs) / np.tan(np.pi * _zfc / _zfs)   # the bilinear map
+_zjr = 1j * _zr
+_zth4 = lambda s: s ** 4 + 10 * s ** 3 + 45 * s ** 2 + 105 * s + 105     # noqa: E731
+_zk = _zbrentq(lambda k: abs(105 / _zth4(1j * k)) - np.sqrt(0.5), 1.0, 3.0)
+_zeps2 = 10 ** (1.0 / 10) - 1
+_zez, _zep, _zek = sp.ellipap(5, 0.5, 60.0)
+_zclosed = {
+    "butter": (dict(order=5), 1 / np.sqrt(1 + _zr ** 10)),
+    "bessel": (dict(order=4), np.abs(105 / _zth4(_zjr * _zk))),
+    "cheby1": (dict(order=5, ripple_db=1.0),
+               1 / np.sqrt(1 + _zeps2 * _zsp.eval_chebyt(5, _zr) ** 2)),
+    "elliptic": (dict(order=5, ripple_db=0.5, stop_db=60.0),
+                 np.abs(sp.freqs_zpk(_zez, _zep, _zek, _zr)[1])),
+}
+for _zkind, (_zkw, _zwant) in _zclosed.items():
+    _zgot = _zmeas(kind=_zkind, f_hz=_zfc, **_zkw)[:-1]
+    _zerr = float(np.abs(_zgot - _zwant).max())
+    check(f"filter {_zkind}: the magnitude measured on an impulse through the chain is the "
+          f"design's closed form, at every frequency on the grid",
+          _zerr < 1e-9,
+          f"max ||H| - closed form| = {_zerr:.1e} over {len(_zwant)} bins; "
+          f"{20 * np.log10(_zgot[np.argmin(abs(_zfreq[:-1] - _zfc))]):.3f} dB at the "
+          f"{_zfc / 1e6:.0f} MHz corner")
+_zdb = 20 * np.log10(_zmeas(kind="elliptic", f_hz=_zfc, order=5, ripple_db=0.5, stop_db=60.0))
+_zstop = int(np.argmax(_zdb <= -60.0))            # where the stopband begins
+check("  ... and the elliptic design is equiripple where it says: the passband dips to exactly "
+      "-ripple_db and the stopband comes back up to exactly -stop_db",
+      abs(_zdb[_zfreq <= _zfc].min() + 0.5) < 1e-3 and abs(_zdb[_zstop:].max() + 60.0) < 1e-3,
+      f"passband minimum {_zdb[_zfreq <= _zfc].min():.4f} dB; stopband from "
+      f"{_zfreq[_zstop] / 1e6:.1f} MHz, maximum {_zdb[_zstop:].max():.4f} dB")
+for _zbt, _zfh, _zwant in (
+        ("high", _zfc, np.sqrt(_zr ** 6 / (1 + _zr ** 6))),
+        ("bandpass", [40e6, 90e6], None), ("bandstop", [40e6, 90e6], None)):
+    _zgot = _zmeas(kind="butter", f_hz=_zfh, order=3, btype=_zbt)
+    if _zwant is None:
+        _zedge = [float(_zgot[np.argmin(abs(_zfreq - f))]) for f in (40e6, 90e6)]
+        _zmid = float(_zgot[np.argmin(abs(_zfreq - 60e6))])
+        check(f"filter butter, btype={_zbt}: both stated edges are the -3 dB points and the band "
+              f"between them is {'passed' if _zbt == 'bandpass' else 'removed'}",
+              all(abs(20 * np.log10(e) + 3.0103) < 0.05 for e in _zedge)
+              and (_zmid > 0.999 if _zbt == "bandpass" else _zmid < 1e-3),
+              f"{20 * np.log10(_zedge[0]):.3f} / {20 * np.log10(_zedge[1]):.3f} dB at 40 / 90 "
+              f"MHz, {20 * np.log10(_zmid):.2f} dB at 60 MHz")
+    else:
+        _zerr = float(np.abs(_zgot[:-1] - _zwant).max())
+        check(f"filter butter, btype={_zbt}: the mirrored closed form", _zerr < 1e-9,
+              f"max error {_zerr:.1e}")
+
+_zbaud, _zbeta = 100e6, 0.35
+_zgot = _zmeas(kind="rrc", beta=_zbeta, baud=_zbaud, span_ui=64)
+_zu = np.abs(_zfreq) / _zbaud
+_zwant = np.sqrt(np.where(_zu <= (1 - _zbeta) / 2, 1.0, np.where(
+    _zu >= (1 + _zbeta) / 2, 0.0,
+    0.5 * (1 + np.cos(np.pi / _zbeta * (_zu - (1 - _zbeta) / 2))))))
+_zerr = float(np.abs(_zgot - _zwant).max())
+_zh = _ZS.design_filter(_zfs, "rrc", beta=_zbeta, baud=_zbaud, span_ui=64)["taps"]
+_zrc = np.convolve(_zh, _zh)
+_zisi = np.abs(_zrc[len(_zrc) // 2 % 10::10] / _zrc.max())
+_zisi = float(np.sort(_zisi)[-2])                 # the largest sample at a symbol instant but one
+check("filter rrc: the magnitude is the square root of a raised cosine, and two of them in "
+      "cascade put zeros on every other symbol's instant",
+      _zerr < 0.01 and _zisi < 1e-3 and abs(_zh.sum() - 1.0) < 1e-12,
+      f"max ||H| - sqrt(RC)| = {_zerr:.1e} at 64 symbols of span and "
+      f"{float(np.abs(_zmeas(kind='rrc', beta=_zbeta, baud=_zbaud) - _zwant).max()):.1e} at the "
+      f"default 8 (the truncation, which is what span buys); worst inter-symbol sample "
+      f"{_zisi:.1e} of the peak, DC gain {_zh.sum():.6f}")
+
+_zw0, _zq = 2 * np.pi * 40e6, 4.0
+_zpole = complex(-_zw0 / (2 * _zq), _zw0 * np.sqrt(1 - 1 / (4 * _zq ** 2)))
+_zgot = _zmeas(kind="zpk", poles=[_zpole, _zpole.conjugate()], zeros=[-2 * np.pi * 150e6],
+               gain=_zw0 ** 2 / (2 * np.pi * 150e6))[:-1]
+_zs = 2j * _zfs * np.tan(np.pi * _zfreq[:-1] / _zfs)
+_zwant = np.abs(_zw0 ** 2 / (2 * np.pi * 150e6) * (_zs + 2 * np.pi * 150e6)
+                / ((_zs - _zpole) * (_zs - _zpole.conjugate())))
+_zerr = float(np.abs(_zgot - _zwant).max())
+check("filter zpk: an analog resonance and a zero, stated in rad/s, come out as that transfer "
+      "function at the bilinear transform's frequency map",
+      _zerr < 1e-9 and abs(_zgot.max() / _zq - 1.0) < 0.05,
+      f"max ||H| - |H(j 2 fs tan(pi f / fs))|| = {_zerr:.1e}; the Q = {_zq:g} peak measures "
+      f"{_zgot.max():.3f}x at {_zfreq[np.argmax(_zgot)] / 1e6:.2f} MHz")
+
+_zint = (Signal(seed=1, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0, phase_rad=np.pi / 2)
+         .filter("integrate", tau_s=1 / _zw).waveform())
+_zdif = (Signal(seed=1, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0)
+         .filter("differentiate", tau_s=1 / _zw).waveform())
+_zt = np.arange(_zn) / _zfs
+_zhalf = _zw / (2 * _zfs)
+_zie = float(np.abs(_zint - _zhalf / np.tan(_zhalf) * np.sin(_zw * _zt)).max())
+_zde = float(np.abs(_zdif[1:] - np.sin(_zhalf) / _zhalf
+                    * np.cos(_zw * (_zt[1:] - 0.5 / _zfs))).max())
+check("filter integrate / differentiate: a cosine integrates to a sine and a sine differentiates "
+      "to a cosine, each at its rule's own closed-form gain, the difference half a sample late",
+      _zie < 1e-10 and _zde < 1e-10,
+      f"integrate: {_zie:.1e} from sin * (wT/2)/tan(wT/2), {(1 - _zhalf / np.tan(_zhalf)) * 100:.4f}"
+      f" % under the ideal 1/w; differentiate: {_zde:.1e} from cos(w(t - T/2)) * sinc, "
+      f"{(1 - np.sin(_zhalf) / _zhalf) * 100:.4f} % under the ideal w")
+
+# THE FRONT END, AT THE SAME SETTINGS. `scope` stays the named op; the general stage must not be
+# a second, slightly different, Bessel.
+_zbg = Grid(fs=256e9, baud=32e9, n=1 << 13)
+_zsc = Signal(seed=3, grid=_zbg).carrier("nrz", n_ui=32, pattern="prbs7").scope(bw_hz=32e9).waveform()
+_zfl = (Signal(seed=3, grid=_zbg).carrier("nrz", n_ui=32, pattern="prbs7")
+        .filter("bessel", order=4, f_hz=32e9).waveform())
+check("filter bessel, order 4, IS the existing front-end filter at the same settings -- bound "
+      "zero, the same samples",
+      np.array_equal(_zsc, _zfl),
+      f"max |filter - scope| = {np.abs(_zsc - _zfl).max():.1e} over {len(_zsc)} samples of a "
+      f"32 GHz Bessel-4 on PRBS7")
+
+# THE DELAY IT REPORTS IS THE DELAY IT HAS. A ramp through a low-pass comes out the same ramp,
+# later by the group delay at DC -- so a comparator before and after the filter times it.
+_zramp = np.clip((np.arange(_zn) - 2000) / 6000.0, 0.0, 1.0)
+_zpre = (Signal(seed=1, grid=_zg).capture(values=_zramp, fs_hz=_zfs)
+         .law("comparator", threshold=0.5).event_list().events[0].t_s)
+_zchain = (Signal(seed=1, grid=_zg).capture(values=_zramp, fs_hz=_zfs)
+           .filter("butter", f_hz=5e6, order=4).law("comparator", threshold=0.5))
+_zpost = _zchain.event_list().events[0].t_s
+_zrep = _zchain.filter_delays()[0]["group_delay_s"]
+check("a filter REPORTS its group delay, and adding it to an upstream event's time lands on the "
+      "event as delivered",
+      abs((_zpost - _zpre) - _zrep) < 1e-3 / _zfs,
+      f"the 50 % crossing moves {(_zpost - _zpre) * 1e9:.4f} ns through a 5 MHz Butterworth-4; "
+      f"filter_delays() reports {_zrep * 1e9:.4f} ns "
+      f"(off by {abs(_zpost - _zpre - _zrep) * _zfs:.1e} of a sample)")
+
+# ... AND THAT IS THE SLOW-EDGE NUMBER. An edge FAST against the filter arrives at the filter's
+# own 50 % step delay, a different number, which it reports beside it. Both regimes, four designs.
+_zstep = (np.arange(_zn) >= 2000).astype(float)
+_zfast = []
+for _zk, _zkw in (("butter", dict(order=1)), ("butter", dict(order=4)), ("bessel", dict(order=4)),
+                  ("fir", dict(taps=[0.1, 0.2, 0.4, 0.2, 0.1]))):
+    _zkw = _zkw if _zk == "fir" else dict(f_hz=5e6, **_zkw)
+    _zc = (Signal(seed=1, grid=_zg).capture(values=_zstep, fs_hz=_zfs)
+           .filter(_zk, **_zkw).law("comparator", threshold=0.5))
+    _zd = _zc.filter_delays()[0]
+    _zfast.append((_zk, (_zc.event_list().events[0].t_s - 1999.5 / _zfs) * _zfs,
+                   _zd["step_delay_s"] * _zfs, _zd["group_delay_s"] * _zfs))
+check("a filter reports the delay of a FAST edge too: the 50 % point of its own step response, "
+      "which is not its group delay",
+      all(abs(m - s) < 1e-6 for _k, m, s, _g in _zfast)
+      and abs(_zfast[0][2] / _zfast[0][3] - np.log(2.0)) < 2e-3      # one pole: ln 2 of 1/(2 pi fc)
+      and abs(_zfast[1][1] - _zfast[1][3]) > 5.0,
+      "a step's midpoint moved / step_delay_s / group_delay_s, in samples: "
+      + "; ".join(f"{k} {m:.3f} / {s:.3f} / {g:.3f}" for k, m, s, g in _zfast))
+
+_zzp = _zmeas(kind="butter", f_hz=_zfc, order=5, zero_phase=True)[:-1]
+_zunit = (np.arange(_zn) >= _zn // 2).astype(float)
+_zzs = (Signal(seed=1, grid=_zg).capture(values=_zunit, fs_hz=_zfs)
+        .filter("butter", f_hz=_zfc, order=5, zero_phase=True))
+_zys = _zzs.waveform()
+_zsym = float(np.abs(_zys[_zn // 2:_zn // 2 + 500] + _zys[_zn // 2 - 1:_zn // 2 - 501:-1]
+                     - 1.0).max())
+check("zero_phase=True keeps the STATED magnitude (a forward-backward pass would square it), "
+      "has no delay, and says so in the recipe",
+      float(np.abs(_zzp - 1 / np.sqrt(1 + _zr ** 10)).max()) < 1e-6 and _zsym < 1e-9
+      and _zzs.recipe()["ops"][-1]["zero_phase"] is True
+      and _zzs.filter_delays()[0]["group_delay_s"] == 0.0,
+      f"max ||H| - closed form| = {np.abs(_zzp - 1 / np.sqrt(1 + _zr ** 10)).max():.1e} "
+      f"({20 * np.log10(_zzp[np.argmin(abs(_zfreq[:-1] - _zfc))]):.3f} dB at the corner, where "
+      f"filtfilt gives -6.02); a step comes out odd-symmetric about its own instant to "
+      f"{_zsym:.1e}")
+
+print("== complex baseband: the mixers are the textbook identities, the source has ground "
+      "truth, and nothing drops an imaginary part (#81) ==")
+import json as _qjson                                                # noqa: E402
+from wfmsynth import iq as _IQ                                              # noqa: E402
+from wfmsynth.acquire import AcquisitionProfile as _QProfile                 # noqa: E402
+_qfs, _qbd, _qfc = 8e9, 25e6, 1e9
+_qt = np.arange(1 << 15) / _qfs
+_qtones = ((-19.7e6, 0.30, 0.1), (-7.1e6, 0.20, 1.0), (0.9e6, 0.25, 2.0), (4.3e6, 0.15, -1.0),
+           (18.9e6, 0.10, 0.5))
+_qx = sum(_a * np.exp(1j * (2 * np.pi * _f * _qt + _p)) for _f, _a, _p in _qtones)
+_qg = Grid(fs=_qfs, n=len(_qx), domain="iq", fc_hz=_qfc)
+_qone = 0.7 * np.exp(1j * (2 * np.pi * 3.3e6 * _qt + 0.4))
+_qup = Signal(seed=0, grid=_qg).capture(values=_qone).upconvert().waveform()
+_querr = float(np.abs(_qup - 0.7 * np.cos(2 * np.pi * (_qfc + 3.3e6) * _qt + 0.4)).max())
+check("a complex tone at +f0 up-converts to cos(2 pi (fc + f0) t): one sideband, the upper one "
+      "-- so Q is used, with the right sign",
+      _qup.dtype == np.float64 and _querr < 1e-10,
+      f"max |passband - closed form| = {_querr:.2e} on a 0.7 peak carrier at 1.0033 GHz")
+_qlpf = dict(pass_hz=20e6, stop_hz=60e6)
+_qrt = (Signal(seed=0, grid=_qg).capture(values=_qx).upconvert()
+        .downconvert(fc_hz=_qfc, lpf=_qlpf).waveform())
+_qhalf = len(_IQ.lowpass(_qlpf, _qfs)) // 2
+_qpe, _qsd = _IQ.lowpass_error(_qlpf, _qfs)
+_qbound = (_qpe + 10 ** (_qsd / 20)) * sum(_a for _, _a, _ in _qtones)
+_qrterr = float(np.abs(_qrt - _qx)[_qhalf:-_qhalf].max())
+check("downconvert(upconvert(x)) is x to within the STATED low-pass's own error -- its measured "
+      "passband deviation on the tones plus its measured stopband on their images",
+      _qrt.dtype == np.complex128 and 1e-3 * _qbound < _qrterr < _qbound,
+      f"{_qrterr:.2e} against a bound of {_qbound:.2e} ({2 * _qhalf + 1} taps: passband "
+      f"|H-1| <= {_qpe:.2e}, stopband {_qsd:.1f} dB) on five tones inside +/-20 MHz")
+
+_qgs = Grid(fs=_qfs, baud=_qbd, n=1 << 16, domain="iq", fc_hz=_qfc)
+_qs = Signal(seed=1, grid=_qgs).iq("qam16", prbs=15, prbs_phase=100)
+_qsent, _ = _qs.transmitted()
+_qevm = {_sp: _IQ.evm(_IQ.demodulate(
+    Signal(seed=1, grid=_qgs).iq("qam16", prbs=15, prbs_phase=100, span_ui=_sp).waveform(),
+    _qgs, span_ui=_sp)[16:-16], _qsent[16:-16]) for _sp in (8, 16, 32)}
+check("an I/Q source's ground truth is what the record holds: a matched filter returns "
+      "transmitted(), and the residual is the pulse's truncation and falls with its span",
+      _qevm[8] > 2 * _qevm[16] > 2 * _qevm[32] and _qevm[32] < 0.002,
+      "QAM-16, root-raised-cosine beta 0.35: EVM "
+      + " / ".join(f"{100 * _qevm[_sp]:.3f} %" for _sp in (8, 16, 32))
+      + " at span_ui = 8 / 16 / 32")
+_qh = _IQ.rrc(np.arange(-6400, 6401) / 16.0, 0.35)
+_qisi = max(abs(float(np.sum(_qh[:len(_qh) - _k * 16] * _qh[_k * 16:]) / 16)) for _k in (1, 2, 3))
+check("  ... and the pulse is a ROOT raised cosine: unit energy, and an autocorrelation that is "
+      "zero at every other symbol centre",
+      abs(float(np.sum(_qh * _qh) / 16) - 1.0) < 1e-8 and _qisi < 1e-8,
+      f"energy {float(np.sum(_qh * _qh) / 16):.10f} per symbol, ISI {_qisi:.1e}")
+
+_qgr = Grid(fs=16e9, baud=_qbd, n=1 << 18, domain="iq", fc_hz=_qfc)
+_qrf = (Signal(seed=1, grid=_qgr).iq("qam16", prbs=15, prbs_phase=100).upconvert()
+        .acquire(_QProfile(sample_rate_hz=4e9, record_length=1 << 16,
+                           input_bandwidth_hz=3e9, bits=8))
+        .downconvert(fc_hz=_qfc, lpf=_qlpf, fs_out_hz=250e6))
+_qy = _qrf.waveform()
+_qsg = _qrf.stored_grid(_qy)
+_qrs, _ = _qrf.transmitted()
+_qgot = _IQ.demodulate(_qy, _qsg)[16:-16]
+_qfit = _IQ.evm(_qgot, _qrs[16:-16], fit=True)
+check("an instrument sampling RF: I/Q -> 1 GHz passband -> an 8-bit 4 GSa/s acquisition -> "
+      "down-converted at the STORED rate returns the transmitted symbols",
+      (_qsg.fs, _qsg.domain) == (250e6, "iq") and _qfit < 0.01
+      and _IQ.evm(_qgot, _qrs[16:-16]) > 0.3,
+      f"EVM {100 * _qfit:.2f} % once the front end's carrier phase "
+      f"({np.angle(_IQ.complex_gain(_qgot, _qrs[16:-16])):+.3f} rad) is taken out, "
+      f"{100 * _IQ.evm(_qgot, _qrs[16:-16]):.0f} % before; stored at {_qsg.fs / 1e6:.0f} MSa/s")
+
+
+def _qrefusal(fn):
+    try:
+        fn()
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+_qmsg = _qrefusal(lambda: Signal(seed=1, grid=_qgs).iq("qpsk", prbs=9)
+                  .reflect(td_ps=100.0, gamma_s=0.2, gamma_l=0.2))
+check("a real-only op handed an I/Q record refuses BY NAME, saying which op converts; complex "
+      "samples offered to a real record are refused, not cast",
+      _qmsg.startswith("reflect") and "'iq'" in _qmsg and "upconvert(" in _qmsg
+      and "complex (I/Q)" in _qrefusal(
+          lambda: Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx), domain="real"))
+          .capture(values=_qx)),
+      _qmsg[:118] + "...")
+_qfollow = Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx))).capture(values=_qx)
+_qstated = Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx), domain="iq")).capture(values=_qx)
+_qsrc = Signal(seed=1, grid=Grid(fs=_qgs.fs, baud=_qgs.baud, n=_qgs.n)).iq("qpsk", prbs=9)
+_qsrc_stated = Signal(seed=1, grid=Grid(fs=_qgs.fs, baud=_qgs.baud, n=_qgs.n,
+                                         domain="iq")).iq("qpsk", prbs=9)
+check("a grid that does not state its domain takes its source's: an `iq` source and a complex "
+      "capture are I/Q records with the recipe and samples of one that said domain='iq', a "
+      "real source's recipe is unchanged, and a grid that STATES 'real' refuses `iq` by name",
+      _qfollow.grid.domain == "iq" and _qfollow.to_json() == _qstated.to_json()
+      and np.array_equal(_qfollow.waveform(), _qx)
+      and _qsrc.to_json() == _qsrc_stated.to_json()
+      and np.array_equal(_qsrc.waveform(), _qsrc_stated.waveform())
+      and "domain" not in Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096))
+      .carrier("nrz", n_ui=512).recipe()["grid"]
+      and "STATES domain='real'" in _qrefusal(
+          lambda: Signal(seed=1, grid=Grid(fs=_qgs.fs, baud=_qgs.baud, n=_qgs.n,
+                                           domain="real")).iq("qpsk", prbs=9)),
+      f"inferred and stated I/Q digests equal: capture {_qfollow.sha256()[:12]} == "
+      f"{_qstated.sha256()[:12]}, iq {_qsrc.sha256()[:12]} == {_qsrc_stated.sha256()[:12]}")
+_qr = Signal.from_recipe(_qjson.loads(_qrf.to_json()))
+_qreal = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096)).carrier("nrz", n_ui=512)
+check("waveform() of an I/Q record is complex128 and replays bit for bit from its recipe; a "
+      "real record's recipe has no new key, so its content address did not move",
+      np.array_equal(_qr.waveform(), _qy) and _qr.sha256() == _qrf.sha256()
+      and _qrf.recipe()["grid"]["domain"] == "iq"
+      and sorted(_qreal.recipe()["grid"]) == ["baud", "fs", "n", "v_full"]
+      and _qreal.waveform().dtype == np.float64,
+      f"{_qy.dtype}, {len(_qy)} samples; real grid keys {sorted(_qreal.recipe()['grid'])}")
+
+
+# ---- unit-to-unit variation: parameters drawn from stated tolerances (GitHub #86) ----
+# A toleranced parameter is drawn once per record under a `unit/...` role and the NUMBER is
+# written into the recipe. Three things have to be true for that number to be worth having: it
+# follows the distribution that was stated (including what "normal" means -- tol = 3 sigma,
+# truncated), it is the value the waveform was actually made with, and re-rolling the unit
+# moves it and nothing else. The populations are seeds 0..N-1, so every figure is deterministic;
+# a distribution passes at p > 1e-3 and its negative control must fail below 1e-9.
+from scipy import stats as _ust                                   # noqa: E402
+from wfmsynth import tolerance as _TOL                            # noqa: E402
+
+_un, _ug = 10000, Grid(fs=100e9, n=8000)
+_up = np.array([[_o[_k] for _k in ("r_source", "c_load_f", "atten", "bw_hz")] for _o in (
+    Signal(seed=_s, grid=_ug).probe(
+        r_source=_TOL.tol(1e3, 5), c_load_f=_TOL.tol(1e-11, 10, dist="normal"),
+        atten=_TOL.tol(0.1, 2, dist="corner"),
+        bw_hz=_TOL.corners({"slow": 1e9, "typ": 2e9, "fast": 3e9})).recipe()["ops"][0]
+    for _s in range(_un))])
+_uu = (_up[:, 0] - 950.0) / 100.0
+_uz = (_up[:, 1] - 1e-11) / (1e-12 / 3.0)
+_utn = _ust.truncnorm(-3, 3)
+_upu, _upn = _ust.kstest(_uu, "uniform").pvalue, _ust.kstest(_uz, _utn.cdf).pvalue
+check(f"a 'uniform' tolerance is uniform over nom +/- tol ({_un} records)",
+      _upu > 1e-3 and _uu.min() >= 0 and _uu.max() <= 1
+      and _ust.kstest((_up[:, 0] - 1e3) / (50.0 / 3), _utn.cdf).pvalue < 1e-9,
+      f"KS p = {_upu:.3f}; the same values against the normal form: "
+      f"p = {_ust.kstest((_up[:, 0] - 1e3) / (50.0 / 3), _utn.cdf).pvalue:.0e}")
+check("a 'normal' tolerance is tol = 3 sigma, truncated at +/- tol",
+      _upn > 1e-3 and np.abs(_uz).max() <= 3.0 and abs(_uz.std() / _utn.std() - 1) < 0.03
+      and _ust.kstest(_uz / 3.0, _ust.truncnorm(-1, 1).cdf).pvalue < 1e-9,
+      f"KS p = {_upn:.3f}; sd = {_uz.std():.4f} sigma against {_utn.std():.4f}; max |z| = "
+      f"{np.abs(_uz).max():.3f}; read as tol = 1 sigma: p = "
+      f"{_ust.kstest(_uz / 3.0, _ust.truncnorm(-1, 1).cdf).pvalue:.0e}")
+_uc2 = np.unique(_up[:, 2], return_counts=True)[1]
+_uc3 = np.unique(_up[:, 3], return_counts=True)[1]
+check("'corner' is the two extremes and a named corner set its names, each equally likely",
+      len(_uc2) == 2 and len(_uc3) == 3 and _ust.chisquare(_uc2).pvalue > 1e-3
+      and _ust.chisquare(_uc3).pvalue > 1e-3
+      and _ust.chisquare(_uc3, f_exp=_un * np.array([0.25, 0.5, 0.25])).pvalue < 1e-9,
+      f"{_uc2.tolist()} (p = {_ust.chisquare(_uc2).pvalue:.3f}), {_uc3.tolist()} "
+      f"(p = {_ust.chisquare(_uc3).pvalue:.3f})")
+check("two toleranced parameters of one record are independent draws",
+      abs(np.corrcoef(_uu, _uz)[0, 1]) < 0.04,
+      f"r = {np.corrcoef(_uu, _uz)[0, 1]:+.4f} over {_un} records (4 standard errors = 0.04)")
+
+
+def _urec(seed, noise=0.0):
+    return (Signal(seed=seed, grid=_ug)
+            .carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=25e6, duty=0.5, tr_s=1e-10)
+            .probe(r_source=_TOL.tol(1e3, 20), c_load_f=_TOL.tol(2e-12, 20, dist="normal"),
+                   **({"noise_rms": noise} if noise else {})))
+
+
+def _urise(y, fs, lo=0.0, hi=3.3):
+    a, b = lo + 0.1 * (hi - lo), lo + 0.9 * (hi - lo)
+    i = np.flatnonzero((y[:-1] < a) & (y[1:] >= a))[0]
+    j = np.flatnonzero((y[:-1] < b) & (y[1:] >= b))
+    j = j[j > i][0]
+    return ((j + (b - y[j]) / (y[j + 1] - y[j])) - (i + (a - y[i]) / (y[i + 1] - y[i]))) / fs
+
+
+_ut = []
+for _s in range(8):
+    _usig = _urec(_s)
+    _uo = _usig.recipe()["ops"][1]
+    _ut.append((_urise(_usig.waveform(), _ug.fs), np.log(9.0) * _uo["r_source"] * _uo["c_load_f"]))
+_ut = np.array(_ut)
+check("the resolved R and C in the recipe ARE the ones in the waveform (rise = ln 9 * R * C)",
+      np.abs(_ut[:, 0] / _ut[:, 1] - 1).max() < 1e-3 and _ut[:, 0].max() / _ut[:, 0].min() > 1.2,
+      f"worst {np.abs(_ut[:, 0] / _ut[:, 1] - 1).max():.1e} over 8 units spanning "
+      f"{_ut[:, 0].min() * 1e9:.2f}..{_ut[:, 0].max() * 1e9:.2f} ns")
+
+_us, _uclean = _urec(3, 2e-3), _urec(3)
+_uy = _us.waveform()
+_unoise = _uy - _uclean.waveform()
+_uyu = _us.contrast("unit/*", seed=40)
+_udn = float(np.abs((_uyu - _uclean.unit(40).waveform()) - _unoise).max())
+_uon = _us.contrast("probe/1") - _uclean.waveform()
+check("re-rolling unit/* is another unit under the SAME noise; re-rolling the noise, the reverse",
+      np.array_equal(_uyu, _us.unit(40).waveform()) and float(np.abs(_uyu - _uy).max()) > 0.02
+      and _udn < 1e-12 and abs(np.corrcoef(_uon, _unoise)[0, 1]) < 0.05
+      and abs(_uon.std() / 2e-3 - 1) < 0.05,
+      f"unit re-rolled: waveform moves {np.abs(_uyu - _uy).max() * 1e3:.1f} mV, its noise by "
+      f"{_udn:.1e} V; noise re-rolled: r = {np.corrcoef(_uon, _unoise)[0, 1]:+.4f} with the old")
+_ura, _urb = _us.recipe()["ops"], _us.unit(40).recipe()["ops"]
+check("  ... and only the toleranced parameters differ between the two recipes",
+      _ura[0] == _urb[0] and {k for k in _ura[1] if _ura[1][k] != _urb[1][k]}
+      == {"r_source", "c_load_f", "_unit"},
+      f"changed in the probe op: {sorted(k for k in _ura[1] if _ura[1][k] != _urb[1][k])}")
+import json as _ujson                                             # noqa: E402
+_ub = Signal.from_recipe(_ujson.loads(_us.to_json()))
+check("a recipe with resolved values replays bit-identically",
+      _ub.sha256() == _us.sha256() and np.array_equal(_ub.waveform(), _uy),
+      f"digest {_us.sha256()[:12]}, max |diff| = {np.abs(_ub.waveform() - _uy).max():.1e}")
+
+print("== the pieces compose: a matched filter on an envelope, a tolerance inside a sub-chain ==")
+_jg = Grid(fs=8e9, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
+
+
+def _jsrc():
+    return Signal(seed=1, grid=_jg).iq("qam16", prbs=15, prbs_phase=100)
+
+
+_jsent, _jt = _jsrc().transmitted()
+_jk = np.rint(_jt * _jg.fs).astype(int)[10:-10]         # symbol centres; the ends lack neighbours
+_jsent = _jsent[10:-10]
+_jm = _IQ.evm(_jsrc().filter("rrc", beta=0.35, zero_phase=True).waveform()[_jk], _jsent)
+_jr = _IQ.evm(_jsrc().waveform()[_jk], _jsent, fit=True)
+check("filter('rrc') on an I/Q record is the source's matched filter: the record AT the symbol "
+      "centres is the sent symbols, nothing fitted", _jm < 0.006 and _jr > 0.10,
+      f"EVM {100 * _jm:.3f} % after the filter (bound 0.6 %, set by the 16-symbol truncation) "
+      f"against {100 * _jr:.1f} % for the shaped source alone")
+from wfmsynth import tolerance as _JT                                       # noqa: E402
+_jgr = Grid(fs=20e9, n=4000)
+_jlane = Signal(grid=_jgr).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=25e6,
+                                   tr_s=_JT.tol(1e-9, 20))
+_jrec = Signal(seed=4, grid=_jgr).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=10e6,
+                                          tr_s=1e-10).crosstalk(aggressor=_jlane, coupling=0.1)
+_jtr = _jrec.ops[1]["aggressor"]["ops"][0]["tr_s"]
+_jagg = _jrec.subchain("crosstalk/1/aggressor")
+
+def _jcross(level):                       # the first FALLING crossing of `level`, in samples
+    i = int(np.argmax(_jagg < level))
+    return i - 1 + (_jagg[i - 1] - level) / (_jagg[i - 1] - _jagg[i])
+
+
+_jmeas = float((_jcross(0.33) - _jcross(2.97)) / _jgr.fs)     # 90 % to 10 % of 0..3.3 V
+_jother = _jrec.unit(9)
+check("a tolerance inside a sub-chain is drawn by the record it joins: the aggressor's edge is "
+      "the recipe's number, and unit() moves it",
+      _jrec.roles() == ["crosstalk/1/aggressor/unit/0/tr_s"] and abs(_jmeas / _jtr - 1) < 0.02
+      and _jother.ops[1]["aggressor"]["ops"][0]["tr_s"] != _jtr
+      and np.array_equal(_jrec.contrast("unit/*", seed=9), _jother.waveform()),
+      f"recipe tr_s {_jtr * 1e12:.1f} ps, measured 10-90 % {_jmeas * 1e12:.1f} ps (bound 2 %); "
+      f"unit 9 has {_jother.ops[1]['aggressor']['ops'][0]['tr_s'] * 1e12:.1f} ps")
+
+print("== joins: combine, and gain / offset / gate / delay driven by a signal (GitHub #76, #79) ==")
+from wfmsynth import joins as _JN                                           # noqa: E402
+_cg = Grid(fs=1e6, baud=1e3, n=1 << 14)
+_ct = np.arange(_cg.n) / _cg.fs
+
+
+def _csin(f, amp=1.0, offset=0.0, phase_rad=0.0):
+    return Signal(grid=_cg).carrier("sine", f_hz=f, amp=amp, offset=offset, phase_rad=phase_rad)
+
+
+def _csq01():
+    return Signal(grid=_cg).carrier("square", f_hz=500.0, amp=0.5, offset=0.5)
+
+
+_cy = _csin(1e3).combine(_csin(7e3, amp=0.3, phase_rad=0.4)).waveform()
+_cw = np.sin(2 * np.pi * 1e3 * _ct) + 0.3 * np.sin(2 * np.pi * 7e3 * _ct + 0.4)
+check("combine: the sum of two sines is the analytic sum", np.array_equal(_cy, _cw),
+      f"max |diff| = {np.abs(_cy - _cw).max():.1e} (bound 0)")
+_ca = _csin(50e3).combine([_csq01()], how="product").waveform()
+_cb = _csin(50e3).modulate(kind="ook", suppressed=True, message=_csq01()).waveform()
+_cc = _csin(50e3).combine([_csq01()], how="product", gains=[2.0]).waveform()
+_cd = _csin(50e3).modulate(kind="ook", message=Signal(grid=_cg).carrier("square", f_hz=500.0)).waveform()
+check("combine: a carrier times a 0/1 square is modulate's OOK, suppressed and not",
+      np.array_equal(_ca, _cb) and np.abs(_cc - _cd).max() <= 4 * np.finfo(float).eps,
+      f"max |diff| = {np.abs(_ca - _cb).max():.1e} suppressed (bound 0), "
+      f"{np.abs(_cc - _cd).max():.1e} with the carrier kept and a gain of 2 (bound 8.9e-16)")
+_cgt = _csin(50e3).gate(by=_csq01()).waveform()
+_cbu = _csin(50e3).burst(t_on_s=1e-3, t_off_s=1e-3, edge_frac=0.0).waveform()
+_cdf = np.flatnonzero(_cgt != _cbu)
+check("gate by a square is burst at that cadence, but for burst's own one-sample ramps",
+      len(_cdf) <= 2 * 9 and set(_cdf % 2000) <= {0, 999} and not _cbu[_cdf].any(),
+      f"{len(_cdf)} of {_cg.n} samples differ, each the first or last of a burst, which "
+      f"burst zeroes and an ideal switch lets through")
+_cev = _csin(50e3).gate(by=_csin(500.0)).event_list()
+_cwant = np.sort(np.concatenate([(np.arange(9) + 1 / 12) / 500.0, (np.arange(9) + 5 / 12) / 500.0]))
+_cwant = _cwant[_cwant < _cg.n / _cg.fs]
+_cgot = np.array([e.t_s for e in _cev])
+check("gate emits its switching instants: the times a sine enable crosses the threshold",
+      len(_cgot) == len(_cwant) and np.abs(_cgot - _cwant).max() < 2e-9,
+      f"{len(_cgot)} transitions, worst {np.abs(_cgot - _cwant).max() * 1e9:.2f} ns from "
+      f"asin(0.5) (bound 2 ns: linear interpolation across a 1 us sample)")
+_cfj, _camp, _ck = 300.0, 2e-6, 4
+_cd0 = _ck / _cg.fs
+_cerr = []
+for _cf0 in (2e3, 50e3, 200e3, 390e3):
+    _cyd = _csin(_cf0).delay(by=_csin(_cfj, amp=_camp, offset=_cd0)).waveform()
+    _cex = np.sin(2 * np.pi * _cf0 * (_ct - _cd0 - _camp * np.sin(2 * np.pi * _cfj * _ct)))
+    _cerr.append((np.abs(_cyd - _cex)[24:-16].max(), _JN.delay_error(_cf0, _cg.fs)))
+check("delay: a tone under a moving delay is within the error the op reports, across the band",
+      all(e <= b + 1e-13 for e, b in _cerr) and _JN.describe_delay(_cg.fs)["error"] < 2.5e-5,
+      "measured / reported at 0.002, 0.05, 0.2, 0.39 fs: "
+      + ", ".join(f"{e:.1e} / {b:.1e}" for e, b in _cerr)
+      + f"; stated for the band below 0.4 fs: {_JN.describe_delay(_cg.fs)['error']:.2e}")
+_cyd = _csin(2e3).delay(by=_csin(_cfj, amp=_camp, offset=_cd0,
+                                  phase_rad=-2 * np.pi * _cfj * _cd0)).waveform()
+_cyt = _csin(2e3).timing(pj=dict(amp_ps=_camp * 1e12, f_hz=_cfj)).waveform()
+_cdiff = np.abs(_cyd[_ck:] - _cyt[:-_ck])[16:-16].max()
+_clin = (2 * np.pi * 2e3 / _cg.fs) ** 2 / 8
+check("delay by a sine reproduces timing's periodic jitter at that amplitude and frequency",
+      _cdiff <= _JN.delay_error(2e3, _cg.fs) + _clin
+      and np.ptp(_cyd[_ck:] - np.sin(2 * np.pi * 2e3 * _ct)[:-_ck]) > 0.02,
+      f"max |diff| = {_cdiff:.2e}; bound {_JN.delay_error(2e3, _cg.fs):.1e} (delay, reported) + "
+      f"{_clin:.2e} (timing's linear interpolation, (2*pi*f/fs)^2/8)")
+_cng = Grid(fs=64e9, baud=1e9, n=1 << 13)
+_cns = (Signal(seed=2, grid=_cng).carrier("nrz", n_ui=128)
+        .combine([Signal(grid=_cng).carrier("nrz", n_ui=128).events(kind="glitch", count=3)],
+                 gains=[0.2]))
+_cne = _cns.event_list()
+check("a combined sub-chain's events are in the record's event list under its namespace",
+      len(_cne) == 3 and {e.at for e in _cne} == {"combine/1/others/0"} and not _cne.on_record(),
+      f"{len(_cne)} events, at = {sorted({e.at for e in _cne})}")
+# ---------------------------------------------------------------------------------------------
+print("\n-- sequence and switch: chains joined in time, or selected by a signal (GitHub #77) --")
+from wfmsynth import sequence as _QS                                        # noqa: E402
+_qg = Grid(fs=1e9, baud=50e6, n=8000)
+_qna, _qm = 2000, 200
+
+
+def _qtone(f=5e6):
+    return Signal(grid=_qg).carrier("sine", f_hz=f)
+
+
+def _qlane():
+    return (Signal(seed=7, grid=_qg).carrier("nrz", n_ui=400, jitter=dict(rj=0.03))
+            .lossy(loss_db=3.0, loss_at_ghz=0.2).rx_noise(rms=0.01))
+
+
+def _qseq(join="cut", t_join_s=None, state="restart"):
+    return Signal(seed=3, grid=_qg).sequence(
+        [{"chain": {"from": _qtone().recipe()}, "duration_s": _qna / _qg.fs},
+         {"chain": {"from": _qlane().recipe()}, "state": state}], join=join, t_join_s=t_join_s)
+
+
+_qa, _qb = _qtone().waveform(), _qlane().waveform()
+_qcut = _qseq().waveform()
+check("a two-segment sequence IS its chains rendered alone and spliced (array_equal)",
+      np.array_equal(_qcut, np.concatenate([_qa[:_qna], _qb[:_qg.n - _qna]])),
+      f"{_qna} + {_qg.n - _qna} samples, a jittered noisy lane after a tone, 0 differ")
+_qx, _qxe = _qseq("crossfade", _qm / _qg.fs).realize()
+_qr = 0.5 * (1 - np.cos(np.pi * (np.arange(_qm) + 0.5) / _qm))
+_qin = float(np.max(np.abs(_qx[_qna:_qna + _qm]
+                           - ((1 - _qr) * _qa[_qna:_qna + _qm] + _qr * _qb[:_qm]))))
+check("a crossfade is exact outside its stated window and the stated raised cosine inside it",
+      np.array_equal(_qx[:_qna], _qcut[:_qna])
+      and np.array_equal(_qx[_qna + _qm:], _qcut[_qna + _qm:]) and _qin < 1e-15,
+      f"outside the {_qm}-sample window 0 samples differ from the cut; inside, max error "
+      f"against the closed form {_qin:.1e}")
+_qe = _qxe.events[0]
+check("the boundary event is at the requested time and carries the segment index",
+      len(_qxe) == 1 and _qe.kind == "segment" and _qe.sample == _qna
+      and abs(_qe.t_s * _qg.fs - _qna) < 1 and _qe.params["segment"] == 1,
+      f"requested {_qna / _qg.fs * 1e6:g} us, event at sample {_qe.sample} "
+      f"(t_s {_qe.t_s * 1e6:g} us), segment {_qe.params['segment']}, width {_qe.width}")
+_qt = _qtone(5.3e6)
+_qtw = _qt.waveform()
+
+
+def _qstate(state):
+    return Signal(grid=_qg).sequence([{"chain": _qt, "duration_s": _qna / _qg.fs},
+                                      {"chain": _qt, "state": state}]).waveform()
+
+
+_qjump = float(abs(_qstate("restart")[_qna] - _qstate("restart")[_qna - 1]))
+check("'continue' carries a tone's phase across the boundary; 'restart' starts it again",
+      np.array_equal(_qstate("continue"), _qtw)
+      and np.array_equal(_qstate("restart")[_qna:], _qtw[:_qg.n - _qna]) and _qjump > 0.3,
+      f"5.3 MHz continued over a 2 us boundary is the uninterrupted tone (0 samples differ); "
+      f"restarted it steps {_qjump:.3f} at the boundary")
+_qstep = Signal(grid=_qg).sequence(
+    [{"chain": Signal(grid=_qg).carrier("dc", level=0.0), "duration_s": _qna / _qg.fs},
+     {"chain": Signal(grid=_qg).carrier("dc", level=1.0)}],
+    join="crossfade", t_join_s=_qm / _qg.fs).waveform()
+
+
+def _qcross(level):
+    i = int(np.argmax(_qstep > level))
+    return i - 1 + (level - _qstep[i - 1]) / (_qstep[i] - _qstep[i - 1])
+
+
+_q1090 = (_qcross(0.9) - _qcross(0.1)) / _qg.fs
+_qan = (np.arccos(-0.8) - np.arccos(0.8)) / np.pi * _qm / _qg.fs
+check("a crossfade between two levels rises 10-90 % in 0.5903 of t_join_s",
+      abs(_q1090 - _qan) < 0.01 / _qg.fs,
+      f"measured {_q1090 * 1e9:.3f} ns, analytic {_qan * 1e9:.3f} ns (bound 0.01 sample)")
+for _qbad, _qword in (
+        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "duration_s": 2.0005e-6}, {"chain": _qt}]),
+         "not on the grid"),
+        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "duration_s": 2e-6},
+                                            {"chain": _qt, "duration_s": 5e-6}]), "fill it exactly")):
+    try:
+        _qbad()
+        _qmsg = ""
+    except ValueError as _qerr:
+        _qmsg = str(_qerr)
+    check(f"a sequence whose durations are '{_qword}' is refused, never rounded",
+          _qword in _qmsg, _qmsg[:96] + "...")
+
+
+def _qsw(select, **kw):
+    return Signal(seed=3, grid=_qg).switch(
+        select=select, inputs=[{"from": _qtone().recipe()}, {"from": _qlane().recipe()}], **kw)
+
+
+def _qdc(level):
+    return Signal(grid=_qg).carrier("dc", level=level)
+
+
+check("a switch with a constant selector IS that input (array_equal), switching time or not",
+      all(np.array_equal(_qsw(_qdc(lv), threshold=0.5, t_switch_s=ts).waveform(), w)
+          for lv, w in ((0.0, _qa), (1.0, _qb)) for ts in (0.0, 50e-9)),
+      "selector 0 -> inputs[0], selector 1 -> inputs[1], at t_switch_s 0 and 50 ns")
+_qf = 1.3e6
+_qy, _qev = _qsw(_qtone(_qf), threshold=0.25, t_switch_s=40e-9).realize()
+_qw, _qas = 2 * np.pi * _qf, np.arcsin(0.25)
+_qk = np.arange(12)
+_qwant = np.sort(np.concatenate([(_qas + 2 * np.pi * _qk) / _qw,
+                                 (np.pi - _qas + 2 * np.pi * _qk) / _qw]))
+_qwant = _qwant[_qwant < _qg.n / _qg.fs]
+_qgot = np.array([e.t_s for e in _qev])
+_qterr = float(np.max(np.abs(_qgot - _qwant)) * _qg.fs) if len(_qgot) == len(_qwant) else np.inf
+_qbound = (_qw / _qg.fs) / (8 * np.cos(_qas))           # a chord's sag under a sine, as time
+check("switch events are the selector's analytic threshold crossings, between samples",
+      len(_qgot) == len(_qwant) and _qterr < _qbound
+      and [e.sample for e in _qev] == list(np.ceil(_qwant * _qg.fs).astype(int)),
+      f"{len(_qgot)} changes of a 1.3 MHz sine across 0.25; worst time error {_qterr:.1e} "
+      f"sample (bound {_qbound:.1e}, linear interpolation)")
+_qbusy = np.zeros(_qg.n, bool)
+for _qe in _qev:
+    _qbusy[_qe.sample:_qe.sample + _qe.width] = True
+_qideal = np.where(_qtone(_qf).waveform() > 0.25, _qb, _qa)
+check("a switch is each input exactly wherever no change is in progress",
+      np.array_equal(_qy[~_qbusy], _qideal[~_qbusy]) and _qbusy.sum() == 40 * len(_qev),
+      f"{int((~_qbusy).sum())} samples outside the {len(_qev)} switching windows of 40 "
+      f"samples: 0 differ from the selected input")
+print("== several correlated channels from one recipe (GitHub #78) ==")
+import json as _cjson                                                       # noqa: E402
+import wfmsynth as _cws                                                     # noqa: E402
+_cg = Grid(fs=320e9, baud=10e9, n=32 * 512)
+_cramp = np.arange(_cg.n, dtype=float)
+
+
+def _cclk():
+    return Signal().carrier("square", f_hz=5e9, tr_frac=0.3)
+
+
+def _cdat():
+    return Signal().carrier("nrz", n_ui=512, pattern="prbs7", tr_frac=0.3)
+
+
+def _ccross(y):
+    s = np.signbit(y)
+    i = np.nonzero(s[1:] != s[:-1])[0]
+    return i + y[i] / (y[i] - y[i + 1])
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _crec = _cws.Channels(
+        {"clk": _cclk().use("pll"), "data": _cdat().use("pll"),
+         "ramp": Signal().capture(values=_cramp).use("pll"),
+         "ramp3": Signal().capture(values=3.0 * _cramp + 7.0).use("pll"), "quiet": _cdat()},
+        shared={"pll": Signal().timing(phase_noise=dict(rms_ps=2.0))}, seed=1, grid=_cg)
+    _cx = _crec.waveforms()
+    _cideal = _cws.Channels({"clk": _cclk(), "data": _cdat()}, seed=1, grid=_cg).waveforms()
+    _cy = _crec.contrast("pll/timing/0")
+    _cback = _cws.Channels.from_recipe(_cjson.loads(_crec.to_json()))
+    _cz = _cback.waveforms()
+# a ramp through a timing warp reads back the displacement, so two ramps of different slope
+# recover the one shared source twice
+_cd1 = (_cramp - _cx["ramp"])[8:-8]
+_cd3 = (_cramp - (_cx["ramp3"] - 7.0) / 3.0)[8:-8]
+check("two channels through one shared timing source are displaced by the same samples",
+      abs(_cd1.std() / _cg.fs * 1e12 - 2.0) < 0.02 and np.abs(_cd1 - _cd3).max() < 1e-10,
+      f"{_cd1.std() / _cg.fs * 1e12:.4f} ps rms asked 2.0 (bound 1 %); the two recovered "
+      f"displacements differ by {np.abs(_cd1 - _cd3).max():.1e} samples (bound 1e-10)")
+_ctc, _ctd = _ccross(_cideal["clk"]), _ccross(_cideal["data"])
+_cjc, _cjd = _ccross(_cx["clk"]) - _ctc, _ccross(_cx["data"]) - _ctd
+_cdisp = _cramp - _cx["ramp"]
+_cerr = max(np.abs(_cjc - np.interp(_ctc + _cjc, _cramp, _cdisp)).max(),
+            np.abs(_cjd - np.interp(_ctd + _cjd, _cramp, _cdisp)).max())
+check("a clock and its data sharing a timing source carry the same jitter: every edge of "
+      "both sits on the one applied displacement",
+      _cerr < 0.01 * _cjc.std() and len(_ctc) == 511 and len(_ctd) > 200,
+      f"{len(_ctc)} clock and {len(_ctd)} data edges, TIE {_cjc.std():.3f} samples rms; "
+      f"worst edge is {_cerr:.4f} samples off the displacement (bound 1 % of rms)")
+_cmoved = {k: float(np.abs(_cy[k] - _cx[k]).max()) for k in ("clk", "data", "quiet")}
+check("re-rolling the shared role moves both channels that use it and not the one that does "
+      "not", _crec.roles() == ["pll/timing/0"] and _cmoved["clk"] > 0.1
+      and _cmoved["data"] > 0.1 and _cmoved["quiet"] == 0.0,
+      f"largest change clk {_cmoved['clk']:.3f}, data {_cmoved['data']:.3f}, "
+      f"quiet {_cmoved['quiet']:.1f}")
+check("a several-channel record replays bit-identically from its recipe, under one digest",
+      all(np.array_equal(_cx[k], _cz[k]) for k in _cx) and _cback.sha256() == _crec.sha256(),
+      f"{len(_cx)} channels, sha256 {_crec.sha256()[:16]}")
+
+
+def _clane():
+    return Signal().carrier("nrz", n_ui=512, pattern="prbs9", seed=9).lossy(loss_db=6.0,
+                                                                            loss_at_ghz=5.0)
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _cxt = _cws.Channels({"victim": _cdat().crosstalk(aggressor=Signal().use("lane"),
+                                                      coupling=0.1), "lane": _clane()},
+                         seed=1, grid=_cg).waveforms()
+    _cref = Signal(seed=1, grid=_cg)
+    _cref.ops = _cdat().crosstalk(aggressor=_clane(), coupling=0.1).ops
+    _crefx, _crefa = _cref.waveform(), _cref.subchain("crosstalk/1/aggressor")
+check("a channel used as another's crosstalk aggressor is that channel: the victim equals "
+      "the sub-chain build of the same lane, and the aggressor is the lane's own output",
+      np.array_equal(_cxt["victim"], _crefx) and np.array_equal(_cxt["lane"], _crefa),
+      f"victim max difference {np.abs(_cxt['victim'] - _crefx).max():.1e}; the coupling "
+      f"moved it by up to {np.abs(_crefx - _cideal['data']).max():.3f}")
+try:
+    _cws.Channels({"a": _cdat().crosstalk(aggressor=Signal().use("b"), coupling=0.1),
+                   "b": _cdat().crosstalk(aggressor=Signal().use("a"), coupling=0.1)}, grid=_cg)
+    _cmsg = ""
+except ValueError as _ce:
+    _cmsg = str(_ce)
+check("two channels that name each other are refused naming the cycle",
+      "a -> b -> a is a cycle" in _cmsg, _cmsg[:34])
+# ===================================================================================================
+print("== a triggered acquisition: render long, find the condition, keep the window (#85) ==")
+# ===================================================================================================
+# A trigger cuts the window a scope would out of a long render. Each claim is measured against
+# something the trigger did not compute: the long render itself, the transitions `stages`'
+# comparator reports for it (a separate implementation), a brute-force arming loop, and 1/sqrt(n).
+import re as _trg_re                                                          # noqa: E402
+from wfmsynth import trigger as _TRG, stages as _trg_stages                   # noqa: E402
+
+_trg_g = Grid(fs=2e9, baud=2e9 / 128, n=2048 * 128)
+_trg_prof = dict(sample_rate_hz=500e6, record_length=_trg_g.n // 4, input_bandwidth_hz=150e6)
+
+
+def _trg_link():
+    return (Signal(seed=3, grid=_trg_g).carrier("nrz", n_ui=2048, pattern="prbs7",
+                                                jitter=dict(rj=1.0))
+            .lossy(loss_db=3.0, loss_at_ghz=0.02).rx_noise(rms=0.02).acquire(_trg_prof))
+
+
+def _trg_cross(y, level, near, rising=True):
+    """Sub-sample crossing of `level` nearest sample `near`, by np.interp on the local edge."""
+    k = np.arange(near - 3, near + 3)
+    seg = y[k] if rising else y[k][::-1]
+    return float(np.interp(level, seg, k if rising else k[::-1]))
+
+
+_trg_fs = 500e6
+_trg_long = _trg_link().waveform()
+_trg_sig = _trg_link().trigger(pre_s=200e-9, post_s=600e-9, level=0.0, hysteresis=0.2)
+_trg_x, _trg_ev = _trg_sig.realize()
+_trg_e = _trg_ev.events[-1]
+_trg_meas = _trg_cross(_trg_x, 0.0, _trg_e.sample) / _trg_fs
+check("the window is a slice of the long render and the triggering edge sits at pre_s to "
+      "half a sample, where the event says",
+      np.array_equal(_trg_x, _trg_long[_trg_e.params["start"]:][:len(_trg_x)])
+      and abs(_trg_meas - 200e-9) * _trg_fs <= 0.5 and abs(_trg_meas - _trg_e.t_s) * _trg_fs < 1e-6
+      and _trg_sig.stored_grid(_trg_x).fs == _trg_fs,
+      f"edge measured at {_trg_meas * 1e9:.4f} ns, event {_trg_e.t_s * 1e9:.4f} ns, pre_s 200 ns, "
+      f"half a sample {0.5 / _trg_fs * 1e9:.1f} ns")
+
+_trg_sj = 3e-9
+_trg_xs, _trg_evs = _trg_link().trigger(pre_s=200e-9, post_s=200e-9, level=0.0, hysteresis=0.2,
+                                        jitter_s=_trg_sj, n_segments=180).realize()
+_trg_rows = _trg_xs.reshape(180, -1)
+_trg_pos = np.array([_trg_cross(_trg_rows[k], 0.0, e.sample - k * 200) / _trg_fs
+                     for k, e in enumerate(_trg_evs)])
+_trg_jit = np.array([e.params["jitter_s"] for e in _trg_evs])
+_trg_want = float(np.sqrt(_trg_sj ** 2 + (1 / _trg_fs) ** 2 / 12))
+check("with trigger jitter the edge sits at pre_s - jitter to half a sample in every segment, "
+      "and its spread is the stated rms",
+      np.abs(_trg_pos - (200e-9 - _trg_jit)).max() * _trg_fs <= 0.5 + 1e-6
+      and abs(_trg_pos.std() / _trg_want - 1) < 0.15,
+      f"180 segments: position rms {_trg_pos.std() * 1e9:.3f} ns against "
+      f"sqrt(jitter^2 + dt^2/12) = {_trg_want * 1e9:.3f} ns (bound 15 %), "
+      f"worst residual "
+      f"{np.abs(_trg_pos - (200e-9 - _trg_jit)).max() * _trg_fs:.3f} samples")
+
+# holdoff and timestamps: the comparator's rising transitions ARE the event times in the long
+# render, and a loop written out here is the scope's arming
+_trg_seen = []
+_trg_stages.apply_law(_trg_long, "comparator", fs=_trg_fs, events=_trg_seen, threshold=0.0,
+                      hysteresis=0.2)
+# the comparator trips at the band's edge; the instant the same edge crossed 0 is found here
+_trg_edges = np.array([_trg_cross(_trg_long, 0.0, e.sample - 1) / _trg_fs
+                       for e in _trg_seen if e.direction > 0 and e.sample > 3])
+_trg_pre, _trg_post, _trg_hold = 200e-9, 600e-9, 5e-6
+_trg_take, _trg_ready = [], _trg_pre
+for _trg_t in _trg_edges:
+    if _trg_t >= _trg_ready:
+        _trg_take.append(_trg_t)
+        _trg_ready = _trg_t + max(_trg_hold, _trg_pre + _trg_post)
+_, _trg_evh = _trg_link().trigger(pre_s=_trg_pre, post_s=_trg_post, level=0.0, hysteresis=0.2,
+                                  holdoff_s=_trg_hold, n_segments=20).realize()
+_trg_stamps = np.array([e.params["timestamp_s"] for e in _trg_evh])
+_trg_skipped = int(np.searchsorted(_trg_edges, _trg_stamps[-1] + 1e-12)) - 20
+_trg_dt = float(np.abs(_trg_stamps - np.array(_trg_take[:20])).max())
+check("holdoff skips exactly the edges it should, and every segment's timestamp is that "
+      "edge's time in the long render",
+      _trg_dt * _trg_fs < 1e-6 and np.diff(_trg_stamps).min() >= _trg_hold and _trg_skipped > 20,
+      f"20 segments, {_trg_skipped} edges passed over, timestamps against the independent "
+      f"edge list: worst {_trg_dt * _trg_fs:.1e} samples, closest pair "
+      f"{np.diff(_trg_stamps).min() * 1e6:.3f} us (holdoff 5 us)")
+
+# averaging: a clock, so every trigger sees the same waveform and only the noise differs
+_trg_cg = Grid(fs=1e9, n=1000 * 300)
+_trg_n, _trg_rms = 64, 0.05
+
+
+def _trg_clock(**kw):
+    return (Signal(seed=7, grid=_trg_cg).carrier("cmos", v_lo=0.0, v_hi=1.0, f_hz=1e6,
+                                                 tr_s=5e-9).rx_noise(rms=_trg_rms)
+            .trigger(pre_s=50e-9, post_s=400e-9, level=0.5, hysteresis=0.4, **kw))
+
+
+_trg_one = _trg_clock(n_segments=_trg_n).waveform().reshape(_trg_n, -1)
+_trg_avg = _trg_clock(average=_trg_n).waveform()
+_trg_flat = slice(100, 440)                                   # the settled high level
+_trg_s1 = float(_trg_one[:, _trg_flat].std(1).mean())
+_trg_sn = float(_trg_avg[_trg_flat].std())
+check("averaging n triggers is the mean of those n windows and cuts uncorrelated noise by "
+      "sqrt(n)",
+      np.allclose(_trg_avg, _trg_one.mean(0), rtol=0, atol=1e-15)
+      and abs(_trg_s1 / _trg_rms - 1) < 0.05
+      and abs(_trg_sn / (_trg_rms / np.sqrt(_trg_n)) - 1) < 0.15,
+      f"noise {_trg_s1 * 1e3:.2f} mV single, {_trg_sn * 1e3:.3f} mV after {_trg_n} "
+      f"(sqrt(n) predicts {_trg_rms / np.sqrt(_trg_n) * 1e3:.3f} mV, bound 15 %)")
+
+# trigger jitter MOVES a record and does not smear it; only averaging smears (BACKLOG #50)
+_trg_tr, _trg_sig_j = 20e-9, 6e-9
+_trg_pg = Grid(fs=1e9, n=1000 * 300)
+
+
+def _trg_edge(**kw):
+    return (Signal(seed=1, grid=_trg_pg).carrier("cmos", v_lo=0.0, v_hi=1.0, f_hz=1e6,
+                                                 tr_s=_trg_tr)
+            .trigger(pre_s=100e-9, post_s=100e-9, level=0.5, jitter_s=_trg_sig_j, **kw))
+
+
+def _trg_rise(y):
+    k = np.arange(len(y))
+    m = (k > 20) & (k < 180)
+    return float(np.interp(0.9, y[m], k[m]) - np.interp(0.1, y[m], k[m])) / 1e9
+
+
+_trg_src = Signal(seed=1, grid=_trg_pg).carrier("cmos", v_lo=0.0, v_hi=1.0, f_hz=1e6,
+                                               tr_s=_trg_tr).waveform()
+_trg_i0 = 200 + int(np.argmax((_trg_src[200:-1] < 0.5) & (_trg_src[201:] >= 0.5)))
+_trg_r0 = _trg_rise(_trg_src[_trg_i0 - 100:_trg_i0 + 100])     # a rising edge of the source
+_trg_r1 = _trg_rise(_trg_edge().waveform())
+_trg_shots = _trg_edge(n_segments=256).waveform().reshape(256, -1)
+_trg_ra = _trg_rise(_trg_edge(average=256).waveform())
+# the average is the single edge convolved with the jitter's Gaussian (and the half-sample
+# rounding): do that convolution numerically on the first shot
+_trg_u = np.linspace(-6, 6, 2401)
+_trg_w = np.exp(-_trg_u ** 2 / 2); _trg_w /= _trg_w.sum()
+_trg_k = np.arange(200.0)
+_trg_pred = np.array([(_trg_w * np.interp(_trg_k[i] - _trg_u * _trg_sig_j * 1e9, _trg_k,
+                                          _trg_shots[0])).sum() for i in range(200)])
+_trg_rp = _trg_rise(_trg_pred)
+check("trigger jitter moves the window without smearing the record; averaging jittered "
+      "triggers smears the edge by the jitter's Gaussian",
+      abs(_trg_r1 / _trg_r0 - 1) < 1e-9 and _trg_rp > 1.15 * _trg_r0
+      and abs(_trg_ra / _trg_rp - 1) < 0.10,
+      f"10-90 % rise: source {_trg_r0 * 1e9:.2f} ns, one jittered record {_trg_r1 * 1e9:.2f} ns, "
+      f"average of 256 {_trg_ra * 1e9:.2f} ns against {_trg_rp * 1e9:.2f} ns predicted "
+      f"(bound 10 %)")
+
+# no silent untriggered record: the refusal's render length is enough, and one period less is not
+_trg_ck = Signal(grid=Grid(fs=1e9, n=20000)).carrier("sine", f_hz=5e6).waveform()
+try:
+    _TRG.apply(_trg_ck, 1e9, pre_s=100e-9, post_s=300e-9, level=0.0, n_segments=60)
+    _trg_msg = ""
+except ValueError as _trg_err:
+    _trg_msg = str(_trg_err)
+_trg_m = _trg_re.search(r"needs about (\d+) samples", _trg_msg)
+_trg_need = int(_trg_m.group(1)) if _trg_m else 0
+_trg_more = Signal(grid=Grid(fs=1e9, n=max(_trg_need, 1))).carrier("sine", f_hz=5e6).waveform()
+_trg_ok = len(_TRG.apply(_trg_more, 1e9, pre_s=100e-9, post_s=300e-9, level=0.0,
+                         n_segments=60)) == 60 * 400 if _trg_need else False
+try:
+    _TRG.apply(_trg_more[:_trg_need - 400], 1e9, pre_s=100e-9, post_s=300e-9, level=0.0,
+               n_segments=60)
+    _trg_tight = False
+except ValueError:
+    _trg_tight = True
+check("too few triggers is refused with a render length, and that length is enough and "
+      "not generous",
+      _trg_ok and _trg_tight,
+      f"20000 samples held 50 of 60; the refusal asked for {_trg_need}, which triggers 60, "
+      f"and {_trg_need - 400} does not")
+
+# events of the long render are re-timed into the window; the rest are dropped and counted
+_trg_evg = Grid(fs=2e9, baud=2e9 / 128, n=1024 * 128)
+
+
+def _trg_marked():
+    return (Signal(seed=3, grid=_trg_evg).carrier("nrz", n_ui=1024, pattern="prbs7")
+            .events("glitch", on="symbols", count=12).lossy(loss_db=3.0, loss_at_ghz=0.02))
+
+
+_trg_lx, _trg_lev = _trg_marked().realize()
+_trg_wx, _trg_wev = _trg_marked().trigger(pre_s=2e-6, post_s=6e-6, level=0.0,
+                                          n_segments=3, holdoff_s=20e-6).realize()
+_trg_tr_ev = [e for e in _trg_wev if e.kind == "trigger"]
+_trg_kept = [e for e in _trg_wev if e.kind == "glitch"]
+_trg_nw = len(_trg_wx) // 3
+_trg_want_ev = sorted((t.params["segment"] * _trg_nw + e.sample - t.params["start"])
+                      for e in _trg_lev for t in _trg_tr_ev
+                      if t.params["start"] <= e.sample < t.params["start"] + _trg_nw)
+check("an event of the long render is re-timed into the window that holds it, and those in "
+      "no window are dropped and counted rather than left pointing past the record",
+      sorted(e.sample for e in _trg_kept) == _trg_want_ev and len(_trg_kept) >= 1
+      and _trg_tr_ev[0].params["dropped"] == len(_trg_lev) - len(_trg_kept) >= 1
+      and all(0 <= e.sample < len(_trg_wx) for e in _trg_wev)
+      and float(_trg_wev.mask().sum()) == float(sum(
+          min(e.sample + e.width, len(_trg_wx)) - e.sample for e in _trg_kept)),
+      f"{len(_trg_lev)} glitches in the long render: {len(_trg_kept)} inside the 3 windows, "
+      f"{_trg_tr_ev[0].params['dropped']} dropped; the 3 trigger events mark no samples")
+# ============================================================ I/Q recordings (GitHub #82)
+print("\n== I/Q recordings in open formats: interleaved binary and SigMF, in and out ==")
+import hashlib as _iqf_hl, json as _iqf_json, tempfile as _iqf_tmp                # noqa: E402
+import wfmsynth as _iqf_ws                                                        # noqa: E402
+from wfmsynth import iqfile as _IQF                                               # noqa: E402
+_iqf_g = Grid(fs=250e6, baud=25e6, n=1 << 13, domain="iq", fc_hz=1e9)
+_iqf_x = Signal(seed=1, grid=_iqf_g).iq("qam16", prbs=15).waveform()
+_iqf_d = _iqf_tmp.mkdtemp()
+_iqf_fs = dict(fs_hz=250e6, fc_hz=1e9)
+
+
+def _iqf_parts(z):
+    return np.c_[z.real, z.imag].ravel()
+
+
+# float32, against numpy alone in BOTH directions: our writer read by np.fromfile, and a file
+# np.tofile wrote read by our reader
+_iqf_x32 = _iqf_x.astype(np.complex64).astype(complex)
+_IQF.to_interleaved(f"{_iqf_d}/f.iq", _iqf_x32)
+_iqf_a = np.array_equal(np.fromfile(f"{_iqf_d}/f.iq", "<f4"), _iqf_parts(_iqf_x32))
+_iqf_parts(_iqf_x32).astype(">f4").tofile(f"{_iqf_d}/g.iq")
+_iqf_b = np.array_equal(_iqf_ws.read_iq(f"{_iqf_d}/g.iq", format="iq_interleaved",
+                                        dtype="float32", byteorder="big",
+                                        **_iqf_fs).waveform(), _iqf_x32)
+_IQF.to_interleaved(f"{_iqf_d}/h.iq", _iqf_x)
+_iqf_e32 = np.abs(_iqf_parts(_iqf_ws.read_iq(f"{_iqf_d}/h.iq", format="iq_interleaved",
+                                             dtype="float32", **_iqf_fs).waveform()
+                             - _iqf_x)).max() / np.abs(_iqf_x).max()
+check("a float32 I/Q file round-trips exactly, checked against numpy's own reader and writer",
+      _iqf_a and _iqf_b and _iqf_e32 <= 2.0 ** -24,
+      f"float32 samples: 0 error both ways; a float64 record written as float32 moves by "
+      f"{_iqf_e32:.1e} of its peak (bound 2**-24 = {2.0 ** -24:.1e})")
+
+_iqf_s = float(np.abs(_iqf_parts(_iqf_x)).max()) / 32767
+_IQF.to_interleaved(f"{_iqf_d}/i.iq", _iqf_x, dtype="int16", scale=_iqf_s)
+_iqf_cnt = np.fromfile(f"{_iqf_d}/i.iq", "<i2")
+_iqf_back = _iqf_ws.read_iq(f"{_iqf_d}/i.iq", format="iq_interleaved", dtype="int16",
+                            scale=_iqf_s, **_iqf_fs).waveform()
+_iqf_e16 = np.abs(_iqf_parts(_iqf_back - _iqf_x)).max() / _iqf_s
+check("an int16 I/Q file holds the record within one LSB (half a count, by rounding)",
+      np.array_equal(_iqf_cnt, np.rint(_iqf_parts(_iqf_x) / _iqf_s))
+      and _iqf_e16 <= 0.5 + 1e-9 and int(np.abs(_iqf_cnt).max()) == 32767,
+      f"worst error {_iqf_e16:.4f} LSB over {_iqf_cnt.size} values (bound 0.5), "
+      f"peak {int(np.abs(_iqf_cnt).max())} counts")
+
+# SigMF: the metadata is read back with json alone, and the events through the chain
+_iqf_ev = _iqf_ws.EventList([
+    _iqf_ws.Event(sample=100, kind="burst_start", width=1, t_s=100 / 250e6, placement="burst/2"),
+    _iqf_ws.Event(sample=4000, kind="glitch", width=37, severity=0.8, direction=-1.0,
+                  t_s=4000 / 250e6, placement="edges", params={"f0": 1.5e9})], n=len(_iqf_x))
+_iqf_o = _IQF.to_sigmf(f"{_iqf_d}/rec", _iqf_x, _iqf_g, events=_iqf_ev, dtype="int16",
+                       scale=_iqf_s)
+_iqf_m = _iqf_json.load(open(_iqf_o["meta"]))
+_iqf_sig = _iqf_ws.read_iq(f"{_iqf_d}/rec", format="sigmf")
+_iqf_y, _iqf_got = _iqf_sig.realize()
+check("a SigMF recording carries the required fields, and its rate, centre and annotations "
+      "come back as the record's grid and events",
+      _iqf_m["global"]["core:datatype"] == "ci16_le" and _iqf_m["global"]["core:version"] == "1.0.0"
+      and _iqf_m["global"]["core:sha512"] == _iqf_hl.sha512(open(_iqf_o["data"], "rb").read()).hexdigest()
+      and [a["core:sample_start"] for a in _iqf_m["annotations"]] == [100, 4000]
+      and _iqf_m["annotations"][1]["core:sample_count"] == 37
+      and (_iqf_sig.grid.fs, _iqf_sig.grid.fc_hz, _iqf_sig.grid.n) == (250e6, 1e9, len(_iqf_x))
+      and _iqf_got.to_dicts() == _iqf_ev.to_dicts() and np.array_equal(_iqf_y, _iqf_back),
+      f"{len(_iqf_got)} events equal to the {len(_iqf_ev)} written, field for field; samples "
+      f"identical to the interleaved int16 file's")
+
+# the byte-order check, both ways round, at five levels and on two kinds of record
+_iqf_rng = np.random.default_rng(0)
+_iqf_w = 0.2 * (_iqf_rng.standard_normal(1 << 13) + 1j * _iqf_rng.standard_normal(1 << 13))
+_iqf_caught, _iqf_false, _iqf_n = [], 0, 0
+for _iqf_v in (_iqf_x, _iqf_w):                    # QAM-16 at 10 samples/symbol; white noise
+    for _iqf_db in (0, -6, -20, -40, -60):
+        _iqf_c = np.rint(_iqf_parts(_iqf_v) / np.abs(_iqf_parts(_iqf_v)).max()
+                         * 32767 * 10 ** (_iqf_db / 20)).astype("<i2")
+        _iqf_n += 1
+        _iqf_false += _IQF.byte_order_evidence(_iqf_c, _iqf_c.dtype) is not None
+        if _IQF.byte_order_evidence(_iqf_c.byteswap(), _iqf_c.dtype) is not None:
+            _iqf_caught.append(_iqf_db)
+try:
+    _iqf_cnt.byteswap().tofile(f"{_iqf_d}/sw.iq")
+    _iqf_ws.read_iq(f"{_iqf_d}/sw.iq", format="iq_interleaved", dtype="int16", scale=_iqf_s,
+                    **_iqf_fs)
+    _iqf_msg = ""
+except ValueError as _iqf_err:
+    _iqf_msg = str(_iqf_err)
+check("a byte-swapped int16 file is refused with the likely cause, and a correctly read one "
+      "never is", _iqf_false == 0 and "probably big-endian" in _iqf_msg
+      and len(_iqf_caught) == _iqf_n == 10,
+      f"{len(_iqf_caught)} of {_iqf_n} swapped files caught (full scale to -60 dB, a shaped "
+      f"signal and white noise), {_iqf_false} of {_iqf_n} correct files flagged")
+
+# the digest is over the samples: two formats, one sha256; and embed needs no file afterwards
+_IQF.to_interleaved(f"{_iqf_d}/e.iq", _iqf_x, dtype="float64", byteorder="big")
+_IQF.to_sigmf(f"{_iqf_d}/e", _iqf_x, _iqf_g, dtype="float64")
+_iqf_p = _iqf_ws.read_iq(f"{_iqf_d}/e.iq", format="iq_interleaved", dtype="float64",
+                         byteorder="big", embed=True, **_iqf_fs)
+_iqf_q = _iqf_ws.read_iq(f"{_iqf_d}/e", format="sigmf")
+_iqf_r = _iqf_json.loads(_iqf_json.dumps(_iqf_p.recipe()))
+import shutil as _iqf_sh                                                          # noqa: E402
+_iqf_sh.rmtree(_iqf_d)
+check("the capture digest covers the samples, not the file: two formats give one sha256, and "
+      "an embedded recording replays with every file deleted",
+      _iqf_p.ops[0]["sha256"] == _iqf_q.ops[0]["sha256"] == _iqf_ws.capture.digest(_iqf_x)
+      and np.array_equal(Signal.from_recipe(_iqf_r).waveform(), _iqf_x),
+      f"sha256 {_iqf_p.ops[0]['sha256'][:12]}... for big-endian float64 and SigMF cf64_le alike")
+# ============================================================ I/Q impairments (GitHub #83)
+# Seven ops on a complex baseband record, one effect each (wfmsynth/rf.py). Each is measured
+# back off the record by a method that shares no code with the op. The probe is a complex tone
+# exactly on an FFT bin, so a bin IS a tone and no window sits between the record and the
+# number. Where the measurement is an estimate, its standard error is stated and printed.
+print("\nI/Q impairments (GitHub #83)")
+import json as _rjson                                                       # noqa: E402
+from wfmsynth import Grid as _RGrid, Signal as _RSig, Streams as _RSt       # noqa: E402
+from wfmsynth import iq as _RIQ, rf as _RRF                                 # noqa: E402
+_rfs, _rn, _rk = 400e6, 1 << 16, 1001
+_rg = _RGrid(fs=_rfs, baud=25e6, n=_rn, domain="iq", fc_hz=2.4e9)
+
+
+def _rtone(grid=_rg):
+    return _RSig(seed=3, grid=grid).capture(
+        values=np.exp(2j * np.pi * _rk * np.arange(grid.n) / grid.n))
+
+
+def _rbins(y):
+    return np.fft.fft(y) / len(y)
+
+
+def _rrefused(build):
+    try:
+        build().waveform()
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+_rY = _rbins(_rtone().iq_imbalance(gain_db=0.5, phase_deg=3.0).waveform())
+_rimg = 20 * np.log10(abs(_rY[_rk]) / abs(_rY[-_rk]))
+_rgl, _rc = 10 ** (0.5 / 20), np.cos(np.deg2rad(3.0))
+_rwant = 10 * np.log10((1 + 2 * _rgl * _rc + _rgl ** 2) / (1 - 2 * _rgl * _rc + _rgl ** 2))
+_rY = _rbins(_rtone().iq_imbalance(**_RRF.imbalance_for(30)).waveform())
+_rimg30 = 20 * np.log10(abs(_rY[_rk]) / abs(_rY[-_rk]))
+check("iq_imbalance: the image tone sits where the closed-form rejection ratio puts it, and "
+      "imbalance_for(30) makes a 30 dB image",
+      abs(_rimg - _rwant) < 1e-9 and abs(_RRF.image_rejection_db(0.5, 3.0) - _rwant) < 1e-9
+      and abs(_rimg30 - 30) < 1e-9,
+      f"0.5 dB / 3 deg: image {_rimg:.4f} dB down, closed form {_rwant:.4f} dB; "
+      f"imbalance_for(30) -> {_rimg30:.6f} dB")
+
+_rcfo = _rtone().freq_offset(f_hz=12345.0, drift_hz_per_s=5e6)
+_rph = np.unwrap(np.angle(_rcfo.waveform() * np.conj(_rtone().waveform())))
+_rc2, _rc1, _ = np.polyfit(np.arange(_rn) / _rfs, _rph, 2)
+_rdc = _rtone().iq_offset(i=0.02, q=-0.01).waveform().mean()
+check("freq_offset is the slope and curvature of the phase, lo_phase() is that phase, and "
+      "iq_offset is the record's mean",
+      abs(_rc1 / (2 * np.pi) - 12345.0) < 1e-6 and abs(_rc2 / np.pi - 5e6) < 1e-2
+      and np.abs(_rph - _rcfo.lo_phase()).max() < 1e-12 and abs(_rdc - (0.02 - 0.01j)) < 1e-15,
+      f"asked 12345 Hz + 5e6 Hz/s: fitted {_rc1 / (2 * np.pi):.6f} Hz, {_rc2 / np.pi:.4f} Hz/s; "
+      f"mean {_rdc:.5f}")
+
+_rprof = [(1e4, -70), (1e5, -90), (1e6, -120), (2e7, -130)]
+_rg2 = _RGrid(fs=_rfs, baud=25e6, n=1 << 18, domain="iq", fc_hz=2.4e9)
+_rth = np.angle(_rtone(_rg2).phase_noise(_rprof).waveform() * np.conj(_rtone(_rg2).waveform()))
+_rf = np.fft.rfftfreq(_rg2.n, 1 / _rfs)[1:]
+_rpsd = 2 * np.abs(np.fft.rfft(_rth)[1:]) ** 2 / (_rg2.n * _rfs)          # one-sided, rad^2/Hz
+_rl = 2 * 10 ** (_RRF.profile_dbc_hz(_rf, _rprof) / 10)
+_rbands = []
+for _rlo, _rhi in ((1e4, 1e5), (1e5, 1e6), (1e6, 2e7)):
+    _rm = (_rf >= _rlo) & (_rf <= _rhi)
+    _rbands.append((int(_rm.sum()), float(np.mean(_rpsd[_rm] / _rl[_rm]))))
+check("phase_noise: a periodogram of the phase read off the record is 2*L(f) in every decade, "
+      "within 4 standard errors (1/sqrt(bins) each), and empty outside the stated offsets",
+      all(abs(r - 1) < 4 / np.sqrt(m) for m, r in _rbands)
+      and _rpsd[_rl == 0].max() < 1e-25 * _rpsd[_rl > 0].max(),
+      "; ".join(f"{m} bins {10 * np.log10(r):+.2f} dB (s.e. {10 * np.log10(1 + 1 / np.sqrt(m)):.2f})"
+                for m, r in _rbands)
+      + f"; this record's rms {_rth.std():.4f} rad, the profile integrates to "
+        f"{_RRF.phase_rms_rad(_rprof):.4f}")
+
+_rP = np.abs(_rbins(_rtone().awgn(snr_db=20, bw_hz=_rfs / 16).waveform())) ** 2
+_rin = np.abs(np.fft.fftfreq(_rn, 1 / _rfs)) <= _rfs / 32
+_rin[_rk] = False
+_rsnr = 10 * np.log10(_rP[_rk] / _rP[_rin].sum())
+_rq = _RSig(seed=5, grid=_rg).iq("qpsk", prbs=15, prbs_phase=100).awgn(es_n0_db=15,
+                                                                      ref_power=1.0)
+_rsent, _ = _rq.transmitted()
+_resn0 = -20 * np.log10(_RIQ.evm(_RIQ.demodulate(_rq.waveform(), _rg)[10:-10], _rsent[10:-10]))
+_rse = 10 * np.log10(1 + 1 / np.sqrt(len(_rsent) - 20))
+check("awgn hits the stated ratio: SNR in the stated bandwidth read off a tone's spectrum, "
+      "Es/N0 read off the error vector of matched-filtered QPSK, each within 4 standard errors",
+      abs(_rsnr - 20) < 10 * np.log10(1 + 4 / np.sqrt(_rin.sum())) and abs(_resn0 - 15) < 4 * _rse,
+      f"asked 20 dB in fs/16: {_rsnr:.3f} dB over {int(_rin.sum())} bins; asked Es/N0 15 dB: "
+      f"{_resn0:.3f} dB over {len(_rsent) - 20} symbols (s.e. {_rse:.3f} dB)")
+check("awgn refuses an SNR with no bandwidth, and two statements of one noise density",
+      "ambiguous without bw_hz=" in _rrefused(lambda: _rtone().awgn(snr_db=20))
+      and "exactly one of" in _rrefused(lambda: _rtone().awgn(snr_db=20, bw_hz=1e6, es_n0_db=3)))
+
+_rY = _rbins(_rtone().spur(f_hz=-3000 * _rfs / _rn, dbc=-45.0).waveform())
+_rsp = 20 * np.log10(abs(_rY[-3000]) / abs(_rY[_rk]))
+check("spur: its bin against the carrier's is the stated dBc", abs(_rsp + 45.0) < 1e-9,
+      f"asked -45 dBc, measured {_rsp:.6f}")
+
+_rdq = []
+for _rb in (8, 10, 12, 14):
+    _rP = np.abs(_rbins(_rtone().dac(bits=_rb).waveform())) ** 2
+    _rdq.append((_rb, 10 * np.log10(_rP[_rk] / np.delete(_rP, _rk).sum())))
+_rclip = _rtone().dac(bits=12, headroom_pct=100 / 1.3 - 100, clip="hard").rf_report()[0]
+_rasin = 2 * np.arccos(1 / 1.3) / np.pi
+check("dac: a full-scale tone's quantisation noise is 6.02 N + 1.76 dB down (bound 0.15 dB), "
+      "and one driven 30 % over clips for the arcsine law's share of the time, once asked to",
+      all(abs(q - (6.02 * b + 1.76)) < 0.15 for b, q in _rdq)
+      and abs(_rclip["clipped_fraction"] - _rasin) < 2e-3
+      and "Pass clip='hard'" in _rrefused(lambda: _rtone().dac(bits=12, headroom_pct=-20)),
+      "; ".join(f"{b} bits {q:.2f} dB ({q - (6.02 * b + 1.76):+.2f})" for b, q in _rdq)
+      + f"; clipped {_rclip['clipped_fraction']:.4f}, arcsine law {_rasin:.4f}")
+
+_rall = (_RSig(seed=5, grid=_RGrid(fs=400e6, baud=25e6, n=1 << 14, domain="iq", fc_hz=2.4e9))
+         .iq("qam16", prbs=15).dac(bits=10, headroom_pct=5)
+         .iq_imbalance(gain_db=0.3, phase_deg=2.0).iq_offset(i=0.01)
+         .phase_noise(profile=[(1e5, -80), (1e6, -100), (1e7, -120)])
+         .freq_offset(f_hz=12e3).spur(f_hz=40e6, dbc=-45).awgn(es_n0_db=20))
+_rre = _RSig.from_recipe(_rjson.loads(_rjson.dumps(_rall.recipe())))
+_ra, _rbb = _rall.waveform(), _rall.contrast("phase_noise/4")
+check("the whole impaired chain replays bit-identically from its recipe, and its oscillator "
+      "and its noise are separate roles",
+      np.array_equal(_rre.waveform(), _ra) and _rre.sha256() == _rall.sha256()
+      and _rall.roles() == ["phase_noise/4", "awgn/7"] and np.abs(_ra - _rbb).max() > 1e-3
+      and np.array_equal(_rall.contrast("awgn/7", seed=5), _ra),
+      f"roles {_rall.roles()}; re-rolling the oscillator moved the record by "
+      f"{np.abs(_ra - _rbb).max():.3f}")
+print("== RF measures against ground truth: spectrum, CCDF, ACLR and an EVM that hides "
+      "nothing (GitHub #84) ==")
+from wfmsynth import rf as _RF                                              # noqa: E402
+_wg = Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
+_wt = np.arange(_wg.n) / _wg.fs
+_wsig = Signal(seed=1, grid=_wg).iq("qam16", prbs=15, prbs_phase=100)
+_wx, _wsent = _wsig.waveform(), _wsig.transmitted()[0]
+_wrng = np.random.default_rng(84)
+
+
+def _wnoise(n, var):
+    return np.sqrt(var / 2) * (_wrng.standard_normal(n) + 1j * _wrng.standard_normal(n))
+
+
+_wa, _wf0 = 0.7, 12.3456e6
+_wsp = _RF.spectrum(_wa * np.exp(2j * np.pi * _wf0 * _wt), _wg, rbw_hz=100e3, window="flattop")
+_wk = int(np.argmax(_wsp["psd_per_hz"]))
+_wpk = _wsp["psd_per_hz"][_wk] * _wsp["rbw_hz"] / _wa ** 2
+_wbp = _RF.band_power(_wsp, _wf0 - 1e6, _wf0 + 1e6) / _wa ** 2
+check("a tone's spectrum peaks at its frequency, and its power is its amplitude squared -- "
+      "integrated over a band, and read off the peak as density times resolution bandwidth",
+      abs(_wsp["f_hz"][_wk] - _wf0) <= _wsp["bin_hz"] and abs(_wbp - 1) < 1e-6
+      and abs(_wpk - 1) < 2e-3,
+      f"peak at {_wsp['f_hz'][_wk] / 1e6:.4f} MHz (tone {_wf0 / 1e6:.4f}, bin "
+      f"{_wsp['bin_hz'] / 1e3:.1f} kHz); band power / A^2 = 1{_wbp - 1:+.1e} (bound 1e-6); "
+      f"peak x rbw / A^2 = {_wpk:.4f} (bound 2e-3, flat-top, rbw {_wsp['rbw_hz'] / 1e3:.1f} kHz)")
+_wlv = np.array([0.0, 3.0, 6.0, 8.0])
+_wcc = _RF.ccdf(_wnoise(1 << 20, 1.0), levels_db=_wlv)
+_wlaw = np.exp(-10 ** (_wlv / 10))
+_wse = np.sqrt(_wlaw * (1 - _wlaw) / _wcc["n"])            # a count's own standard error
+_wce = float((np.abs(_wcc["probability"] - _wlaw) / _wse).max())
+check("the CCDF of complex Gaussian noise is the exponential law, P(power > r x mean) = exp(-r)",
+      _wce < 4.0,
+      f"at +0/3/6/8 dB: measured {np.array2string(_wcc['probability'], precision=5)} against "
+      f"{np.array2string(_wlaw, precision=5)}; worst miss {_wce:.2f} standard errors of the "
+      f"count (bound 4; 2^20 samples, so {100 * _wse[-1] / _wlaw[-1]:.1f} % at +8 dB)")
+_wother = Signal(seed=1, grid=_wg).iq("qam16", prbs=15, prbs_phase=5000).waveform()
+_winj = 10 ** (-40 / 20) * _wother * np.exp(2j * np.pi * 40e6 * _wt)
+_wwant = 10 * np.log10(np.mean(np.abs(_wx) ** 2) / np.mean(np.abs(_winj) ** 2))
+_wac = _RF.aclr(_wx + _winj, _wg, channel_bw_hz=1.35 * 25e6, offsets_hz=[-40e6, 40e6])
+check("ACLR reads a neighbour injected at a known level, and the empty side reads the source's "
+      "own skirt", abs(_wac["aclr_db"][1] - _wwant) < 0.1 and _wac["aclr_db"][0] > 55,
+      f"injected {_wwant:.2f} dB below the channel, measured {_wac['aclr_db'][1]:.2f} dB "
+      f"(bound 0.1 dB); the other side {_wac['aclr_db'][0]:.1f} dB; rbw "
+      f"{_wac['rbw_hz'] / 1e3:.0f} kHz")
+_wclean = _RF.evm(_wx, _wg, _wsent)
+check("EVM of a clean record against the transmitted symbols is below the stated floor, with "
+      "nothing fitted and no symbol left out",
+      _wclean["evm"] < 0.005 and _wclean["removed"] == {} and _wclean["skip"] == 0,
+      f"{_wclean['evm_pct']:.3f} % over {_wclean['n_symbols']} symbols (floor 0.5 %: the "
+      f"16-symbol truncation of the pulse, and the burst's two ends)")
+_wawgn = []
+for _wdb in (30.0, 20.0, 10.0):
+    _wn = _wnoise(_wg.n, _wg.fs / (_wg.baud * 10 ** (_wdb / 10)))
+    _wawgn.append((_wdb, _RF.evm(_wx + _wn, _wg, _wsent, skip=8),
+                   _RF.evm(_wx + _wn, _wg, _wsent, skip=8, reference="decided",
+                           constellation="qam16")))
+check("EVM against truth in white noise is the analytic 10^(-EsN0/20), at 30, 20 and 10 dB",
+      all(abs(_t["evm"] / 10 ** (-_d / 20) - 1) < 0.04 for _d, _t, _ in _wawgn),
+      "; ".join(f"{_d:.0f} dB: {_t['evm_pct']:.2f} % against {100 * 10 ** (-_d / 20):.2f} %"
+                for _d, _t, _ in _wawgn) + " (bound 4 %, 4080 symbols)")
+_wd10, _wt10, _wb10 = _wawgn[-1]
+check("  ... and a DECIDED reference reads low once decisions fail, by an amount only the "
+      "truth can state", _wb10["decision_errors"] > 500 and _wb10["evm"] < 0.9 * _wt10["evm"]
+      and _wawgn[0][2]["decision_errors"] == 0
+      and abs(_wawgn[0][2]["evm"] - _wawgn[0][1]["evm"]) < 1e-12,
+      f"at 10 dB: decided {_wb10['evm_pct']:.2f} % against truth {_wt10['evm_pct']:.2f} %, "
+      f"{_wb10['decision_errors']} of {_wb10['n_symbols']} decisions wrong; at 30 dB none, and "
+      f"the two agree")
+_wimp = 0.8 * np.exp(0.3j) * _wx
+_wraw = _RF.evm(_wimp, _wg, _wsent, skip=8)
+_wfit = _RF.evm(_wimp, _wg, _wsent, skip=8, correct=("gain", "phase"))
+check("EVM does not hide an impairment: a gain of 0.8 and a 0.3 rad rotation count in full "
+      "unless named, and naming them returns what was removed",
+      abs(_wraw["evm"] / abs(0.8 * np.exp(0.3j) - 1) - 1) < 0.01 and _wraw["removed"] == {}
+      and _wfit["evm"] < 0.005 and abs(_wfit["removed"]["gain_db"] - 20 * np.log10(0.8)) < 1e-3
+      and abs(_wfit["removed"]["phase_rad"] - 0.3) < 1e-4,
+      f"raw {_wraw['evm_pct']:.2f} % (|0.8 e^(0.3j) - 1| = "
+      f"{100 * abs(0.8 * np.exp(0.3j) - 1):.2f} %); corrected {_wfit['evm_pct']:.3f} % with "
+      f"removed gain {_wfit['removed']['gain_db']:+.4f} dB and phase "
+      f"{_wfit['removed']['phase_rad']:+.5f} rad")
+_wtau = 0.23 / _wg.baud
+_wlate = np.fft.ifft(np.fft.fft(_wx) * np.exp(-2j * np.pi * np.fft.fftfreq(_wg.n, 1 / _wg.fs)
+                                              * _wtau))
+_wtim = _RF.evm(_wlate, _wg, _wsent, skip=8, correct=("timing",))
+_wtraw = _RF.evm(_wlate, _wg, _wsent, skip=8)
+check("  ... and a record 0.23 symbol late is found late by that much",
+      _wtraw["evm"] > 0.25 and _wtim["evm"] < 0.005
+      and abs(_wtim["removed"]["timing_s"] - _wtau) * _wg.baud < 1e-3,
+      f"raw {_wtraw['evm_pct']:.1f} %; with timing named {_wtim['evm_pct']:.3f} %, removed "
+      f"{_wtim['removed']['timing_s'] * 1e9:.4f} ns of {_wtau * 1e9:.4f} ns (bound 1e-3 symbol)")
+_wpg = Grid(fs=8e9, baud=25e6, n=1 << 18, domain="iq", fc_hz=1e9)
+_wps = (Signal(seed=1, grid=_wpg).iq("qam16", prbs=15, prbs_phase=100).upconvert()
+        .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out_hz=250e6))
+_wpx = _wps.waveform()
+_wpe = _RF.evm(_wpx, _wps.stored_grid(_wpx), _wps.transmitted()[0], skip=8)
+check("the same EVM on a real passband record, through downconvert at a decimated rate",
+      _wpe["evm"] < 0.005 and _wpe["removed"] == {},
+      f"{_wpe['evm_pct']:.3f} % over {_wpe['n_symbols']} symbols at "
+      f"{_wps.stored_grid(_wpx).fs / 1e6:.0f} MSa/s, nothing fitted (floor 0.5 %)")
+
+print("\n== the seams between the pieces: one trigger, one oscillator, an envelope and a "
+      "voltage in one record ==")
+import wfmsynth as _sws
+from wfmsynth import trigger as _STRIG
+_sg = Grid(fs=320e9, baud=10e9, n=1 << 14)
+_slanes = {"clk_line": Signal().carrier("square", f_hz=5e9).lossy(loss_db=2.0, loss_at_ghz=5.0),
+           "tx": Signal().carrier("nrz", n_ui=512, seed=5).lossy(loss_db=4.0, loss_at_ghz=5.0)}
+_srec = _sws.Channels(
+    {"clk": Signal().use("clk_line").use("scope"), "data": Signal().use("tx").use("scope")},
+    shared=dict(_slanes, scope=Signal().trigger(on=Signal().use("clk_line"), pre_s=50e-12,
+                                                post_s=350e-12, level=0.0, n_segments=6,
+                                                holdoff_s=4e-9)), seed=3, grid=_sg)
+_sx, _sev = _srec.realize()
+_slong = _sws.Channels({"clk": Signal().use("clk_line"), "data": Signal().use("tx")},
+                       shared=_slanes, seed=3, grid=_sg).waveforms()
+_sfire = _STRIG.find(_slong["clk"], _sg.fs, level=0.0)["t_s"]
+_sst = [(e.params["start"], e.params["timestamp_s"]) for e in _sev["data"] if e.kind == "trigger"]
+_snw = len(_sx["data"]) // 6
+_sworst = max(float(np.min(np.abs(_sfire - t))) for _a, t in _sst) * _sg.fs
+check("a trigger taken from the clock cuts the DATA at the clock's crossings: every window is "
+      "the long render of that channel, sliced where an independent search finds a clock edge",
+      len(_sst) == 6 and _sworst < 1e-9
+      and all(np.array_equal(_sx[k][j * _snw:(j + 1) * _snw], _slong[k][a:a + _snw])
+              for k in _sx for j, (a, _t) in enumerate(_sst)),
+      f"6 windows of {_snw} samples in each of 2 channels equal the long render exactly; "
+      f"trigger times are clock crossings to {_sworst:.1e} samples")
+
+_sgi = Grid(fs=400e6, baud=5e6, n=1 << 15, domain="iq", fc_hz=60e6)
+_sprof = [(2e4, -70.0), (2e5, -90.0), (2e6, -110.0)]
+_slo = _sws.Channels(
+    {"a": Signal().iq("qpsk", prbs=9, prbs_seed=3).use("lo"),
+     "b": Signal().iq("qpsk", prbs=9, prbs_seed=5).use("lo")},
+    shared={"lo": Signal().phase_noise(profile=_sprof)}, seed=2, grid=_sgi).waveforms()
+_sown = _sws.Channels(
+    {"a": Signal().iq("qpsk", prbs=9, prbs_seed=3).phase_noise(profile=_sprof),
+     "b": Signal().iq("qpsk", prbs=9, prbs_seed=5).phase_noise(profile=_sprof)},
+    seed=2, grid=_sgi).waveforms()
+_scl = {k: Signal(seed=2, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=v).waveform()
+        for k, v in (("a", 3), ("b", 5))}
+_sbusy = (np.abs(_scl["a"]) > 0.2) & (np.abs(_scl["b"]) > 0.2)
+_sturn = {k: np.angle(_slo[k][_sbusy] / _scl[k][_sbusy]) for k in "ab"}
+_sind = {k: np.angle(_sown[k][_sbusy] / _scl[k][_sbusy]) for k in "ab"}
+_srms = float(_sturn["a"].std())
+_sdiff = float(np.abs(_sturn["a"] - _sturn["b"]).max())
+_sdind = float((_sind["a"] - _sind["b"]).std())
+check("one oscillator shared by name turns two different envelopes by the same phase, and an "
+      "oscillator each does not",
+      _sdiff < 1e-9 * _srms and _sdind > 0.5 * _srms,
+      f"shared: {_srms * 1e3:.2f} mrad rms on each channel, largest difference between the "
+      f"two {_sdiff:.1e} rad; an oscillator each: the two differ by {_sdind * 1e3:.2f} mrad "
+      f"rms (bound: more than half the shared rms)")
+
+_senv = Signal(seed=1, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=3)
+_snb = Signal(seed=1, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=11).freq_offset(f_hz=20e6)
+_srip = Signal().carrier("sine", f_hz=40e3, amp=0.2, offset=1.0)
+_sboth = Signal(seed=1, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=3).combine(
+    _snb, gains=[0.1]).gain(by=_srip)
+_sy = _sboth.waveform()
+from wfmsynth import iq as _SIQ
+_srr = _sboth.subchain("gain/2/by")
+_swant = (_SIQ.upconvert(_senv.waveform(), 60e6, 400e6)
+          + 0.1 * _SIQ.upconvert(_snb.waveform(), 60e6, 400e6)) * _srr
+_serr = float(np.abs(_SIQ.upconvert(_sy, 60e6, 400e6) - _swant).max())
+_ssp = _sws.rf.spectrum(_senv.combine(_snb, gains=[0.1]).waveform(), _sgi, rbw_hz=200e3)
+_sratio = 10 * np.log10(_sws.rf.band_power(_ssp, 16e6, 24e6) / _sws.rf.band_power(_ssp, -4e6, 4e6))
+check("on an I/Q record a `combine` sum and a `gain` by a real supply are what they are on the "
+      "passband: an interferer 20 MHz up and 20 dB down, the whole scaled by a 20 % ripple",
+      _serr < 1e-12 and _srr.dtype == np.float64 and abs(_sratio + 20.0) < 0.5,
+      f"upconverted envelope against the same sum and gain done on the real passband records: "
+      f"max difference {_serr:.1e}; neighbour measured {_sratio:.2f} dB against the channel "
+      f"(asked -20, bound 0.5 dB)")
+
+_sug = Grid(fs=20e9, n=1 << 13)
+
+
+def _slane(group=None):
+    return (Signal().carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=5e6, tr_s=0.2e-9)
+            .probe(r_source=_sws.tol(1e3, 20, group=group), c_load_f=2e-12))
+
+
+def _srise(x):
+    a = np.flatnonzero((x[:-1] < 0.33) & (x[1:] >= 0.33))[0]
+    b = a + np.flatnonzero(x[a:] >= 2.97)[0]
+    return ((b - 1 + (2.97 - x[b - 1]) / (x[b] - x[b - 1]))
+            - (a + (0.33 - x[a]) / (x[a + 1] - x[a]))) / _sug.fs
+
+
+_surec = _sws.Channels({"a": _slane(), "b": _slane(), "c": _slane("pack"), "d": _slane("pack")},
+                       seed=7, grid=_sug)
+_sur = {k: _surec.chains[k][1]["r_source"] for k in "abcd"}
+_suw = {u: r.waveforms() for u, r in (("this", _surec), ("other", _surec.unit(8)))}
+_sur2 = {k: _surec.unit(8).chains[k][1]["r_source"] for k in "abcd"}
+_suerr = max(abs(_srise(_suw[u][k]) / (np.log(9.0) * rr[k] * 2e-12) - 1)
+             for u, rr in (("this", _sur), ("other", _sur2)) for k in "abcd")
+check("a toleranced part in a several-channel record: the drawn resistor is the one in each "
+      "channel's edge, a group is ONE part across channels, and unit() draws them all again",
+      _suerr < 5e-3 and _sur["c"] == _sur["d"] and len({_sur["a"], _sur["b"], _sur["c"]}) == 3
+      and all(_sur2[k] != _sur[k] for k in "abcd") and _sur2["c"] == _sur2["d"],
+      f"10-90 % rise against ln(9) R C from the recipe, 4 channels x 2 units: worst "
+      f"{_suerr:.1e} (bound 5e-3); this unit {', '.join(f'{_sur[k]:.0f}' for k in 'abcd')} ohm "
+      f"(c and d share group 'pack'), the other "
+      f"{', '.join(f'{_sur2[k]:.0f}' for k in 'abcd')} ohm")
+
+# ---- `square` / `cmos`: every edge at its own time, to a fraction of a sample (0.46.0)
+# The instrument: a degree-7 polynomial through the 8 samples about each crossing, which shares
+# nothing with how the edge was generated. It is calibrated on the known answer first -- the
+# train as it was built before 0.46.0, `where(phase < duty)` on the samples, which must read one
+# whole sample peak to peak.
+_efs, _ef, _en = 64e9, 0.997e9, 1 << 15
+_espp = _efs / _ef
+
+
+def _etie(x, level):
+    s = np.asarray(x, float) - level
+    i = np.flatnonzero((s[:-1] < 0) != (s[1:] < 0))
+    i = i[(i > 0.1 * s.size) & (i < 0.9 * s.size)]
+    w = np.arange(-3, 5)
+    pp = []
+    for sign in (1, -1):
+        t = []
+        for k in i[np.sign(s[i + 1] - s[i]) == sign]:
+            r = np.polynomial.Polynomial.fit(w, s[k + w], 7).convert().roots()
+            r = r[np.abs(r.imag) < 1e-9].real
+            t.append(k + r[(r >= -1e-6) & (r <= 1 + 1e-6)][0])
+        t = np.asarray(t)
+        e = t - np.round((t - t[0]) / _espp) * _espp
+        pp.append(np.ptp(e) / _efs * 1e12)
+    return max(pp)
+
+
+_eg = Grid(fs=_efs, n=_en)
+_eold = np.where((_ef * np.arange(_en) / _efs) % 1.0 < 0.5, 1.0, -1.0)
+_ek = 0.15 * _espp
+_ebefore = _etie(P._shape_edges(_eold, _ek), 0.0)
+_esq = _etie(Signal(seed=1, grid=_eg).carrier("square", f_hz=_ef, tr_frac=0.15).waveform(), 0.0)
+_ecm = _etie(Signal(seed=1, grid=_eg).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=_ef,
+                                              tr_s=_ek / _efs).waveform(), 1.65)
+# the same train with SHORT edges, where the interpolator has less to work with: `square`'s
+# default tr_frac=0.05 is 3.2 samples here, and a 35 ps CMOS edge is 2.2
+_esq3 = _etie(Signal(seed=1, grid=_eg).carrier("square", f_hz=_ef).waveform(), 0.0)
+_ecm2 = _etie(Signal(seed=1, grid=_eg).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=_ef,
+                                               tr_s=35e-12).waveform(), 1.65)
+_eb3 = _etie(P._shape_edges(_eold, 0.05 * _espp), 0.0)
+_eduty = P.square(f_hz=1e9, duty=0.3, phase_rad=1.5 * np.pi, tr_frac=0.05, n=8192, fs=256e9)
+_eon = P.square(f_hz=10e6, n=4096, fs=10e9)
+_eon_old = P._shape_edges(np.where((10e6 * np.arange(4096) / 10e9) % 1.0 < 0.5, 1.0, -1.0),
+                          0.05 * 1000)
+check("a square and a CMOS clock that do not fit the grid carry no jitter of the grid's: each "
+      "edge is at its own time between samples, the duty is the one asked for, and a clock "
+      "whose edges are on samples is the record it was",
+      14.0 < _ebefore < 16.5 and 14.0 < _eb3 < 16.5 and _esq < 1e-3 and _ecm < 1e-3
+      and _esq3 < 2e-2 and _ecm2 < 1e-1
+      and abs(_eduty.mean() + 0.4) < 1e-9 and np.array_equal(_eon, _eon_old),
+      f"0.997 GHz at 64 GSa/s, edge-time error peak to peak by polynomial crossing. With a "
+      f"{_ek:.1f}-sample edge: {_ebefore:.2f} ps as built before 0.46.0 (one sample is "
+      f"15.63), square {_esq:.1e} ps, cmos {_ecm:.1e} ps (bound 1e-3). With short edges, "
+      f"where it was {_eb3:.2f} ps: square at its default {0.05 * _espp:.1f}-sample edge "
+      f"{_esq3:.1e} ps (bound 2e-2), cmos at a {35e-12 * _efs:.1f}-sample edge {_ecm2:.1e} ps "
+      f"(bound 1e-1); duty 0.3 over 32 periods reads {(_eduty.mean() + 1) / 2:.12f}; 10 MHz "
+      f"at 10 GSa/s is bit-identical to the old construction")
+
+# ---- roles(): the list is what the record draws from, in both directions (0.46.0)
+from wfmsynth.streams import Streams as _RSt
+from wfmsynth.acquire import AcquisitionProfile as _RAP
+_rchain = (Signal(seed=3, grid=Grid(fs=64e9, baud=16e9, n=4096))
+           .carrier("nrz", n_ui=1024, jitter=dict(rj=0.4)).nonlinearity(level_noise=0.05)
+           .crosstalk(coupling=0.1)                          # default aggressor: draws nothing
+           .acquire(_RAP(sample_rate_hz=32e9, record_length=2048, input_bandwidth_hz=13e9,
+                         noise_floor=dict(rms=0.01)))
+           .store(bits=8, dither_lsb=0.5).store(bits=8))     # the second has no dither
+_rst = _RSt(_rchain.seed)
+_rx = _rchain.waveform(streams=_rst)
+_rmoved = [r for r in _rchain.roles() if not np.array_equal(_rx, _rchain.contrast(r, seed=9))]
+check("roles() lists exactly what the record draws from: every listed role was drawn from and "
+      "moves samples when re-rolled, and nothing was drawn under a name that is not listed",
+      _rchain.roles() == ["jitter/0", "nl_noise/1", "acquire/3", "store/4"]
+      and _rst.drawn() == set(_rchain.roles()) and _rmoved == _rchain.roles(),
+      f"listed {_rchain.roles()}; drawn (generators that moved) {sorted(_rst.drawn())}; "
+      f"asked for and not drawn {sorted(_rst.asked - _rst.drawn())}; "
+      f"{len(_rmoved)} of {len(_rchain.roles())} re-rolls changed samples")
+
+# ---- rf.evm(reference="decided"): a carrier is acquired before deciding, or refused (0.46.0)
+# The reference is the truth-referenced EVM, which uses the transmitted symbols and none of
+# the blind estimator. Before this, the 2 kHz record below returned 24.5 % / 24.9 %.
+_vg = Grid(fs=400e6, baud=25e6, n=1 << 16, fc_hz=2.4e9)
+
+
+def _vacq(f_hz, es_n0_db):
+    s = Signal(seed=1, grid=_vg).iq("qam16", prbs=15, prbs_phase=100).freq_offset(f_hz=f_hz)
+    if es_n0_db is not None:
+        s = s.awgn(es_n0_db=es_n0_db, ref_power=1.0)
+    x, sent = s.waveform(), s.transmitted()[0]
+    kw = dict(skip=16, correct=("frequency", "phase"))
+    return (_sws.rf.evm(x, _vg, sent, **kw),
+            _sws.rf.evm(x, _vg, sent, reference="decided", constellation="qam16", **kw))
+
+
+_vrep = [_vacq(2e3, e) for e in (None, 24)]
+_vsweep = [(f, _vacq(f, 24)) for f in (-3.0e6, -1.234e6, -2e4, 150.0, 2e5, 2e6, 3.0e6)]
+_vworst = max(abs(b["evm_pct"] - t["evm_pct"]) for _, (t, b) in _vsweep)
+_vferr = max(abs(b["removed"]["frequency_hz"] - f) for f, (_, b) in _vsweep)
+_vrng = np.random.default_rng(0)
+_vnoise = _vrng.standard_normal(1 << 16) + 1j * _vrng.standard_normal(1 << 16)
+_vref = _qrefusal(lambda: _sws.rf.evm(_vnoise, _vg, reference="decided", constellation="qam16",
+                                      correct=("frequency",)))
+
+
+
+def _vout(sent_given):
+    s = (Signal(seed=1, grid=_vg).iq("qam16", prbs=15, prbs_phase=100)
+         .freq_offset(f_hz=3.2e6).awgn(es_n0_db=24, ref_power=1.0))
+    return _sws.rf.evm(s.waveform(), _vg, s.transmitted()[0] if sent_given else None, skip=16,
+                       reference="decided", constellation="qam16",
+                       correct=("frequency", "phase"))
+
+
+_valias = _qrefusal(lambda: _vout(True))
+_vblind = _vout(False)
+_vsg = Grid(fs=400e6, baud=25e6, n=1 << 11, fc_hz=2.4e9)
+_vss = Signal(seed=1, grid=_vsg).iq("qam16", prbs=15, prbs_phase=100)
+_vshort = _sws.rf.evm(_vss.waveform(), _vsg, _vss.transmitted()[0], skip=8,
+                      reference="decided", constellation="qam16", correct=("frequency",))
+check("a decided-reference EVM acquires its carrier blind before deciding: a QAM-16 record "
+      "2 kHz off reads what the truth-referenced EVM reads, any offset within +/- baud/8 is "
+      "found, one past it is refused when `sent` can show the alias and carries the ambiguity "
+      "when it cannot, and a record with no carrier to find is refused, not measured",
+      all(abs(b["evm_pct"] - t["evm_pct"]) < 0.01 and b["decision_errors"] == 0
+          for t, b in _vrep)
+      and "WRONG ALIAS" in _valias
+      and _vblind["acquisition"]["alias_spacing_hz"] == 6.25e6
+      and abs(_vblind["removed"]["frequency_hz"] - (3.2e6 - 6.25e6)) < 25.0
+      and abs(_vshort["evm_pct"] - 0.315) < 0.002
+      and _vshort["acquisition"]["method"].startswith("decision-directed")
+      and _vworst < 0.02 and _vferr < 25.0 and "did not lock" in _vref
+      and "No figure is returned" in _vref,
+      f"2 kHz offset, decided against truth: {_vrep[0][1]['evm_pct']:.2f} % / "
+      f"{_vrep[0][0]['evm_pct']:.2f} % clean, {_vrep[1][1]['evm_pct']:.2f} % / "
+      f"{_vrep[1][0]['evm_pct']:.2f} % at Es/N0 24 dB (carrier line "
+      f"{_vrep[1][1]['acquisition']['line']:.1f}, {_sws.rf.LOCK_LINE:g} needed); offsets "
+      f"-3 .. +3 MHz at 24 dB: worst EVM difference {_vworst:.3f} points, worst frequency "
+      f"error {_vferr:.1f} Hz (pull-in +/-{_vrep[0][1]['acquisition']['pull_in_hz'] / 1e6:.3f}"
+      f" MHz); 3.2 MHz off: refused as the wrong alias with `sent`, returned as "
+      f"{_vblind['removed']['frequency_hz'] / 1e6:+.3f} MHz with alias spacing "
+      f"{_vblind['acquisition']['alias_spacing_hz'] / 1e6:.2f} MHz without; 128 clean symbols "
+      f"(line {_vshort['acquisition']['line']:.1f}, no blind lock): {_vshort['evm_pct']:.3f} % "
+      f"by the checked fit from zero offset; noise alone: refused")
+
+# ---- a measure handed the wrong kind of record refuses by name (0.46.0)
+from wfmsynth import measure as _vmeas, eye as _veye
+_vz = Signal(seed=1, grid=Grid(fs=400e6, baud=25e6, n=1 << 12)).iq("qpsk", prbs=9).waveform()
+_vrg = Grid(fs=400e6, baud=25e6, n=1 << 12)
+_vmsgs = [_qrefusal(f) for f in (
+    lambda: _vmeas.eye_height(_vz, _vrg, levels=2),
+    lambda: _vmeas.attributes(_vz, _vrg, levels=2),
+    lambda: _veye.eye(_vz, _vrg),
+    lambda: _veye.crossings(_vz, 0.0, 0.1))]
+_vback = [_qrefusal(f) for f in (
+    lambda: _sws.rf.ccdf(_vz.real),
+    lambda: _sws.rf.evm(_vz.real, _vrg, sent=np.ones(8, complex)))]
+check("a voltage measure handed an I/Q record, and an envelope measure handed a voltage, "
+      "refuse by name and say which measure or converter is the right one",
+      all("complex baseband (I/Q)" in m and "rf.evm" in m and "upconvert(" in m for m in _vmsgs)
+      and all("downconvert(" in m for m in _vback),
+      f"{len(_vmsgs)} voltage measures and {len(_vback)} envelope measures refused; e.g. "
+      f"{_vmsgs[0][:96]}...")
+
+print("\n== the optical field is a stated domain: eo is its source, photodetect the bridge "
+      "(GitHub #92) ==")
+from wfmsynth import compose as _oC, domain as _oD
+from wfmsynth.streams import Streams as _oStreams
+_og = Grid(fs=80e9, baud=10e9, n=4096)                       # states no domain
+_ogo = Grid(fs=80e9, baud=10e9, n=4096, domain="optical")    # a chain that starts in the field
+_ot = np.arange(_og.n) / _og.fs
+
+
+def _odrive(seed=1):
+    return Signal(seed=seed, grid=_og).carrier("nrz", n_ui=512)
+
+
+def _ocw(phase=0.0, f_hz=0.0):
+    """A captured field of power 1 at `phase`, `f_hz` off the optical carrier."""
+    return Signal(grid=_ogo).capture(values=np.exp(1j * (phase + 2 * np.pi * f_hz * _ot)))
+
+
+# ---- an existing link is what it was: the same functions called by hand, to the bit
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _olink = (_odrive(7).eo(kind="mzm", er_db=10, alpha=0.3, linewidth_hz=1e6)
+              .fiber(length_km=10.0).optical_mpi(delay_samples=37, reflectivity=0.05)
+              .edfa(gain_db=12, nf_db=5).photodetect(responsivity=0.8).tia(bw_hz=8e9))
+    _ox = _olink.waveform()
+    _ost = _oStreams(7)
+    _oh = _OPT.modulate_field(_odrive(7).waveform(), kind="mzm", er_db=10, alpha=0.3,
+                              linewidth_hz=1e6, grid=_og, rng=_ost.role("linewidth/1"))
+    _oh = _OPT.field_mpi(_OPT.fiber(_oh, length_km=10.0, grid=_og), delay_samples=37,
+                         reflectivity=0.05)
+    _oh = _OPT.edfa(_oh, gain_db=12, nf_db=5, rng=_ost.role("ase/4"))
+    _oh = _OPT.tia(_OPT.photodetect(_oh, responsivity=0.8, rng=_ost.role("shot/5")), bw_hz=8e9,
+                   grid=_og, rng=_ost.role("tia/6"))
+_okinds = _olink.stage_kinds(domains=True)
+check("an optical link renders exactly what wfmsynth.optical's functions make by hand, its "
+      "recipe's grid never mentions a domain, and stage_kinds reports the field between eo "
+      "and photodetect",
+      np.array_equal(_ox, _oh) and "domain" not in _olink.recipe()["grid"]
+      and not _olink.grid.domain_stated
+      and [d for _, d in _okinds] == ["real", "optical", "optical", "optical", "optical",
+                                      "real", "real"],
+      f"max |composed - by hand| = {np.abs(_ox - _oh).max():.1e}; recipe grid keys "
+      f"{sorted(_olink.recipe()['grid'])}; domains {[d for _, d in _okinds]}")
+
+# ---- an electrical op on the field is refused by name, every one of them
+_onot = sorted(op for op in _oC._EXEC if "optical" not in _oD.accepts(op))
+_omsgs = [_qrefusal(lambda op=op: _oD.trace(
+    [{"op": "carrier"}, {"op": "eo"}, {"op": op}], _og)) for op in _onot]
+_ocast = Signal(seed=1, grid=_og)
+_ocast.ops = [{"op": "carrier", "kind": "nrz", "n_ui": 512}, {"op": "eo"},
+              {"op": "lossy", "loss_db": 3.0, "loss_at_ghz": 5.0}]
+_ocmsg = _qrefusal(_ocast.waveform)
+check("every op that does not act on a field refuses one by name and names photodetect as "
+      "the bridge, in a hand-written recipe too (which used to be cast to float under a "
+      "numpy warning)",
+      all(m.startswith(f"{op} (op 2)") and "optical field (domain 'optical')" in m
+          and "photodetect(" in m for op, m in zip(_onot, _omsgs))
+      and "photodetect(responsivity=...) is the bridge" in _ocmsg
+      and len(_onot) == len(_oC._EXEC) - 15,
+      f"{len(_onot)} of {len(_oC._EXEC)} ops refused; {len(_oC._EXEC) - len(_onot)} accept a "
+      f"field: {sorted(set(_oC._EXEC) - set(_onot))}; e.g. {_ocmsg[:92]}...")
+
+# ---- combine on a field is a coupler: |E1 + E2|^2, not P1 + P2
+_ophis = np.array([0.0, np.pi / 3, np.pi / 2, 2 * np.pi / 3, np.pi])
+_opow = np.array([_ocw().combine(_ocw(p)).photodetect(shot=False).waveform().mean()
+                  for p in _ophis])
+_oerr = np.abs(_opow - 2.0 * (1.0 + np.cos(_ophis))).max()
+check("combine on a field is a coupler: two unit fields a phase apart detect as "
+      "2 (1 + cos phase), from four times one field's power to none (a sum of intensities "
+      "would be 2 throughout)",
+      _oerr < 1e-12 and abs(_opow[0] - 4.0) < 1e-12 and _opow[-1] < 1e-12,
+      f"detected power at 0/60/90/120/180 deg: {np.round(_opow, 6).tolist()}; worst error "
+      f"against 2 (1 + cos) {_oerr:.1e}")
+
+# ---- a complex gain on a field is one arm's loss and phase (the number #89 gave an envelope)
+_oarm = np.array([_ocw().combine(_ocw().gain(by=np.exp(1j * p))).photodetect(shot=False)
+                  .waveform().mean() for p in _ophis])
+_oaerr = np.abs(_oarm - 2.0 * (1.0 + np.cos(_ophis))).max()
+_oamov = _qrefusal(lambda: _ocw().gain(by=_sws.recipes.fading(doppler_hz=2e9)).waveform())
+check("  ... and gain(by=<complex number>) on one arm is its phase: the same 2 (1 + cos phase) "
+      "from an interferometer whose arm is turned by the gain; a complex gain that MOVES is "
+      "an I/Q chain and is refused on a field",
+      _oaerr < 1e-12 and "COMPLEX waveform" in _oamov,
+      f"detected power with the arm at 0/60/90/120/180 deg: {np.round(_oarm, 6).tolist()}; "
+      f"worst error {_oaerr:.1e}; refusal: {_oamov[:80]}...")
+
+# ---- two lasers: each its own linewidth role, and the beat averages to the incoherent sum
+_odv = 200e6
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _obeat = [(_odrive(s).eo(linewidth_hz=_odv)
+               .combine(Signal().carrier("nrz", n_ui=512).eo(linewidth_hz=_odv))
+               .photodetect(shot=False)) for s in range(1, 25)]
+    _oratio = np.array([b.waveform().mean() / _odrive(s).eo().photodetect(shot=False)
+                        .waveform().mean() for s, b in zip(range(1, 25), _obeat)])
+_oa = 2 * np.pi * _odv * _og.n / _og.fs
+_owant = 2.0 * (1.0 + (1.0 - np.exp(-_oa)) / _oa)
+_ose = _oratio.std(ddof=1) / np.sqrt(len(_oratio))
+check("two lasers of 200 MHz linewidth each are incoherent over a 51 ns record: the mean "
+      "power is 2 P (1 + (1 - exp(-a)) / a), a = 2 pi dv T, not the 4 P of one laser split "
+      "and rejoined; the second laser's phase walk is a role of its own",
+      abs(_oratio.mean() - _owant) < 3 * _ose and _ose < 0.08
+      and _obeat[0].roles() == ["linewidth/1", "combine/2/others/0/linewidth/1"],
+      f"mean power ratio over {len(_oratio)} seeds {_oratio.mean():.3f} +/- {_ose:.3f} "
+      f"(standard error) against {_owant:.3f} analytic; roles {_obeat[0].roles()}")
+
+# ---- filter and gain on a field: the closed forms, and the I/Q counterpart to the bit
+_ofp = {f: _ocw(f_hz=f).filter("butter", f_hz=4e9, order=3).photodetect(shot=False)
+        .waveform()[_og.n // 2:].mean() for f in (-8e9, -4e9, 4e9, 8e9)}
+_ofw = {f: 1.0 / (1.0 + (np.tan(np.pi * abs(f) / _og.fs) / np.tan(np.pi * 4e9 / _og.fs)) ** 6)
+        for f in _ofp}
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _oe = _odrive().eo(kind="dml", alpha=3.0, er_db=8).waveform()         # chirped: Im != 0
+    _ogi = Grid(fs=80e9, baud=10e9, n=4096, domain="iq")
+    _osame = [np.array_equal(st(Signal(grid=_ogo).capture(values=_oe)).waveform(),
+                             st(Signal(grid=_ogi).capture(values=_oe)).waveform())
+              for st in (lambda s: s.filter("butter", f_hz=4e9, order=3),
+                         lambda s: s.gain(by=0.5),
+                         lambda s: s.gate(by=Signal().carrier("square", f_hz=40e6),
+                                          threshold=0.0),
+                         lambda s: s.combine(Signal(grid=s.grid).capture(values=_oe[::-1]),
+                                             gains=[0.25]))]
+    _op0 = _odrive().eo().photodetect(shot=False).waveform()
+    _op1 = _odrive().eo().gain(by=0.5).photodetect(shot=False).waveform()
+_ovoa = 10 * np.log10(_op1.mean() / _op0.mean())
+check("on a field, filter is an optical filter about the carrier (half the power at its "
+      "corner, the same either side), gain(by=0.5) an attenuator of 6.02 dB in power, and "
+      "filter / gain / gate / combine give the samples their I/Q counterparts give",
+      all(abs(_ofp[f] - _ofw[f]) < 1e-9 for f in _ofp)
+      and abs(10 * np.log10(_ofp[4e9]) + 3.0103) < 1e-4 and abs(_ovoa + 6.0206) < 1e-4
+      and all(_osame),
+      f"butter-3 at 4 GHz: {10 * np.log10(_ofp[4e9]):+.4f} dB at +4 GHz, "
+      f"{10 * np.log10(_ofp[-4e9]):+.4f} dB at -4 GHz, {10 * np.log10(_ofp[8e9]):+.3f} dB at "
+      f"+8 GHz (closed form {10 * np.log10(_ofw[8e9]):+.3f}); gain(by=0.5) detects "
+      f"{_ovoa:+.4f} dB; bit-identical to I/Q: {_osame}")
+
+# ---- polarisation is two named chains through one fibre, not part of the domain
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _opol = _sws.Channels(
+        {"x": Signal().carrier("nrz", n_ui=512).eo().use("span"),
+         "y": Signal().carrier("nrz", n_ui=512, pattern="prbs9").eo().use("span"),
+         "pd": Signal().use("x").photodetect(shot=False).combine(
+             Signal().use("y").photodetect(shot=False))},
+        shared={"span": Signal().fiber(length_km=10.0)}, seed=1, grid=_og)
+    _opw = _opol.waveforms()
+_operr = np.abs(_opw["pd"] - np.abs(_opw["x"]) ** 2 - np.abs(_opw["y"]) ** 2).max()
+check("two polarisations are a Channels pair through one shared fibre, and a detector that "
+      "does not resolve them sees the sum of their powers",
+      _opw["x"].dtype == np.complex128 and _opw["pd"].dtype == np.float64 and _operr < 1e-12
+      and _opol.stored_grid("x", _opw["x"]).domain == "optical",
+      f"|pd - (|Ex|^2 + |Ey|^2)| <= {_operr:.1e}; x, y stored as "
+      f"{_opol.stored_grid('x', _opw['x']).domain}, pd as "
+      f"{_opol.stored_grid('pd', _opw['pd']).domain}")
+
+# ============================================ complex joins and an envelope's channel (#89)
+# What an I/Q record could not say before: a channel stated at RF, a delay, a complex gain, an
+# amplifier's AM/PM, a fade. Each is checked against the PASSBAND route (upconvert -> the real
+# op -> downconvert) where one exists, and against a closed form or a statistical test where it
+# does not. Both routes are handed the envelope a passband record holds, so the mixers'
+# low-pass is common to them and the comparison is of the op.
+print("\n== complex joins and a baseband-equivalent channel on I/Q records (GitHub #89) ==")
+from scipy import stats as _cx_stats                                        # noqa: E402
+from wfmsynth import joins as _cx_jn, recipes as _cx_rc, stages as _cx_st   # noqa: E402
+
+_cx_F, _cx_fc = 16e9, 3e9
+_cx_g = Grid(fs=_cx_F, baud=250e6, n=1 << 15, fc_hz=_cx_fc)
+_cx_lpf = dict(pass_hz=1.0e9, stop_hz=2.5e9, atten_db=100)
+
+
+def _cx_pass():
+    return Signal(seed=1, grid=_cx_g).iq("qam16", prbs=11).upconvert()
+
+
+def _cx_down(s, fs_out_hz=_cx_F / 2):
+    return s.downconvert(fc_hz=_cx_fc, lpf=_cx_lpf, fs_out_hz=fs_out_hz)
+
+
+def _cx_worst(a, b, edge=400):
+    return float(np.abs(a - b)[edge:-edge].max() / np.abs(a).max())
+
+
+_cx_kw = dict(loss_db=12.0, loss_at_ghz=3.0, causal=True)
+_cx_ref = _cx_down(_cx_pass().lossy(**_cx_kw)).waveform()
+_cx_got = _cx_down(_cx_pass()).lossy(**_cx_kw).waveform()
+_cx_plain = _cx_down(_cx_pass()).waveform()
+_cx_e = _cx_worst(_cx_ref, _cx_got)
+check("lossy on an I/Q record is the channel read at fc + f: the envelope route agrees with "
+      "upconvert -> lossy -> downconvert to 3e-4 of peak, on a channel that moves the record "
+      "by most of its amplitude",
+      _cx_e < 3e-4 and _cx_worst(_cx_plain, _cx_got) > 0.5,
+      f"12 dB at 3 GHz, minimum phase: worst {_cx_e:.2e} of peak; the channel itself moved "
+      f"the record by {_cx_worst(_cx_plain, _cx_got):.2f}")
+_cx_g24 = Grid(fs=20e6, n=4000, fc_hz=2.4e9)
+_cx_tone = (Signal(seed=1, grid=_cx_g24).capture(values=np.ones(4000, complex))
+            .freq_offset(f_hz=3e6).lossy(loss_db=6.0, loss_at_ghz=2.4, linear=False).waveform())
+_cx_law = 10 ** (-P.insertion_loss_db(2.403, loss_db=6.0, loss_at_ghz=2.4) / 20)
+check("  ... on a grid that cannot hold the carrier: a tone 3 MHz above a 2.4 GHz centre, on a "
+      "20 MSa/s record, loses what the law says at 2.403 GHz",
+      np.allclose(np.abs(_cx_tone), _cx_law, rtol=1e-12),
+      f"|H| = {np.abs(_cx_tone).mean():.9f}, the law {_cx_law:.9f} "
+      f"({-20 * np.log10(_cx_law):.4f} dB; the same op about DC would lose "
+      f"{P.insertion_loss_db(0.003, loss_db=6.0, loss_at_ghz=2.4):.2f} dB)")
+
+_cx_wob = dict(f_hz=20e6, amp=40e-12, offset=200e-12)
+_cx_ref = _cx_down(_cx_pass().delay(by=Signal().carrier("sine", **_cx_wob)), None).waveform()
+_cx_got = _cx_down(_cx_pass(), None).delay(by=Signal().carrier("sine", **_cx_wob)).waveform()
+_cx_e = _cx_worst(_cx_ref, _cx_got, 800)
+_cx_bound = 2 * _cx_jn.describe_delay(_cx_F)["error"]
+_cx_gd = Grid(fs=1e6, n=1 << 14, fc_hz=2.4e9)
+_cx_y = (Signal(seed=1, grid=_cx_gd).capture(values=np.ones(_cx_gd.n, complex))
+         .delay(by=Signal().carrier("dc", level=1e-5).filter("integrate", tau_s=1.0)).waveform())
+_cx_f = np.polyfit(np.arange(_cx_gd.n)[64:-64] / 1e6,
+                   np.unwrap(np.angle(_cx_y[64:-64])), 1)[0] / (2 * np.pi)
+check("delay on an I/Q record shifts the envelope AND turns the carrier by -2*pi*fc*delay: a "
+      "moving delay agrees with upconvert -> delay -> downconvert to the interpolator's own "
+      "stated error, and a delay growing at 1e-5 s/s is a Doppler shift of -fc * 1e-5",
+      _cx_e < _cx_bound and abs(_cx_f + 24e3) < 24.0,
+      f"200 +/- 40 ps at 20 MHz on a 3 GHz carrier: worst {_cx_e:.2e} of peak (bound "
+      f"{_cx_bound:.1e}); Doppler measured {_cx_f:.2f} Hz against -24000")
+
+_cx_sal = dict(alpha_a=2.1587, beta_a=1.1517, alpha_phi_rad=4.0033, beta_phi=9.1040)
+_cx_ga = Grid(fs=8e6, n=4096, fc_hz=1e9)
+_cx_x = np.where(np.arange(4096) < 2048, 0.3 * np.exp(0.4j), 0.9 * np.exp(-1.1j))
+_cx_y = Signal(seed=1, grid=_cx_ga).capture(values=_cx_x).law("saleh", **_cx_sal).waveform()
+_cx_r = np.array([0.3, 0.9])
+_cx_amp = _cx_sal["alpha_a"] * _cx_r / (1 + _cx_sal["beta_a"] * _cx_r ** 2)
+_cx_phi = _cx_sal["alpha_phi_rad"] * _cx_r ** 2 / (1 + _cx_sal["beta_phi"] * _cx_r ** 2)
+_cx_gota = np.abs(_cx_y[[0, -1]])
+_cx_gotp = np.angle(_cx_y[[0, -1]] * np.conj(_cx_x[[0, -1]]))
+check("AM/PM is a mechanism: law('saleh') on a two-level envelope gives each level the "
+      "law's output magnitude and the law's phase, and the two levels are turned differently",
+      np.allclose(_cx_gota, _cx_amp, rtol=1e-12) and np.allclose(_cx_gotp, _cx_phi, atol=1e-12)
+      and np.degrees(_cx_phi[1] - _cx_phi[0]) > 5.0,
+      f"r = 0.3 / 0.9: |y| = {_cx_gota[0]:.4f} / {_cx_gota[1]:.4f}, phase added "
+      f"{np.degrees(_cx_gotp[0]):.2f} / {np.degrees(_cx_gotp[1]):.2f} deg")
+# the passband route, for the question the issue asked: fc = fs * 8/77 keeps the limiter's
+# aliased harmonics off the carrier (tests/test_envelope_law.py says why)
+_cx_lv = np.logspace(-1.5, 1.0, 13)
+_cx_w = np.hanning(129)
+_cx_st_r = np.convolve(np.pad(np.repeat(_cx_lv, 1024), 64, mode="edge"), _cx_w / _cx_w.sum(),
+                       mode="valid")
+_cx_gs = Grid(fs=1e9, n=len(_cx_st_r), fc_hz=1e9 * 8 / 77)
+
+
+def _cx_plateaus(y):
+    mid = y.reshape(13, 1024)[:, 384:640]
+    return np.abs(mid).mean(axis=1), np.angle(mid.mean(axis=1))
+
+
+def _cx_stairs():
+    return Signal(seed=1, grid=_cx_gs).capture(values=_cx_st_r.astype(complex))
+
+
+_cx_pa, _cx_pp = _cx_plateaus(
+    _cx_stairs().upconvert().law("tanh", gain=2.0, sat=0.8)
+    .downconvert(fc_hz=_cx_gs.fc_hz, lpf=dict(pass_hz=3e6, stop_hz=12e6, atten_db=90)).waveform())
+_cx_ea, _ = _cx_plateaus(_cx_stairs().law("rapp", gain=2.0, sat=4 * 0.8 / np.pi,
+                                          smoothness=1.12).waveform())
+_cx_er = np.abs(_cx_ea / _cx_pa - 1)
+check("  ... which a memoryless law on the PASSBAND does not have: tanh between the mixers "
+      "turns the carrier by under 1e-5 rad at every drive over 50 dB, and its AM/AM is the "
+      "envelope law rapp(sat=4*sat/pi, smoothness=1.12) to 1.2 %",
+      np.abs(_cx_pp).max() < 1e-5 and _cx_er.max() < 0.012 and _cx_er[0] < 2e-3
+      and _cx_er[-1] < 2e-3,
+      f"AM/PM {np.abs(_cx_pp).max():.1e} rad at worst; AM/AM against rapp: "
+      f"{100 * _cx_er.max():.2f} % at the knee, {100 * _cx_er[0]:.3f} % small-signal, "
+      f"{100 * _cx_er[-1]:.3f} % saturated")
+
+_cx_fs, _cx_n = 1e6, 1 << 18
+_cx_fd = _cx_fs / 32
+_cx_gf = Grid(fs=_cx_fs, n=_cx_n, fc_hz=2.4e9)
+
+
+def _cx_fade(shape, k_db=None):
+    s = _cx_rc.fading(_cx_fd, k_db=k_db, shape=shape)
+    s.seed, s.grid = 3, _cx_gf
+    return s.waveform()
+
+
+def _cx_cdf(shape, f):
+    u = np.clip(f / _cx_fd, -1, 1)
+    return 0.5 + (np.arcsin(u) / np.pi if shape == "jakes" else 0.5 * u)
+
+
+_cx_h = _cx_fade("jakes")
+_cx_P = np.abs(np.fft.fft(_cx_h)) ** 2
+_cx_fq = np.fft.fftfreq(_cx_n, 1 / _cx_fs)
+_cx_o = np.argsort(_cx_fq)
+_cx_below = np.cumsum(_cx_P[_cx_o]) / _cx_P.sum()
+_cx_top = _cx_fq[_cx_o] + 0.5 * _cx_fs / _cx_n
+_cx_dj = float(np.abs(_cx_below - _cx_cdf("jakes", _cx_top)).max())
+_cx_df = float(np.abs(_cx_below - _cx_cdf("flat", _cx_top)).max())
+check("a fading gain is a composition -- complex noise through filter('doppler') -- and its "
+      "spectrum is the stated one: the power below each frequency follows the Jakes arcsin "
+      "law, not a flat band's ramp, and none lies outside +/-f_d",
+      _cx_dj < 0.03 < 0.08 < _cx_df
+      and _cx_P[np.abs(_cx_fq) > _cx_fd + _cx_fs / _cx_n].sum() < 1e-20 * _cx_P.sum(),
+      f"8192 Doppler periods: worst departure from the Jakes law {_cx_dj:.4f} (limit 0.03), "
+      f"from a flat band {_cx_df:.3f}; mean power {np.mean(np.abs(_cx_h) ** 2):.4f}")
+# samples of a flat-spectrum gain 1/(2 f_d) apart are exactly uncorrelated, so KS is exact
+_cx_ray = _cx_stats.kstest(np.abs(_cx_fade("flat"))[::16], "rayleigh", args=(0, np.sqrt(0.5)))
+_cx_k = 10 ** 0.6
+_cx_rician = np.abs(_cx_fade("flat", k_db=6.0))[::16]
+_cx_ric = _cx_stats.kstest(_cx_rician, "rice",
+                           args=(np.sqrt(2 * _cx_k), 0, np.sqrt(0.5 / (1 + _cx_k))))
+_cx_not = _cx_stats.kstest(_cx_rician, "rayleigh", args=(0, np.sqrt(0.5)))
+check("  ... and its envelope is Rayleigh, or Rician at the stated K with a line of sight: "
+      "Kolmogorov-Smirnov on 16384 independent samples at significance 0.001, and the same "
+      "test rejects the Rician record as Rayleigh",
+      _cx_ray.pvalue > 1e-3 and _cx_ric.pvalue > 1e-3 and _cx_not.pvalue < 1e-12,
+      f"Rayleigh: D = {_cx_ray.statistic:.4f}, p = {_cx_ray.pvalue:.3f}; Rice K = 6 dB: "
+      f"D = {_cx_ric.statistic:.4f}, p = {_cx_ric.pvalue:.3f}; that record against Rayleigh: "
+      f"p = {_cx_not.pvalue:.0e}")
+
+_cx_gm = Grid(fs=1e6, baud=250e3, n=1 << 14, fc_hz=2.4e9 + 13e3)
+_cx_dl, _cx_gn = np.array([0.0, 8e-6, 22.5e-6]), np.array([1.0, 0.7, 0.4])
+_cx_tx = Signal(seed=1, grid=_cx_gm).iq("qpsk", prbs=11)
+_cx_mp = _cx_rc.multipath(_cx_tx, _cx_dl, _cx_gn)
+_cx_kk = np.fft.fftfreq(_cx_gm.n)
+_cx_X = np.fft.fft(_cx_tx.waveform())
+_cx_A = np.stack([np.fft.ifft(_cx_X * np.exp(-2j * np.pi * _cx_kk * d * 1e6)) for d in _cx_dl],
+                 axis=1)[256:-256]
+_cx_c = np.linalg.lstsq(_cx_A, _cx_mp.waveform()[256:-256], rcond=None)[0]
+_cx_want = _cx_gn * np.exp(-2j * np.pi * _cx_gm.fc_hz * _cx_dl)
+check("multipath is a composition -- combine of delayed, scaled copies -- and its power delay "
+      "profile is the taps: least-squares taps of the record are the stated gains, each "
+      "turned by its own delay's carrier phase",
+      np.abs(_cx_c - _cx_want).max() < 1e-4
+      and [o["op"] for o in _cx_mp.ops] == ["iq", "combine"],
+      "power at 0 / 8 / 22.5 us: " + " / ".join(f"{abs(v) ** 2:.4f}" for v in _cx_c)
+      + " (stated " + " / ".join(f"{v ** 2:.4f}" for v in _cx_gn)
+      + f"); worst complex tap error {np.abs(_cx_c - _cx_want).max():.1e}")
+
+# ---- carrier("states"): a level that dwells in a state and jumps (GitHub #90)
+# Each property against something that shares nothing with how the source draws: dwells
+# against scipy's distributions, occupancy against the eigenvector of the transition table,
+# jump times against crossings read off the samples, a telegraph spectrum against its
+# Lorentzian, a gated carrier against the intervals the source said it had.
+from scipy import stats as _hst
+from wfmsynth import states as _hS
+_hg = Grid(fs=1e8, n=1 << 19)                          # 10 ns per sample, 5.2 ms
+_hfix = {"dist": "fixed", "t_s": 1e-6}
+_hdists = {
+    "exponential": (3e-6, _hst.expon(scale=3e-6)),
+    "lognormal": ({"dist": "lognormal", "median_s": 2e-6, "sigma": 0.7},
+                  _hst.lognorm(s=0.7, scale=2e-6)),
+    "uniform": ({"dist": "uniform", "lo_s": 1e-6, "hi_s": 5e-6},
+                _hst.uniform(loc=1e-6, scale=4e-6))}
+_hks = {}
+for _hname, (_hspec, _hdist) in _hdists.items():
+    _hiv = _hS.intervals(Signal(seed=11, grid=_hg).carrier(
+        "states", dwell=[_hspec, _hfix]).event_list())
+    _hd = np.array([r["t_stop_s"] - r["t_start_s"] for r in _hiv
+                    if r["complete"] and r["state"] == 0])
+    _hks[_hname] = (_hd.size, _hst.kstest(_hd, _hdist.cdf).statistic * np.sqrt(_hd.size),
+                    _hst.kstest(_hd * 1.1, _hdist.cdf).statistic * np.sqrt(_hd.size))
+check("a state's dwell times follow the distribution stated for it: Kolmogorov-Smirnov "
+      "against scipy's CDF passes at the 1 % level for an exponential, a lognormal and a "
+      "uniform dwell, and the same dwells stretched by 10 % fail it",
+      all(k[0] > 1000 and k[1] < 1.628 < k[2] for k in _hks.values()),
+      "; ".join(f"{nm}: N={k[0]}, D*sqrt(N)={k[1]:.2f} (stretched 10 %: {k[2]:.2f})"
+                for nm, k in _hks.items()) + "; the 1 % critical value is 1.628")
+
+_hp3 = [[0, 0.3, 0.7], [0.5, 0, 0.5], [1, 0, 0]]
+_hd3 = [5e-6, {"dist": "lognormal", "median_s": 1e-6, "sigma": 0.8},
+        {"dist": "uniform", "lo_s": 2e-6, "hi_s": 6e-6}]
+_hw, _hv = np.linalg.eig(np.asarray(_hp3, float).T)
+_hnu = np.real(_hv[:, np.argmin(np.abs(_hw - 1))])
+_hwant = _hnu * np.array([5e-6, 1e-6 * np.exp(0.32), 4e-6])
+_hwant = _hwant / _hwant.sum()
+_hx3, _hev3 = Signal(seed=4, grid=Grid(fs=1e8, n=1 << 21)).carrier(
+    "states", levels=[0.0, 0.4, 1.0], dwell=_hd3, transitions=_hp3, tr_s=50e-9).realize()
+_hocc = np.zeros(3)
+for _hr in _hS.intervals(_hev3):
+    _hocc[_hr["state"]] += _hr["t_stop_s"] - _hr["t_start_s"]
+_hocc /= _hocc.sum()
+_hnear = np.bincount(np.argmin(np.abs(_hx3[:, None] - np.array([0.0, 0.4, 1.0])), axis=1),
+                     minlength=3) / _hx3.size
+_hplan = _hS._plan(levels=[0, 1, 2], dwell=_hd3, transitions=_hp3)
+_hfirst = np.bincount([_hS.draw(np.random.default_rng(k), 1e-9, *_hplan[1:])[0][0]
+                       for k in range(4000)], minlength=3) / 4000
+_hz0 = np.abs(_hfirst - _hwant) / np.sqrt(_hwant * (1 - _hwant) / 4000)
+check("three states with a transition table spend the time in each that theory says -- the "
+      "stationary vector of the table weighted by the mean dwells -- by the events, by the "
+      "samples, and in the state a stationary start finds the process in at t = 0",
+      np.abs(_hocc - _hwant).max() < 0.015 and np.abs(_hnear - _hwant).max() < 0.02
+      and _hz0.max() < 3.5
+      and np.allclose(_hS.occupancy(_hd3, _hp3), _hwant, atol=1e-12),
+      f"theory {np.round(_hwant, 4).tolist()}; events over 21 ms {np.round(_hocc, 4).tolist()}; "
+      f"samples nearest each level {np.round(_hnear, 4).tolist()} (bounds 0.015, 0.02); state "
+      f"at t=0 over 4000 draws {np.round(_hfirst, 4).tolist()}, worst {_hz0.max():.2f} sigma "
+      f"(bound 3.5)")
+
+
+def _hcross(x, level):
+    """Crossings of `level` in samples, by a cubic through the four samples about each."""
+    s = np.asarray(x, float) - level
+    out = []
+    for k in np.flatnonzero((s[:-1] < 0) != (s[1:] < 0)):
+        if 1 <= k < s.size - 2:
+            r = np.polynomial.Polynomial.fit(np.arange(-1, 3), s[k - 1:k + 3], 3).convert().roots()
+            r = r[np.abs(r.imag) < 1e-9].real
+            r = r[(r >= -1e-9) & (r <= 1 + 1e-9)]
+            if r.size:
+                out.append(k + r[0])
+    return np.array(out)
+
+
+_hgj = Grid(fs=1e8, n=1 << 17)
+_hxj, _hevj = Signal(seed=6, grid=_hgj).carrier(
+    "states", levels=[-1.0, 1.0], dwell=8e-6, tr_s=160e-9).realize()
+_hedge = np.array([e.t_s for e in _hevj][1:]) * _hgj.fs
+_hiso = _hedge[np.r_[True, np.diff(_hedge) > 64] & np.r_[np.diff(_hedge) > 64, True]]
+_hiso = _hiso[(_hiso > 64) & (_hiso < _hgj.n - 64)]
+_hgot = _hcross(_hxj, 0.0)
+_herr = np.array([np.abs(_hgot - e).min() for e in _hiso])
+_hsnap = np.abs(np.round(_hiso) - _hiso).max()
+_hfine = [e.t_s for e in Signal(seed=6, grid=Grid(fs=4e8, n=1 << 19)).carrier(
+    "states", levels=[-1.0, 1.0], dwell=8e-6, tr_s=160e-9).event_list()]
+check("a jump is at its own time, not on the grid: the level is half way at the instant its "
+      "`state` event states, between samples, and the same seed is the same process on a "
+      "grid four times as fast",
+      _hiso.size > 100 and _herr.max() < 2e-3 and _hsnap > 0.4
+      and _hfine == [e.t_s for e in _hevj],
+      f"{_hiso.size} isolated jumps with 16-sample edges, at fractions of a sample from "
+      f"{(_hiso % 1).min():.3f} to {(_hiso % 1).max():.3f}: |crossing - stated time| at most "
+      f"{_herr.max():.1e} sample (bound 2e-3; rounded to the grid it would be {_hsnap:.2f}); "
+      f"{len(_hfine)} interval times identical at 100 MSa/s and 400 MSa/s")
+
+_hbusy = dict(dwell=[5e-6, {"dist": "lognormal", "median_s": 2e-6, "sigma": 0.5}])
+_hgate = []
+_ht = np.arange(_hg.n) / _hg.fs
+for _htr, _hcausal in ((None, False), (100e-9, False), (100e-9, True)):
+    _hsig = Signal(seed=5, grid=_hg).carrier("dc", level=1.0).gate(by=Signal().carrier(
+        "states", causal=_hcausal, **_hbusy, **({} if _htr is None else {"tr_s": _htr})))
+    _hxg, _hevg = _hsig.realize()
+    _hivg = _hS.intervals(_hevg, at="gate/1/by")
+    _hw = 4 / _hg.fs if _htr is None else _htr
+    _hin = _hbad = 0
+    for _hr in _hivg:
+        _hm = (_ht >= _hr["t_start_s"] + _hw) & (_ht <= _hr["t_stop_s"] - _hw)
+        _hin += int(_hm.sum())
+        _hbad += int(np.sum(_hxg[_hm] != float(_hr["state"])))
+    _hopen = np.array([e.t_s for e in _hevg if e.kind == "transition"])
+    _hsaid = np.array([r["t_start_s"] for r in _hivg[1:]])
+    _hgate.append((_hin / _hg.n, _hbad, max(np.abs(_hsaid - c).min() for c in _hopen) / _hw,
+                   _hopen.size, _hsaid.size))
+check("a carrier gated by a state process is idle exactly where the intervals say: more "
+      "than tr_s inside an interval every sample is the carrier or zero as that state says, "
+      "and each instant the gate switched is within tr_s of a stated boundary",
+      all(g[0] > 0.9 and g[1] == 0 and g[2] <= 1.0 and g[3] <= g[4] for g in _hgate),
+      "; ".join(f"{nm}: {g[0] * 100:.1f} % of samples checked, {g[1]} wrong, switching "
+                f"within {g[2]:.2f} tr_s, {g[3]} switchings for {g[4]} boundaries"
+                for nm, g in zip(("default 4-sample edge", "tr_s=100 ns",
+                                  "tr_s=100 ns causal"), _hgate))
+      + " (a dwell shorter than the edge is a runt the gate does not see)")
+
+_hgn = Grid(fs=1e7, n=1 << 21)
+_ht0, _ht1, _hdv = 40e-6, 10e-6, 0.05
+_hclean = Signal(seed=8, grid=_hgn).carrier("sine", f_hz=1e5, amp=0.5)
+_hnoisy = _hclean.copy().combine(Signal().carrier("states", levels=[0.0, _hdv],
+                                                  dwell=[_ht0, _ht1]))
+_hrts = _hnoisy.subchain("combine/1/others/0")
+_hp0, _hp1, _hrate = _ht0 / (_ht0 + _ht1), _ht1 / (_ht0 + _ht1), 1 / _ht0 + 1 / _ht1
+_hf, _hpxx = sp.welch(_hrts, fs=_hgn.fs, nperseg=1 << 14)
+_hb = (_hf >= 1e3) & (_hf <= 2e5)
+_hlor = 4 * _hdv ** 2 * _hp0 * _hp1 * _hrate / (_hrate ** 2 + (2 * np.pi * _hf[_hb]) ** 2)
+_hldb = 10 * np.log10(_hpxx[_hb] / _hlor)
+check("burst noise added with `combine` is the telegraph process theory describes: the "
+      "record is the clean signal plus the sub-chain, its variance is dv^2 p0 p1, and its "
+      "spectrum is the Lorentzian with corner (1/t0 + 1/t1) / 2 pi",
+      np.array_equal(_hnoisy.waveform(), _hclean.waveform() + _hrts)
+      and abs(_hrts.var() / (_hdv ** 2 * _hp0 * _hp1) - 1) < 0.08
+      and abs(_hldb.mean()) < 0.5 and _hldb.std() < 1.0
+      and _hnoisy.roles() == ["combine/1/others/0/states/0"],
+      f"dwells 40 us / 10 us, step 50 mV: variance {_hrts.var():.3e} (theory "
+      f"{_hdv ** 2 * _hp0 * _hp1:.3e}, bound 8 %); Welch PSD against the Lorentzian (corner "
+      f"{_hrate / (2 * np.pi) / 1e3:.1f} kHz) over 1 kHz..200 kHz: mean {_hldb.mean():+.2f} dB "
+      f"(bound 0.5), rms {_hldb.std():.2f} dB (bound 1.0)")
+
+from wfmsynth import recipes as _hR
+_hgf = Grid(fs=1e6, n=1 << 21)
+_hfl = Signal(seed=3, grid=_hgf).carrier("dc", level=0.0).combine(
+    _hR.flicker(f_lo_hz=10.0, f_hi_hz=1e5, rms=0.1))
+_hxf = _hfl.waveform()
+_hf, _hpxx = sp.welch(_hxf, fs=_hgf.fs, nperseg=1 << 15)
+_hb = (_hf >= 100.0) & (_hf <= 1e4)
+_hslope = np.polyfit(np.log10(_hf[_hb]), np.log10(_hpxx[_hb]), 1)[0]
+_hfdb = 10 * np.log10(_hpxx[_hb] / _hR.flicker_psd(_hf[_hb], 10.0, 1e5, rms=0.1))
+check("1/f noise is a COMPOSITION of two-state processes (`recipes.flicker`), not an op: "
+      "nine of them with corners two per decade from 10 Hz to 100 kHz have a spectral "
+      "slope of -1 over 100 Hz..10 kHz and the spectrum of their Lorentzians summed",
+      abs(_hslope + 1.0) < 0.1 and abs(_hfdb.mean()) < 0.5 and _hfdb.std() < 1.0
+      and len(_hfl.roles()) == 9 and abs(_hxf.std() / 0.1 - 1) < 0.1,
+      f"slope {_hslope:.3f} (bound -1 +/- 0.1) by Welch over 2.1 s; against `flicker_psd` "
+      f"mean {_hfdb.mean():+.2f} dB (bound 0.5), rms {_hfdb.std():.2f} dB (bound 1.0); rms "
+      f"{_hxf.std():.4f} for 0.1 stated; {len(_hfl.roles())} roles, one per process")
+
+# ============================================================ an OFDM source (GitHub #88)
+print("\n== OFDM: an inverse FFT per symbol, its receiver, and the error per resource element ==")
+from wfmsynth import ofdm as _ofm
+
+_ofnum = dict(n_fft=64, scs_hz=312.5e3, cp=16, active=52)
+_ofseed = 0x2F6E15                       # a PRBS state away from the sparse start at state 1
+
+
+def _ofsrc(n_sym, over=1, **kw):
+    p = dict(_ofnum, constellation="qam16", prbs=15, prbs_seed=_ofseed)
+    p.update(kw)
+    return Signal(seed=1, grid=Grid(fs=20e6 * over, n=80 * over * n_sym)).ofdm(**p)
+
+
+_oferr = {}
+for _ofname, _ofover, _ofkw in (("1x", 1, {}), ("4x", 4, {}),
+                                ("4x, edge window 8, pilots, cp 20/12", 4,
+                                 dict(window=8, pilots=[-21, -7, 7, 21], cp=[20, 12]))):
+    _ofs = _ofsrc(40, _ofover, **_ofkw)
+    _oferr[_ofname] = float(np.abs(_ofm.demodulate(_ofs.waveform(), _ofs.grid, _ofs.ops[0])
+                                   - _ofs.transmitted()[0]).max())
+# the record against the stated sum, with no FFT in it: symbol 2 of a 3x record, prefix included
+_ofs = _ofsrc(4, 3, amp=0.7)
+_ofrg = _ofm.resource_grid(_ofs.ops[0], _ofs.grid)
+_ofa, _ofn = int(_ofrg["start"][2]), int(_ofrg["samples"][2])
+_oft = (np.arange(_ofa, _ofa + _ofn) - _ofrg["useful"][2]) / _ofs.grid.fs
+_ofsum = 0.7 / np.sqrt(52) * (_ofrg["grid"][2][None, :] * np.exp(
+    2j * np.pi * 312.5e3 * np.outer(_oft, _ofrg["subcarriers"]))).sum(axis=1)
+_ofdirect = float(np.abs(_ofs.waveform()[_ofa:_ofa + _ofn] - _ofsum).max())
+check("an OFDM record is the stated sum of its subcarriers, and the receiver with the same "
+      "parameters returns the resource grid to rounding (bound 1e-12) -- on the FFT rate, on "
+      "a whole multiple of it, and with an edge window, pilots and unequal prefixes",
+      max(_oferr.values()) < 1e-12 and _ofdirect < 1e-12,
+      "largest |demodulated - sent|: " + "; ".join(f"{k}: {v:.1e}" for k, v in _oferr.items())
+      + f"; largest |record - direct sum of 52 exponentials| over one symbol: {_ofdirect:.1e}")
+
+_ofrate = _qrefusal(lambda: Signal(grid=Grid(fs=30.72e6, n=4096)).ofdm(
+    constellation="qpsk", prbs=9, **_ofnum).waveform())
+_ofm.register("validate_set", source="wfmsynth.validate, not a standard", **_ofnum)
+_ofnamed = Signal(seed=1, grid=Grid(fs=20e6, n=800)).ofdm("validate_set", constellation="qpsk", prbs=9)
+_ofm.unregister("validate_set")
+_ofop = _ofnamed.recipe()["ops"][0]
+_ofreplay = Signal.from_recipe(_json.loads(_ofnamed.to_json()))
+check("a grid that is not a whole multiple of the FFT rate is refused with the rate it needs "
+      "(nothing is resampled), and a named parameter set puts its name AND its numbers in "
+      "the recipe, which then replays with the registry empty",
+      "Grid(fs=20000000)" in _ofrate and "Nothing is resampled" in _ofrate
+      and _ofop["name"] == "validate_set" and _ofop["n_fft"] == 64 and _ofop["scs_hz"] == 312.5e3
+      and _ofop["cp"] == 16 and _ofop["active"] == 52 and "validate_set" not in _ofm.REGISTRY
+      and np.array_equal(_ofreplay.waveform(), _ofnamed.waveform()),
+      f"refusal: {_ofrate[:118]}...; recipe op: name={_ofop['name']!r}, n_fft={_ofop['n_fft']}, "
+      f"scs_hz={_ofop['scs_hz']:g}, cp={_ofop['cp']}, active={_ofop['active']}")
+
+
+def _ofshare(sc, lo_hz, hi_hz, over, m=1 << 16):
+    # independent rectangular symbols of (64 + 16) * over samples: a Dirichlet kernel squared
+    # on every active subcarrier
+    fs, ns = 20e6 * over, 80 * over
+    f = (np.arange(m) - m // 2) * fs / m
+    tot = np.zeros(m)
+    for k in sc:
+        u = np.pi * (f - k * 312.5e3) / fs
+        near = np.abs(np.sin(u)) < 1e-12
+        tot += np.where(near, float(ns), np.sin(ns * u) / np.where(near, 1.0, np.sin(u))) ** 2
+    return float(tot[(f >= lo_hz) & (f <= hi_hz)].sum() / tot.sum())
+
+
+_ofband = []
+for _ofact, _ofover in ((52, 1), (list(range(5, 21)), 1), (52, 4)):
+    _ofs = _ofsrc(4000, _ofover, constellation="qpsk", prbs=23, active=_ofact)
+    _ofsc = _ofm.plan(_ofs.ops[0], _ofs.grid)["subcarriers"]
+    _oflo, _ofhi = (_ofsc.min() - 0.5) * 312.5e3, (_ofsc.max() + 0.5) * 312.5e3
+    _ofsp = _sws.rf.spectrum(_ofs.waveform(), _ofs.grid, rbw_hz=312.5e3 / 8)
+    _oftot = _sws.rf.band_power(_ofsp, _ofsp["f_hz"][0], _ofsp["f_hz"][-1])
+    _ofband.append((_sws.rf.band_power(_ofsp, _oflo, _ofhi) / _oftot,
+                    _ofshare(_ofsc, _oflo, _ofhi, _ofover),
+                    _sws.rf.band_power(_ofsp, -_ofhi, -_oflo) / _oftot))
+_ofskirt = []
+for _ofw in (0, 8):
+    _ofs = _ofsrc(4000, 4, constellation="qpsk", prbs=23, window=_ofw)
+    _ofsp = _sws.rf.spectrum(_ofs.waveform(), _ofs.grid, rbw_hz=312.5e3 / 8)
+    _ofskirt.append(10 * np.log10(_sws.rf.band_power(_ofsp, 30.5 * 312.5e3, 34.5 * 312.5e3)
+                                  / _sws.rf.band_power(_ofsp, _ofsp["f_hz"][0], _ofsp["f_hz"][-1])))
+check("the occupied band is the active subcarriers: the share of the record's power between "
+      "the outermost active subcarriers (half a spacing beyond each) is the analytic one for "
+      "rectangular symbols to 0.001, a one-sided allocation leaves its mirror band empty, and "
+      "the edge window lowers the skirt 4 to 8 spacings out by more than 3 dB",
+      all(abs(got - want) < 1e-3 for got, want, _ in _ofband) and _ofband[1][2] < 0.005
+      and _ofskirt[0] - _ofskirt[1] > 3.0,
+      "measured / analytic share: " + ", ".join(f"{g:.5f} / {w:.5f}" for g, w, _ in _ofband)
+      + f" (52 about the centre; subcarriers 5..20, mirror band {_ofband[1][2]:.5f}; 52 at 4x); "
+      f"skirt {_ofskirt[0]:.1f} dB -> {_ofskirt[1]:.1f} dB with window=8")
+
+_oflv = np.arange(0.0, 9.01, 0.25)
+_oflaw = np.exp(-10 ** (_oflv / 10))
+_ofdist, _ofk4 = {}, {}
+for _ofna, _ofnf in ((2, 64), (4, 64), (12, 64), (52, 64), (300, 512)):
+    _ofg = Grid(fs=_ofnf * 15e3, n=(_ofnf + _ofnf // 8) * (460800 // _ofnf))
+    _ofx = Signal(seed=1, grid=_ofg).ofdm(n_fft=_ofnf, scs_hz=15e3, cp=_ofnf // 8, active=_ofna,
+                                          constellation="qpsk", prbs=23, prbs_seed=_ofseed).waveform()
+    _ofdist[_ofna] = float(np.abs(_sws.rf.ccdf(_ofx, levels_db=_oflv)["probability"]
+                                  - _oflaw).max())
+    _ofp = np.abs(_ofx) ** 2
+    _ofk4[_ofna] = float(np.mean(_ofp ** 2) / np.mean(_ofp) ** 2)
+check("the envelope approaches the complex-Gaussian law as active subcarriers are added: "
+      "E|x|^4 / E|x|^2^2 is 2 - 1/n for QPSK on n subcarriers (2 is the Gaussian's) -- to "
+      "0.005 on 2, 4 and 12, where the departure is large, and to 0.02 on 52 and 300 -- and "
+      "the CCDF's largest distance from exp(-level) over 0 .. 9 dB falls with every step from "
+      "2 to 300 subcarriers, below 0.004 at 300",
+      all(abs(_ofk4[n] - (2 - 1 / n)) < (0.005 if n <= 12 else 0.02) for n in _ofk4)
+      and all(_ofdist[a] > _ofdist[b] for a, b in zip((2, 4, 12, 52), (4, 12, 52, 300)))
+      and _ofdist[300] < 0.004,
+      "n: fourth moment (2 - 1/n), CCDF distance -- "
+      + "; ".join(f"{n}: {_ofk4[n]:.4f} ({2 - 1 / n:.4f}), {_ofdist[n]:.4f}" for n in _ofk4))
+
+_ofevm = []
+for _ofmap, _ofsnr in (("qpsk", 10.0), ("qpsk", 25.0), ("qam64", 25.0)):
+    _ofs = _ofsrc(2000, constellation=_ofmap)
+    _ofbw = _ofm.plan(_ofs.ops[0], _ofs.grid)["noise_bw_hz"]
+    _ofs = _ofs.awgn(snr_db=_ofsnr, bw_hz=_ofbw)
+    _ofsent = _ofs.transmitted()[0]
+    _ofgot = _sws.rf.evm(_ofs.waveform(), _ofs.grid, _ofsent, ofdm=_ofs.ops[0])
+    _ofevm.append((_ofmap, _ofsnr, _ofgot["evm"],
+                   float(np.sqrt(_ofbw * _ofs.rf_report()[0]["n0"]
+                                 / np.mean(np.abs(_ofsent) ** 2))), _ofgot["removed"]))
+check("EVM per resource element against the truth, in white noise, is the analytic "
+      "sqrt(n_active * scs_hz * N0) / rms(sent) to 1 %, with nothing fitted -- so an SNR "
+      "stated in n_active * scs_hz reads back as that many dB of EVM",
+      all(abs(got / want - 1) < 0.01 and removed == {} and abs(20 * np.log10(got) + snr) < 0.2
+          for _, snr, got, want, removed in _ofevm),
+      "; ".join(f"{m} at {s:g} dB: {100 * g:.3f} % measured, {100 * w:.3f} % analytic"
+                for m, s, g, w, _ in _ofevm) + " (104000 elements each)")
+
+_ofs = _ofsrc(50)
+_ofsent = _ofs.transmitted()[0]
+_ofx = _ofs.copy().filter("fir", taps=[1.0, 0.0, 0.0, 0.4]).waveform()
+_ofraw = _sws.rf.evm(_ofx, _ofs.grid, _ofsent, ofdm=_ofs.ops[0])
+_ofeq = _sws.rf.evm(_ofx, _ofs.grid, _ofsent, ofdm=_ofs.ops[0], correct=("equalizer",))
+_ofh = 1 + 0.4 * np.exp(-2j * np.pi * 3 * _ofraw["subcarriers"] / 64)
+_ofherr = float(np.abs(_ofeq["removed"]["equalizer"] - _ofh).max())
+_ofs4 = _ofsrc(20, 4)
+_ofx4 = _ofs4.waveform()
+_oflate = np.concatenate([np.zeros(9, complex), _ofx4[:-9]])          # 2.25 FFT-rate samples
+_oftim = _sws.rf.evm(_oflate, _ofs4.grid, _ofs4.transmitted()[0], ofdm=_ofs4.ops[0],
+                     correct=("timing",))
+_oftraw = _sws.rf.evm(_oflate, _ofs4.grid, _ofs4.transmitted()[0], ofdm=_ofs4.ops[0])["evm"]
+_ofcfo = _sws.rf.evm(_ofs.copy().freq_offset(f_hz=500.0).waveform(), _ofs.grid, _ofsent,
+                     ofdm=_ofs.ops[0], correct=("common_phase",))
+_ofslope = float(np.polyfit(_ofs.transmitted()[1],
+                            np.unwrap(_ofcfo["removed"]["common_phase_rad"]), 1)[0] / (2 * np.pi))
+_ofnot = _qrefusal(lambda: _sws.rf.evm(_ofx, _ofs.grid, _ofsent, ofdm=_ofs.ops[0],
+                                       correct=("frequency",)))
+check("an OFDM EVM counts everything until a correction is named, and returns what each one "
+      "took out: a two-path channel reads |H - 1| = 0.4 raw and the equaliser returns H(k) "
+      "per subcarrier; a delay inside the prefix is found as its phase slope; a 500 Hz "
+      "frequency error comes back as each symbol's rotation, 2*pi*f*t; and a single-carrier "
+      "correction is refused by name",
+      abs(_ofraw["evm"] - 0.4) < 1e-9 and _ofeq["evm"] < 1e-12 and _ofherr < 1e-12
+      and _oftraw > 0.5 and _oftim["evm"] < 1e-9
+      and abs(_oftim["removed"]["timing_s"] * 20e6 - 2.25) < 1e-6
+      and abs(_ofslope / 500.0 - 1) < 2e-3 and "leakage between subcarriers" in _ofnot,
+      f"two-path channel: {_ofraw['evm']:.6f} raw, {_ofeq['evm']:.1e} equalised, largest "
+      f"|removed - H(k)| {_ofherr:.1e}; 2.25 samples late: {_oftraw:.3f} raw, "
+      f"{_oftim['evm']:.1e} with timing removed, found "
+      f"{_oftim['removed']['timing_s'] * 20e6:.7f} samples; 500 Hz off: per-symbol phase slope "
+      f"{_ofslope:.2f} Hz, {100 * _ofcfo['evm']:.3f} % left (the leakage between subcarriers)")
+
+# ---- the pieces measure each other: an OFDM receiver reads back a composed multipath channel
+_ofmg = Grid(fs=20e6, n=1 << 14, fc_hz=2.4e9 + 1e6)
+_ofmp = dict(_ofnum, constellation="qpsk", prbs=15, prbs_seed=_ofseed)
+_ofmtau, _ofmgain = 0.33e-6, 0.4
+_ofmtx = Signal(seed=1, grid=_ofmg).ofdm(**_ofmp)
+_ofmx = _sws.recipes.multipath(_ofmtx, delays_s=[0.0, _ofmtau], gains=[1.0, _ofmgain]).waveform()
+_ofmsent = _ofmtx.transmitted()[0]
+_ofmraw = _sws.rf.evm(_ofmx, _ofmg, _ofmsent, ofdm=_ofmp)
+_ofmeq = _sws.rf.evm(_ofmx, _ofmg, _ofmsent, ofdm=_ofmp, correct=("equalizer",))
+_ofmk = np.asarray(_ofmeq["subcarriers"])
+_ofmh = 1.0 + _ofmgain * np.exp(-2j * np.pi * (_ofmg.fc_hz + _ofmk * 312.5e3) * _ofmtau)
+_ofmerr = float(np.abs(_ofmeq["removed"]["equalizer"] - _ofmh).max())
+_ofmno = float(np.abs(_ofmeq["removed"]["equalizer"]
+                      - (1.0 + _ofmgain * np.exp(-2j * np.pi * _ofmk * 312.5e3 * _ofmtau))).max())
+check("an OFDM frame through recipes.multipath: the per-subcarrier equaliser returns "
+      "H(k) = 1 + g exp(-j 2 pi (fc + k scs) tau) for an echo 6.6 samples late, the carrier's "
+      "turn included, and the raw EVM is the echo's size",
+      abs(_ofmraw["evm"] - _ofmgain) < 1e-3 and _ofmerr < 1e-3 and _ofmno > 0.5 * _ofmgain,
+      f"raw EVM {_ofmraw['evm']:.6f} against {_ofmgain}; |equaliser - H(k)| <= {_ofmerr:.1e} "
+      f"(bound 1e-3, the fractional delay's interpolator); against the same echo without the "
+      f"carrier's turn {_ofmno:.3f}; equalised EVM {_ofmeq['evm']:.1e}")
+
+# ---- a burst: the stated SNR per element, the symbols that were sent, a channel that changes
+_ofb = _ofsrc(800, n_symbols=400)                                  # a burst over half the record
+_ofbp = _ofm.plan(_ofb.ops[0], _ofb.grid)
+_ofbsent = _ofb.transmitted()[0]
+
+
+def _ofbevm(**kw):
+    return _RF.evm(_ofb.copy().awgn(snr_db=20.0, bw_hz=_ofbp["noise_bw_hz"], **kw).waveform(),
+                     _ofb.grid, _ofbsent, ofdm=_ofb.ops[0])["evm_db"]
+
+
+_ofbref, _ofbrec = _ofbevm(ref_power=_ofbp["ref_power"]), _ofbevm()
+_ofbs = _ofsrc(50)
+_ofbx, _ofbt = _ofbs.waveform(), _ofbs.transmitted()[0]
+_ofbgone = _ofbx.copy()
+_ofbgone[80 * 25:] = 0.0                                           # the second half never sent
+_ofbon = np.arange(50) < 25
+_ofball = _RF.evm(_ofbgone, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0])["evm"]
+_ofbsel = _RF.evm(_ofbgone, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0], symbols=_ofbon)
+_ofbecho = np.concatenate([np.zeros(3), _ofbx[:-3]])               # 3 samples late: in the prefix
+_ofbmove = _ofbx + np.where(np.arange(_ofbx.size) < 80 * 25, 0.4, -0.3j) * _ofbecho
+_ofbone = _RF.evm(_ofbmove, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0], correct=("equalizer",))["evm"]
+_ofbblk = _RF.evm(_ofbmove, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0], correct=("equalizer",),
+                    block=25)
+_ofbturn = np.exp(-2j * np.pi * 3 * _ofbblk["subcarriers"] / 64)
+_ofbherr = float(np.abs(_ofbblk["removed"]["equalizer"]
+                        - [1 + 0.4 * _ofbturn, 1 - 0.3j * _ofbturn]).max())
+check("a BURST: noise that states its reference (plan()['ref_power'], the useful part's power) "
+      "is the stated SNR per resource element, where the record's own mean power reads 3 dB "
+      "high on a burst over half the record; EVM over the symbols a mask names is the sent "
+      "ones' alone; and a channel that changes within the record is equalised per block",
+      abs(_ofbref + 20.0) < 0.1 and abs(_ofbrec + 20.0 + 10 * np.log10(2.0)) < 0.1
+      and abs(_ofball - np.sqrt(0.5)) < 0.01 and _ofbsel["evm"] < 1e-12
+      and _ofbsel["n_symbols"] == 25 and 0.2 < _ofbone < 0.3 and _ofbblk["evm"] < 1e-12
+      and _ofbherr < 1e-9,
+      f"400 symbols in a record of 800 at a stated 20 dB: EVM {_ofbref:.2f} dB with ref_power, "
+      f"{_ofbrec:.2f} dB against the record's mean; a record whose second half was never "
+      f"sent: {_ofball:.4f} over every symbol (sqrt(1/2)), {_ofbsel['evm']:.1e} over the 25 "
+      f"sent; an echo of 0.4 then -0.3j: {_ofbone:.3f} with one equaliser, "
+      f"{_ofbblk['evm']:.1e} with one per 25 symbols, each within {_ofbherr:.1e} of its H(k)")
+
+# ---- what a later cut ends: a state's dwell, an OFDM symbol
+from wfmsynth import states as _ofst                                           # noqa: E402
+_ofcg = Grid(fs=1e6, n=1 << 14)
+_ofcst = Signal().carrier("states", dwell=4e-4)
+_ofcuts = {
+    "sequence": (Signal(seed=4, grid=_ofcg).sequence(
+        [{"chain": _ofcst, "duration_s": 3e-3},
+         {"chain": Signal().carrier("dc", level=0.5)}]), 3e-3),
+    "sample_clock": (Signal(seed=4, grid=_ofcg).carrier("states", dwell=4e-4)
+                     .sample_clock(n_out=4096), 4096e-6),
+    "delay": (Signal(seed=4, grid=_ofcg).carrier("states", dwell=4e-4).delay(by=1.5e-3),
+              _ofcg.n / 1e6),
+    "trigger": (Signal(seed=4, grid=_ofcg).carrier("states", dwell=4e-4)
+                .trigger(pre_s=0.5e-3, post_s=1.5e-3, level=0.5), 2e-3),
+}
+_ofclast = {k: (_ofst.intervals(s.event_list())[-1], t) for k, (s, t) in _ofcuts.items()}
+_ofcseq = Signal(seed=1, grid=Grid(fs=20e6, n=800)).sequence(
+    [{"chain": Signal().ofdm(constellation="qpsk", prbs=7, **_ofnum), "duration_s": 200 / 20e6},
+     {"chain": Signal().ofdm(constellation="qpsk", prbs=7, **_ofnum)}])
+_ofcev = [e for e in _ofcseq.event_list() if e.kind == "ofdm_symbol"]
+_ofcwhole = [e.t_s + e.params["cp_s"] for e in _ofcev if e.params["complete"]]
+check("an event that states an EXTENT ends where a later cut ends the samples: a state "
+      "interval under way at the end of a `sequence` segment, of a shorter stored record, of "
+      "the record after a `delay` and of a `trigger` window stops there with complete=False; "
+      "an OFDM symbol a segment cuts is marked, and the complete ones are transmitted()'s",
+      all(abs(r["t_stop_s"] - t) < 1e-9 and not r["complete"] for r, t in _ofclast.values())
+      and [e.params["complete"] for e in _ofcev] == [True, True, False] + [True] * 7 + [False]
+      and max(e.sample + e.width for e in _ofcev) == 800
+      and np.allclose(_ofcwhole, _ofcseq.transmitted()[1], rtol=0, atol=1e-15),
+      "; ".join(f"{k}: last interval ends {r['t_stop_s'] * 1e3:.3f} ms (cut {t * 1e3:.3f})"
+                for k, (r, t) in _ofclast.items())
+      + f"; OFDM: {len(_ofcev)} symbol events, {len(_ofcwhole)} complete = "
+        f"{len(_ofcseq.transmitted()[1])} sent, none past sample 800")
+
+# ---- recipes: compositions worth shipping (GitHub #91)
+# Each is a function that returns a chain, so each is checked twice: against that chain written
+# out by hand (same recipe, same samples), and for the property it states, against a closed
+# form: Fourier terms, the logistic, Bessel functions, sqrt(2 n), the textbook buck ripple.
+print("\n== recipes: hum, ripple, pickup, contacts, an oscillator starting, a multitone and a "
+      "buck converter, each a chain of existing ops (GitHub #91) ==")
+import time as _rtime
+from scipy import special as _rsp
+_rR = _sws.recipes
+
+
+def _rrec(sub, grid):
+    return Signal(seed=1, grid=grid).carrier("dc", level=0.0).combine(sub)
+
+
+def _rsame(a, b):
+    return (_json.dumps(a.recipe(), sort_keys=True) == _json.dumps(b.recipe(), sort_keys=True)
+            and np.array_equal(a.waveform(), b.waveform()))
+
+
+def _rline(x, fs, f_hz):
+    c = np.mean(x * np.exp(-2j * np.pi * f_hz * np.arange(len(x)) / fs))
+    return c if np.iscomplexobj(x) else 2.0 * c
+
+
+def _rfreq(x, fs, lo, hi):
+    f = np.fft.rfftfreq(len(x), 1.0 / fs)
+    y = np.fft.irfft(np.where((f > lo) & (f < hi), np.fft.rfft(x), 0.0), len(x))
+    return np.gradient(np.unwrap(np.angle(sp.hilbert(y)))) * fs / (2 * np.pi)
+
+
+_rhg = Grid(fs=16384.0, n=1 << 16)
+_rha = 0.5 / (2 * np.pi * 1.0 * 50.0)
+_rhum = _rrec(_rR.hum(50.0, amp=0.02, harmonics={3: 0.3}, f_drift_hz=0.5, f_wander_hz=1.0), _rhg)
+_rhhand = _rrec(Signal().carrier("sine", f_hz=50.0, amp=0.02, phase_rad=0.0)
+                .combine([Signal().carrier("sine", f_hz=150.0, amp=0.006, phase_rad=0.0)])
+                .delay(by=Signal().carrier("sine", f_hz=1.0, amp=_rha, offset=_rha,
+                                           phase_rad=-0.5 * np.pi)), _rhg)
+_rhx = _rhum.waveform()
+_rht = np.arange(_rhg.n) / _rhg.fs
+_rhk = slice(_rhg.n // 8, -_rhg.n // 8)
+_rherr = {k: float(np.abs(_rfreq(_rhx, _rhg.fs, 50.0 * k - 20, 50.0 * k + 20)[_rhk]
+                          - k * (50.0 - 0.5 * np.sin(2 * np.pi * _rht))[_rhk]).max())
+          for k in (1, 3)}
+_rhs = _rrec(_rR.hum(50.0, amp=0.02, harmonics={2: 0.5, 3: 0.3}), _rhg).waveform()
+_rhl = [abs(_rline(_rhs, _rhg.fs, 50.0 * k)) for k in (1, 2, 3, 4)]
+check("recipes.hum is the chain it says (sines, one combine, one delay), its lines are the "
+      "stated amplitudes to 1e-12, and a wandering line frequency moves the fundamental and "
+      "the third harmonic by the same fraction: each follows k*(f - f_drift*sin) to 1e-4 Hz",
+      _rsame(_rhum, _rhhand) and np.allclose(_rhl[:3], [0.02, 0.01, 0.006], rtol=1e-12)
+      and _rhl[3] < 1e-15 and _rherr[1] < 1e-4 and _rherr[3] < 3e-4 and _rhum.roles() == [],
+      f"lines {_rhl[0]:.6f} / {_rhl[1]:.6f} / {_rhl[2]:.6f}, 4th {_rhl[3]:.0e}; 0.5 Hz drift "
+      f"at 1 Hz: frequency error {_rherr[1]:.1e} Hz on 50 Hz, {_rherr[3]:.1e} Hz on 150 Hz")
+
+_rpg = Grid(fs=1e9, n=1 << 18)
+_rpf, _rpd, _rpq, _rpper = _rpg.fs / _rpg.n * 128, 0.3, 4.0, 32
+_rpring = _rpg.fs / _rpper
+_rpx = _rrec(_rR.ripple(_rpf, amp=0.01, duty=_rpd), _rpg).waveform()
+_rpfund = abs(_rline(_rpx, _rpg.fs, _rpf))
+_rpwant = 2 * 0.01 * np.sin(np.pi * _rpd) / (np.pi ** 2 * _rpd * (1 - _rpd))
+_rpy = _rrec(_rR.ripple(_rpf, amp=0.01, duty=_rpd, spike=0.05, f_ring_hz=_rpring, q=_rpq),
+             _rpg).waveform() - _rpx
+_rpfit = []
+for _rpe in (3.0, 3.0 + _rpd):
+    _rpi = int(np.ceil(_rpe / _rpf * _rpg.fs))
+    _rptt = np.arange(_rpi, _rpi + int(2.5 * _rpq * _rpper)) / _rpg.fs - _rpe / _rpf
+    _rpb = np.exp((-np.pi * _rpring / _rpq
+                   + 2j * np.pi * _rpring * np.sqrt(1 - 1 / (4 * _rpq ** 2))) * _rptt)
+    _rpA = np.column_stack([_rpb.imag, _rpb.real])
+    _rpc = np.linalg.lstsq(_rpA, _rpy[_rpi:_rpi + len(_rptt)], rcond=None)[0]
+    _rpfit.append((float(np.hypot(*_rpc)) / 0.05, float(np.sign(_rpc[0])),
+                   float(np.abs(_rpy[_rpi:_rpi + len(_rptt)] - _rpA @ _rpc)[_rpper:].max()) / 0.05))
+_rsg = Grid(fs=250e6, n=1 << 20)
+_rsf = 2048 * _rsg.fs / _rsg.n
+_rsx = _rrec(_rR.ripple(_rsf, amp=0.01, spread_pct=6.0, f_spread_hz=4 * _rsg.fs / _rsg.n),
+             _rsg).waveform()
+_rsr = _rfreq(_rsx, _rsg.fs, 0.8 * _rsf, 1.2 * _rsf)[_rsg.n // 16:-_rsg.n // 16] / _rsf
+check("recipes.ripple: the triangle's fundamental is its Fourier term to 1e-6; each "
+      "switching edge starts a ring of the stated frequency and decay (under 1 % of spike "
+      "left after fitting amplitude and phase), up at the trough and down at the peak, 3 to "
+      "7 % under `spike`; and a 6 % spread clock sweeps 0.94 .. 1.06 of f_sw",
+      abs(_rpfund / _rpwant - 1) < 1e-6 and abs((_rpx.max() - _rpx.min()) / 0.02 - 1) < 1e-3
+      and all(0.92 < a < 0.98 and left < 0.01 for a, _, left in _rpfit)
+      and [s for _, s, _ in _rpfit] == [1.0, -1.0]
+      and abs(_rsr.min() - 0.94) < 1e-3 and abs(_rsr.max() - 1.06) < 1e-3,
+      f"fundamental {_rpfund:.8f} against {_rpwant:.8f}; ring at 32 samples a period, q=4: "
+      f"{_rpfit[0][0]:.4f} of spike rising, {_rpfit[1][0]:.4f} falling, residual "
+      f"{_rpfit[0][2]:.4f} / {_rpfit[1][2]:.4f} of spike; swept {_rsr.min():.4f} .. "
+      f"{_rsr.max():.4f}")
+
+_rkg = Grid(fs=1e7, n=1 << 16)
+_rkc, _rkm = 4096 * _rkg.fs / _rkg.n, 64 * _rkg.fs / _rkg.n
+_rkam = _rrec(_rR.pickup(_rkc, amp=0.01, depth=0.4, message=Signal().carrier("sine", f_hz=_rkm)),
+              _rkg).waveform()
+_rkfm = _rrec(_rR.pickup(_rkc, amp=0.01, dev_hz=2 * _rkm,
+                         message=Signal().carrier("sine", f_hz=_rkm, phase_rad=0.5 * np.pi)),
+              _rkg).waveform()
+_rkl = [abs(_rline(_rkam, _rkg.fs, f)) for f in (_rkc - _rkm, _rkc, _rkc + _rkm)]
+_rkb = np.array([abs(_rline(_rkfm, _rkg.fs, _rkc + k * _rkm)) / 0.01 for k in range(5)])
+_rkberr = float(np.abs(_rkb - np.abs(_rsp.jv(np.arange(5), 2.0))).max())
+check("recipes.pickup: AM puts depth/2 of the carrier either side of it, and FM at index 2 "
+      "has lines of |J_k(2)| to 1e-4",
+      np.allclose(_rkl, [0.002, 0.01, 0.002], rtol=1e-12) and _rkberr < 1e-4,
+      f"AM depth 0.4 on 10 mV: {1e3 * _rkl[0]:.6f} / {1e3 * _rkl[1]:.6f} / "
+      f"{1e3 * _rkl[2]:.6f} mV; FM lines against Bessel: largest error {_rkberr:.1e}")
+
+_rbg = Grid(fs=1e6, n=1 << 13)
+_rbs = Signal(seed=1, grid=_rbg).carrier("dc", level=1.0).gate(
+    by=_rR.bounce(t_s=2e-3, gap_s=400e-6, n=3, ratio=0.5))
+_rbx, _rbev = _rbs.realize()
+_rbd = np.diff(_rbx)
+_rbup, _rbdn = (np.flatnonzero(_rbd > 0.5) + 1) / _rbg.fs, (np.flatnonzero(_rbd < -0.5) + 1) / _rbg.fs
+_rbc, _rbo = _rR.bounce_times(2e-3, 400e-6, n=3, ratio=0.5)
+_rbtr = [e for e in _rbev if e.kind == "transition"]
+_rig = Grid(fs=1e6, n=1 << 21)
+_ris = Signal(seed=4, grid=_rig).carrier("dc", level=1.0).gate(
+    by=_rR.intermittent(closed_s=5e-3, open_s=50e-6))
+_rix, _riev = _ris.realize()
+_rid = {s: np.array([r["t_stop_s"] - r["t_start_s"]
+                     for r in _hS.intervals(_riev, at="gate/1/by")
+                     if r["state"] == s and r["complete"]]) for s in (0, 1)}
+check("recipes.bounce closes n + 1 times at the stated instants with each gap `ratio` of "
+      "the one before, read off the samples and off the gate's own transition events; "
+      "recipes.intermittent opens with the stated mean dwells (within 4 standard errors) "
+      "under one role",
+      len(_rbup) == 4 and len(_rbdn) == 3 and len(_rbtr) == 7
+      and np.abs(_rbup - _rbc).max() < 1e-12 and np.abs(_rbdn - _rbo).max() < 1e-12
+      and np.allclose(_rbup[1:] - _rbdn, [400e-6, 200e-6, 100e-6], atol=1e-12)
+      and _ris.roles() == ["gate/1/by/states/0"]
+      and all(abs(_rid[s].mean() / m - 1) < 4 / np.sqrt(len(_rid[s]))
+              for s, m in ((0, 5e-3), (1, 50e-6))),
+      f"bounce: closes at {np.round(_rbup * 1e3, 3)} ms, gaps "
+      f"{np.round((_rbup[1:] - _rbdn) * 1e6, 3)} us; intermittent: {len(_rid[1])} opens of "
+      f"mean {1e6 * _rid[1].mean():.2f} us (50), closed {1e3 * _rid[0].mean():.3f} ms (5)")
+
+_rog = Grid(fs=160e6, n=1 << 17)
+_ros = _rR.oscillator_startup(10e6, startup_s=200e-6, ppm=300.0, settle_s=100e-6,
+                              sig=Signal(seed=1, grid=_rog))
+_roe = _ros.subchain("gain/1/by")
+_rot = np.arange(_rog.n) / _rog.fs
+_rotau = 100e-6 / (2 * np.log(9.0))
+_roerr = float(np.abs(_roe - 1 / (1 + np.exp(-(_rot - 150e-6) / _rotau))).max())
+
+
+def _rocross(level):
+    i = int(np.argmax(_roe >= level))
+    return _rot[i - 1] + (level - _roe[i - 1]) / (_roe[i] - _roe[i - 1]) / _rog.fs
+
+
+_roph = np.unwrap(np.angle(sp.hilbert(_ros.waveform() / _roe))) - 2 * np.pi * 10e6 * _rot
+_row = int(10e-6 * _rog.fs)
+_rotc = np.arange(20e-6, 500e-6, 10e-6)
+_rofe = np.array([(_roph[int(c * _rog.fs) + _row] - _roph[int(c * _rog.fs) - _row])
+                  / (2 * np.pi * 2 * _row / _rog.fs) for c in _rotc])
+_roslope, _roat0 = np.polyfit(_rotc, np.log(_rofe), 1)
+_roend = float((_roph[-3000] - _roph[-19000]) / (2 * np.pi * 16000 / _rog.fs))
+check("recipes.oscillator_startup: the amplitude is the logistic to 1e-12, at 90 % at "
+      "startup_s with a 10-90 % time of rise_s; the frequency starts ppm high, decays with "
+      "settle_s (both to 0.5 %) and ends within 0.3 ppm",
+      _roerr < 1e-12 and abs(_rocross(0.9) - 200e-6) < 1e-10
+      and abs(_rocross(0.9) - _rocross(0.1) - 100e-6) < 1e-10
+      and abs(np.exp(_roat0) / 3000.0 - 1) < 5e-3 and abs(-1 / _roslope / 100e-6 - 1) < 5e-3
+      and abs(_roend) < 3.0 and _ros.roles() == [],
+      f"envelope error {_roerr:.1e}; 90 % at {1e6 * _rocross(0.9):.4f} us, 10-90 % "
+      f"{1e6 * (_rocross(0.9) - _rocross(0.1)):.4f} us; starts {np.exp(_roat0) / 10:.2f} ppm "
+      f"high (300), time constant {-1e6 / _roslope:.3f} us (100), ends {_roend:.2f} Hz high")
+
+_rmg = Grid(fs=64e6, n=1 << 16)
+_rmi = Grid(fs=64e6, n=1 << 16, fc_hz=1e9)
+_rmd = _rmg.fs / _rmg.n
+
+
+def _rmt(n, grid=_rmg, **kw):
+    if kw.get("domain") == "iq":
+        return _rR.multitone(-32 * (n - 1) * _rmd, 32 * (n - 1) * _rmd, n,
+                             sig=Signal(seed=1, grid=_rmi), **kw)
+    return _rR.multitone(1024 * _rmd, (1024 + 64 * (n - 1)) * _rmd, n,
+                         sig=Signal(seed=1, grid=grid), **kw)
+
+
+def _rcrest(x):
+    return float(np.abs(x).max() / np.sqrt(np.mean(np.abs(x) ** 2)))
+
+
+_rmc = {(n, p, d): _rcrest(_rmt(n, phase=p, domain=d, seed=3 if p == "random" else None).waveform())
+        for n in (9, 33, 129) for p in _rR.PHASES for d in ("real", "iq")}
+_rmf, _rmph, _rmkept = _rR.multitone_plan(
+    1024 * _rmd, (1024 + 64 * 32) * _rmd, 33, notch=((1024 + 64 * 14) * _rmd, (1024 + 64 * 18) * _rmd))
+_rmn = _rmt(33, notch=((1024 + 64 * 14) * _rmd, (1024 + 64 * 18) * _rmd))
+_rml = np.array([_rline(_rmn.waveform(), _rmg.fs, f) for f in _rmf])
+_rmlerr = float(np.abs(_rml[_rmkept] - np.sqrt(2 / 33) * np.exp(1j * _rmph[_rmkept])).max())
+_rmo = np.array([abs(_rline(_rmn.copy().law("tanh", gain=1.0, sat=3.0).waveform(), _rmg.fs, f))
+                 for f in _rmf])
+_rmnpr = float(20 * np.log10(_rmo[_rmkept].mean() / np.sqrt(np.mean(_rmo[~_rmkept] ** 2))))
+_rmcost = {}
+for _rmdom in ("real", "iq"):
+    _rms = _rmt(1024, domain=_rmdom) if _rmdom == "iq" else _rR.multitone(
+        64 * _rmd, (64 + 16 * 1023) * _rmd, 1024, sig=Signal(seed=1, grid=_rmg))
+    _rmt0 = _rtime.perf_counter()
+    _rms.waveform()
+    _rmcost[_rmdom] = (_rtime.perf_counter() - _rmt0, len(_rms.to_json()))
+check("recipes.multitone: every kept line has the stated level and phase to 1e-12 and the "
+      "notch is empty; in-phase tones have a crest factor of sqrt(2 n) on a voltage and "
+      "sqrt(n) on an envelope, Newman and Schroeder stay under 2.0 and 1.42 from 9 to 129 "
+      "tones, random phases sit between; and a compressing amplifier fills the notch",
+      _rmlerr < 1e-12 and np.abs(_rml[~_rmkept]).max() < 1e-13
+      and all(abs(_rmc[n, "zero", "real"] / np.sqrt(2 * n) - 1) < 1e-3
+              and abs(_rmc[n, "zero", "iq"] / np.sqrt(n) - 1) < 1e-9
+              and all(1.75 < _rmc[n, p, "real"] < 2.0 and 1.3 < _rmc[n, p, "iq"] < 1.42
+                      for p in ("newman", "schroeder"))
+              and all(_rmc[n, "newman", d] < _rmc[n, "random", d] < _rmc[n, "zero", d]
+                      for d in ("real", "iq")) for n in (9, 33, 129))
+      and 25 < _rmnpr < 45,
+      "crest, voltage / envelope -- "
+      + "; ".join(f"{n} tones: " + ", ".join(
+          f"{p} {_rmc[n, p, 'real']:.3f} / {_rmc[n, p, 'iq']:.3f}" for p in _rR.PHASES)
+          for n in (9, 33, 129))
+      + f". Notch: {np.abs(_rml[~_rmkept]).max():.1e} left, {_rmnpr:.1f} dB noise power "
+        f"ratio after tanh with rails at 3 rms. Cost of 1024 tones on 65536 samples: "
+        f"{_rmcost['real'][0]:.2f} s and {_rmcost['real'][1] // 1000} kB of recipe on a "
+        f"voltage, {_rmcost['iq'][0]:.2f} s and {_rmcost['iq'][1] // 1000} kB on an envelope")
+
+_rtg = Grid(fs=1e6, n=1 << 12, fc_hz=1e9)
+_rtf = 64 * _rtg.fs / _rtg.n
+_rts_ = Signal(seed=1, grid=_rtg).spur(f_hz=_rtf, dbc=-6.0, ref_power=4.0, phase_rad=0.3)
+_rtx = _rts_.waveform()
+_rtc = _rline(_rtx, _rtg.fs, _rtf)
+_rtno = _qrefusal(lambda: Signal(seed=1, grid=_rtg).spur(f_hz=_rtf, dbc=0.0).waveform())
+check("a spur may start a chain: it is then an unmodulated carrier of power "
+      "ref_power * 10^(dbc/10) at f_hz, with nothing else in the record, and without "
+      "ref_power it is refused by name",
+      abs(abs(_rtc) - np.sqrt(4.0 * 10 ** -0.6)) < 1e-12 and abs(np.angle(_rtc) - 0.3) < 1e-12
+      and abs(np.mean(np.abs(_rtx) ** 2) - 4.0 * 10 ** -0.6) < 1e-12
+      and "spur: this op starts the chain" in _rtno,
+      f"amplitude {abs(_rtc):.9f} against {np.sqrt(4.0 * 10 ** -0.6):.9f}, phase "
+      f"{np.angle(_rtc):.6f} rad (0.3)")
+
+_rug = Grid(fs=400e6, n=1 << 19)
+_rures = []
+with warnings.catch_warnings(record=True) as _ruw:
+    warnings.simplefilter("always")
+    for _ruc in (dict(v_in=12.0, duty=0.275, f_sw_hz=500e3, l_h=10e-6, c_f=22e-6, r_load_ohm=0.5),
+                 dict(v_in=12.0, duty=0.5, f_sw_hz=500e3, l_h=10e-6, c_f=22e-6, r_load_ohm=0.5),
+                 dict(v_in=5.0, duty=0.66, f_sw_hz=500e3, l_h=4.7e-6, c_f=10e-6, r_load_ohm=1.0)):
+        _rux = _rR.buck(sig=Signal(seed=1, grid=_rug), **_ruc).waveform()
+        _rub = _rR.buck_ripple(**_ruc)
+        _rut = _rux[-int(20 * _rug.fs / _ruc["f_sw_hz"]):]
+        _ruf = float(np.fft.rfftfreq(len(_rut), 1 / _rug.fs)[
+            np.argmax(np.abs(np.fft.rfft(_rut - _rut.mean())))])
+        _rures.append((_ruc, float(_rut.mean()) / _rub["v_out_v"],
+                       float(_rut.max() - _rut.min()) / _rub["v_ripple_pp_v"], _ruf,
+                       _rub["v_ripple_pp_v"], float(abs(_rux[0])), _rub["f0_hz"]))
+check("recipes.buck, a synchronous buck as ONE net (a PWM driver, an inductor, a capacitor, "
+      "a load): the settled mean is duty*v_in*R/(R + r_on) to 1e-5, the ripple is at f_sw "
+      "and its peak-to-peak is the textbook v_in*D*(1-D)/(8*L*C*f_sw^2) to 0.5 % on three "
+      "converters, it starts at rest, and `net` warns of nothing",
+      all(abs(m - 1) < 1e-5 and abs(r - 1) < 5e-3 and abs(f / c["f_sw_hz"] - 1) < 1e-9
+          and x0 < 1e-9 for c, m, r, f, _, x0, _ in _rures)
+      and not [w for w in _ruw if str(w.message).startswith("net:")],
+      "; ".join(f"{c['v_in']:g} V at duty {c['duty']}: {1e3 * pp * r:.4f} mV against "
+                f"{1e3 * pp:.4f} mV ({100 * (r - 1):+.3f} %), f_sw/f0 {c['f_sw_hz'] / f0:.1f}"
+                for c, _, r, _, pp, _, f0 in _rures))
+
+print("\n== a swept-wavelength record: a laser in its own frame, delay and combine as the "
+      "interferometer, a resonator solved there (GitHub #93, #94) ==")
+from scipy.integrate import solve_ivp as _swivp
+from scipy.special import wofz as _swwofz
+from wfmsynth import swept as _SW, measure as _swM
+
+_swC = 299792458.0e9                                      # nm/s
+_swg = Grid(fs=1e6, n=1 << 17)
+_swt = np.arange(_swg.n) / _swg.fs
+_swT = _swg.n / _swg.fs
+_swrate = (_swC / 1549.0 - _swC / 1551.0) / _swT
+
+
+def _swlas(grid=_swg, **kw):
+    return Signal(seed=1, grid=grid).laser(**(kw or dict(start_nm=1549.0, stop_nm=1551.0)))
+
+
+def _swpd(s):
+    return s.copy().photodetect(shot=False).waveform()
+
+
+def _swfringe(x, nu):
+    """The delay a fringe against optical frequency stands for, from its spectrum."""
+    o = np.argsort(nu)
+    un = np.linspace(nu.min(), nu.max(), len(nu))
+    xi = np.interp(un, nu[o], x[o])
+    s = np.abs(np.fft.rfft((xi - xi.mean()) * np.hanning(len(xi))))
+    k = int(s.argmax())
+    return (k + 0.5 * (s[k - 1] - s[k + 1]) / (s[k - 1] - 2 * s[k] + s[k + 1])) / (
+        len(xi) * (un[1] - un[0]))
+
+
+# ---- the frame: a delayed copy is turned by the carrier's integral over the delay
+_swl = _swlas()
+_swmap = _SW.wavelength_map(_swl)
+_swtau = 2e-9
+_swx = _swpd(_swl.copy().combine([_swl.copy().delay(by=_swtau)]).gain(by=0.5))
+_swwant = 0.5 * (1 + np.cos(2 * np.pi * _swtau * _swC / (1549.0 + 2.0 * (_swt - _swtau / 2) / _swT)))
+_swerr = float(np.abs(_swx - _swwant)[1:].max())
+_swsp = np.abs(np.fft.rfft((_swx - _swx.mean()) * np.hanning(_swg.n)))
+_swbeat = float(_swsp.argmax() * _swg.fs / _swg.n)
+check("a laser's field is a constant in the frame of its own carrier, and `delay` on it turns "
+      "the carrier by its integral over the delay: field + delayed field detected is "
+      "(1 + cos(2 pi nu(t - tau/2) tau))/2 and beats in time at (sweep rate) x delay",
+      np.array_equal(_swl.waveform(), np.ones(_swg.n, complex)) and _swl.roles() == []
+      and _swerr < 1e-8 and abs(_swbeat / (_swrate * _swtau) - 1) < 2e-3,
+      f"1549 -> 1551 nm in {_swT * 1e3:.0f} ms ({_swrate / 1e12:.3f} THz/s), tau = 2 ns: max "
+      f"|record - closed form| {_swerr:.1e}; beat {_swbeat:.1f} Hz against rate x tau "
+      f"{_swrate * _swtau:.1f} Hz")
+
+# ---- the interferometer and the stray reflection are chains
+_swmz = [_swpd(_sws.recipes.mzi(_swl, delay_s=50e-12, extinction_db=er)) for er in (None, 20.0)]
+_swmzd = _swfringe(_swmz[0], _swmap["f_hz"])
+_swer = float(10 * np.log10(_swmz[1].max() / _swmz[1].min()))
+_swsr = _swpd(_sws.recipes.stray_reflection(_swl, delay_s=40e-12, reflectivity=0.02))
+_swsrd = _swfringe(_swsr, _swmap["f_hz"])
+check("recipes.mzi and recipes.stray_reflection are delay + gain + combine: an MZI's fringes "
+      "are 1/delay apart in optical frequency with the stated extinction, and a stray "
+      "reflection's fringe has the spacing its delay predicts and is 4 r peak to peak",
+      abs(_swmzd / 50e-12 - 1) < 2e-3 and _swmz[0].min() < 1e-6 and abs(_swer - 20.0) < 0.01
+      and abs(_swsrd / 40e-12 - 1) < 2e-3 and abs(np.ptp(_swsr) / 0.08 - 1) < 1e-3
+      and [o["op"] for o in _sws.recipes.mzi(_swl, delay_s=50e-12).ops] == ["laser", "gain",
+                                                                           "combine"],
+      f"MZI 50 ps: fringe spacing reads back as {_swmzd * 1e12:.3f} ps, darkest fringe "
+      f"{_swmz[0].min():.1e}, stated 20 dB -> {_swer:.4f} dB; stray reflection 40 ps, r = 0.02: "
+      f"{_swsrd * 1e12:.3f} ps, {np.ptp(_swsr):.5f} peak to peak against 0.08")
+
+# ---- a ring on a slow sweep: wavelength, Q, extinction and FSR
+_swring = _sws.recipes.ring(_swl, wavelength_nm=1550.0, q=1e5, extinction_db=15.0, fsr_nm=0.8)
+_swrx = _swpd(_swring)
+_swdips = _swM.resonances(*_swM.transmission(_swrx, _swmap["wavelength_nm"]))
+_swmid = min(_swdips, key=lambda d: abs(d["wavelength_nm"] - 1550.0))
+_swnext = [d["wavelength_nm"] for d in _swdips if d["wavelength_nm"] > 1550.4][0]
+_swsteady = float(np.abs(_swrx - np.abs(_SW.steady(_swmap["wavelength_nm"], _swring.ops[1])) ** 2).max())
+check("a ring stated by wavelength, Q, extinction and FSR (recipes.ring, one resonator op) "
+      "measured on a slow sweep has them: the dips are read off the record by "
+      "measure.resonances, and the record is the stated settled response",
+      abs(_swmid["wavelength_nm"] - 1550.0) < 2e-5 and abs(_swmid["q"] / 1e5 - 1) < 5e-3
+      and abs(_swmid["extinction_db"] - 15.0) < 0.05 and abs(_swnext - 1550.8) < 1e-4
+      and _swsteady < 1e-5,
+      f"resonance at {_swmid['wavelength_nm']:.6f} nm (1550), Q {_swmid['q']:.0f} (100000), "
+      f"extinction {_swmid['extinction_db']:.3f} dB (15), next order at {_swnext:.5f} nm "
+      f"(1550.8); max |record - settled response| {_swsteady:.1e}")
+
+_swop = dict(wavelength_nm=1550.0, intrinsic_hz=1e9, coupling_hz=0.5e9, fsr_hz=100e9)
+_swe = np.exp(-2j * np.pi * (_swmap["f_hz"] - _swC / 1550.0) / 100e9)
+_swr, _swa = np.exp(-np.pi * 0.5e9 / 100e9), np.exp(-np.pi * 1e9 / 100e9)
+_swexact = np.abs((_swr - _swa * _swe) / (1 - _swr * _swa * _swe)) ** 2
+_swdiff = float(np.abs(_swpd(_swl.copy().resonator(**_swop)) - _swexact).max())
+check("every order of the ring is counted (the far ones in closed form), so the record is "
+      "the ring formula (r - a e^{j phi})/(1 - r a e^{j phi}) to first order in the coupling "
+      "per round trip",
+      _swdiff < 5e-4,
+      f"finesse 67, coupling per round trip {np.pi * 0.5e9 / 100e9:.4f}: max |record - ring "
+      f"formula| {_swdiff:.1e} (bound 5e-4, about the coupling squared)")
+
+# ---- a fast sweep: ring-down, against the swept Lorentzian and an ODE integration
+_swgf = Grid(fs=50e6, n=100000)
+_swlf = _swlas(_swgf, start_nm=1550.0, speed_nm_per_s=50.0)
+_swlam = _SW.wavelength_map(_swlf)["wavelength_nm"]
+_swl0 = float(_swlam[_swgf.n // 2])
+_swfx = _swlf.copy().resonator(wavelength_nm=_swl0, intrinsic_hz=0.3e6, coupling_hz=0.7e6).waveform()
+_swk, _swke = 2 * np.pi * 1e6, 2 * np.pi * 0.7e6
+_swd = 2 * np.pi * (_swC / _swlam - _swC / _swl0)
+_swtf = np.arange(_swgf.n) / _swgf.fs
+_swchirp = float(np.gradient(_swd, _swtf)[_swgf.n // 2])
+_swp = -0.5j * _swchirp
+_swana = 1 - _swke * 0.5 * np.sqrt(np.pi / _swp) * _swwofz(1j * (0.5 * _swk + 1j * _swd)
+                                                           / (2 * np.sqrt(_swp)))
+_swi0, _swi1 = _swgf.n // 2 - 6000, _swgf.n // 2 + 12000
+_swode = _swivp(lambda s, y: -(0.5 * _swk + 1j * np.interp(s, _swtf, _swd)) * y + 1.0,
+                (_swtf[_swi0], _swtf[_swi1]), [1.0 / (0.5 * _swk + 1j * _swd[_swi0]) + 0j],
+                t_eval=_swtf[_swi0:_swi1 + 1], method="DOP853", rtol=1e-10, atol=1e-16)
+_swea = float(np.abs(_swfx - _swana).max())
+_sweo = float(np.abs(_swfx[_swi0:_swi1 + 1] - (1 - _swke * _swode.y[0])).max())
+_swstill = 1 - _swke / (0.5 * _swk + 1j * _swd)
+_swpk = float((np.abs(_swfx) ** 2).max())
+check("a resonance crossed within a photon lifetime is NOT its Lorentzian: the ring-down "
+      "beats with the laser. The field matches the analytic swept Lorentzian (Faddeeva "
+      "function) and an independent ODE integration (DOP853)",
+      _swea < 3e-5 and _sweo < 3e-5 and np.abs(_swfx - _swstill).max() > 0.5 and _swpk > 1.3
+      and int(np.argmin(np.abs(_swfx))) > _swgf.n // 2,
+      f"1 MHz linewidth swept at 50 nm/s (chirp / kappa^2 = {abs(_swchirp) / _swk ** 2:.2f}): "
+      f"max |field - analytic| {_swea:.1e}, |field - ODE| {_sweo:.1e} (bound 3e-5); against "
+      f"the settled Lorentzian {np.abs(_swfx - _swstill).max():.2f}; transmission peaks at "
+      f"{_swpk:.3f} and bottoms at {(np.abs(_swfx) ** 2).min():.4f} (settled: 0.16), "
+      f"{(int(np.argmin(np.abs(_swfx))) - _swgf.n // 2) / _swgf.fs * 1e6:.2f} us late")
+
+# ---- a mode hop between two samples, and an input that ramps: both against closed forms
+_swhk2 = 2 * np.pi * 2e6                                   # a critically coupled 2 MHz ring
+_swhth = 500.37 / 50e6
+_swhz = 0.5 * _swhk2 + 2j * np.pi * 20e6                   # after a hop of +20 MHz
+_swhs = Signal(seed=1, grid=Grid(fs=50e6, n=2000)).laser(
+    start_nm=1550.0, hops=[{"t_s": _swhth, "by_nm": _swC / (_swC / 1550.0 + 20e6) - 1550.0}]
+).resonator(wavelength_nm=1550.0, intrinsic_hz=1e6, coupling_hz=1e6)
+_swhtt = np.arange(2000) / 50e6
+
+
+def _swhop(th):
+    return 1 - 0.5 * _swhk2 * np.where(
+        _swhtt < th, 2 / _swhk2,
+        (2 / _swhk2) * np.exp(-_swhz * (_swhtt - th)) - np.expm1(-_swhz * (_swhtt - th)) / _swhz)
+
+
+_swherr = float(np.abs(_swhs.waveform() - _swhop(_swhth)).max())
+_swhedge = float(np.abs(_swhop(501 / 50e6) - _swhop(_swhth)).max())
+_swrx = (1.0 + 0.5 * np.interp(np.arange(200), [0, 50, 60, 200], [0, 0, 1, 1])).astype(complex)
+_swrz = 0.5 * 6.0                                          # kappa*dt = 6, on resonance
+_swre = np.exp(-_swrz)
+_swrp2 = (_swrz - 1 + _swre) / _swrz ** 2
+_swry = [_swrx[0] / _swrz]
+for _k in range(199):
+    _swry.append(_swre * _swry[-1] + _swrx[_k] * ((1 - _swre) / _swrz - _swrp2)
+                 + _swrx[_k + 1] * _swrp2)
+_swrgot = _SW.resonator(_swrx, 1e6, dict(start_nm=1550.0), dict(
+    wavelength_nm=1550.0, intrinsic_hz=3e6 / (2 * np.pi), coupling_hz=3e6 / (2 * np.pi)))
+_swrerr = float(np.abs(_swrgot - (_swrx - _swrz * np.array(_swry))).max())
+check("a mode hop that falls BETWEEN two samples rings the resonator from its own instant "
+      "(the sample's integration is cut at the hop), and an input that ramps across a sample "
+      "is integrated exactly: both against closed forms",
+      _swherr < 1e-11 and _swhedge > 0.5 and _swrerr < 1e-12,
+      f"a 20 MHz hop at sample 500.37 off a 2 MHz ring: max |field - closed form| "
+      f"{_swherr:.1e} (bound 1e-11; the same hop moved to the sample edge would be "
+      f"{_swhedge:.2f} off); an input ramping 0.05 per sample at kappa*dt = 6: max |field - "
+      f"exact step| {_swrerr:.1e} (bound 1e-12)")
+
+# ---- two channels, one laser: the map from the reference, the device on the recovered axis
+_swsrc = lambda: Signal().use("laser")                                   # noqa: E731
+
+
+def _swbench(**las):
+    return _sws.Channels(
+        {"dut": _sws.recipes.ring(_swsrc(), wavelength_nm=1550.0, q=1e5, extinction_db=15.0,
+                                  fsr_nm=0.8).photodetect(shot=False),
+         "ref": _sws.recipes.mzi(_swsrc(), delay_s=2e-9).photodetect(shot=False)},
+        shared={"laser": Signal().laser(start_nm=1549.0, stop_nm=1551.0, **las)},
+        seed=1, grid=_swg)
+
+
+_swfr = 1550.0 ** 2 / _swC / 2e-9                                        # one fringe, nm
+_swb = _swbench(bow_nm=0.02, ripple_nm=3e-3, ripple_hz=40.0)
+_sww = _swb.waveforms()
+_swtruth = _SW.wavelength_map(_swb.signal("ref"))["wavelength_nm"]
+_swgot = _swM.swept_map(_sww["ref"], _swg, 2e-9, at_s=0.0, wavelength_nm=1549.0)
+_swmerr = float(np.abs(_swgot - _swtruth).max())
+_swlin = float(np.abs(_swtruth - (1549.0 + 2.0 * _swt / _swT)).max())
+_swwl, _swtr = _swM.transmission(_sww["dut"], _swgot)
+_swdop = [o for o in _swb.signal("dut").ops if o["op"] == "resonator"][0]
+_swterr = float(np.abs(_swtr - np.abs(_SW.steady(_swwl, _swdop)) ** 2).max())
+_swrec = min(_swM.resonances(_swwl, _swtr), key=lambda d: abs(d["wavelength_nm"] - 1550.0))
+_swnaive = min(_swM.resonances(*_swM.transmission(_sww["dut"], 1549.0 + 2.0 * _swt / _swT)),
+               key=lambda d: abs(d["wavelength_nm"] - 1550.0))
+check("on a sweep that is NOT linear (a bow and a ripple), the time-to-wavelength map "
+      "recovered from the reference interferometer's fringes matches the ground truth, and "
+      "the transmission put on that recovered axis is the device's stated response; on the "
+      "axis a linear sweep would assume the ring is misplaced",
+      _swmerr < 0.02 * _swfr and _swterr < 5e-3
+      and abs(_swrec["wavelength_nm"] - 1550.0) < 5e-5
+      and abs(_swnaive["wavelength_nm"] - 1550.0) > 0.015,
+      f"reference fringes {_swfr * 1e3:.2f} pm apart: max |recovered - true| "
+      f"{_swmerr * 1e3:.4f} pm ({_swmerr / _swfr:.4f} fringe, bound 0.02) where the sweep is "
+      f"{_swlin * 1e3:.1f} pm off linear; max |T - stated| {_swterr:.1e}; ring found at "
+      f"{_swrec['wavelength_nm']:.5f} nm, against {_swnaive['wavelength_nm']:.5f} nm on a "
+      f"linear axis")
+
+_swh = _swbench(hops=[{"t_s": 0.07, "by_nm": 0.03}])
+_swhw, _swhev = _swh.realize()
+_swht = _SW.wavelength_map(_swh.signal("ref"))["wavelength_nm"]
+_swhe = (_swM.swept_map(_swhw["ref"], _swg, 2e-9, at_s=0.0, wavelength_nm=1549.0) - _swht) / _swfr
+_swhk = int(0.07 * _swg.fs)
+check("a mode hop is a step in the map and an event, and it breaks what a fringe count can "
+      "know: after it the recovered map is off by the hop less a whole number of fringes",
+      np.abs(_swhe[:_swhk - 500]).max() < 3e-3 and abs(_swhe[_swhk + 500:].mean() + 7.0) < 0.05
+      and [e.t_s for e in _swhev["dut"] if e.kind == "mode_hop"] == [0.07],
+      f"a 30 pm hop is {0.03 / _swfr:.2f} fringes: map error before it "
+      f"{np.abs(_swhe[:_swhk - 500]).max():.1e} fringe, after it "
+      f"{_swhe[_swhk + 500:].mean():.3f} fringes ({_swhe[_swhk + 500:].mean() * _swfr * 1e3:.2f} pm)")
+
+# ---- what cannot be done honestly is refused by name
+_swref = [
+    _qrefusal(lambda: _swl.copy().optical_mpi(delay_samples=3)),
+    _qrefusal(lambda: _swl.copy().combine([Signal().laser(start_nm=1549.0, stop_nm=1552.0)]).waveform()),
+    _qrefusal(lambda: _swl.copy().delay(by=1e-6).waveform()),
+    _qrefusal(lambda: _swl.copy().resonator(wavelength_nm=1550.0, intrinsic_hz=2e6,
+                                            coupling_hz=2e6).waveform()),
+    _qrefusal(lambda: Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096))
+              .carrier("nrz", n_ui=512).eo().delay(by=1e-11)),
+    _qrefusal(lambda: Signal(seed=1, grid=Grid(fs=50e6, n=2000)).laser(
+        start_nm=1550.0, hops=[{"t_s": _swhth, "by_nm": -1e-3}]).resonator(
+        wavelength_nm=1550.0, intrinsic_hz=1e6, coupling_hz=1e6).waveform()),
+]
+check("refused by name: a copy without the carrier's turn (optical_mpi) on a laser's field, "
+      "fields about two carriers combined, a delay whose beat leaves the grid, a resonance "
+      "crossed in under 4.4 samples, a delay on a field that states no carrier, and a mode "
+      "hop that leaves a ring beating with the laser past Nyquist",
+      "still holds light" in _swref[5]
+      and "recipes.stray_reflection" in _swref[0] and "another carrier" in _swref[1]
+      and "past this grid's Nyquist" in _swref[2] and "would alias" in _swref[3]
+      and "carrier was never stated" in _swref[4] and "laser(start_nm=...)" in _swref[4],
+      "; ".join(m.split(":")[0] + ": " + m.split(":", 1)[1].strip()[:58] + "..." for m in _swref))
+
+print("\n== the recipes meet an envelope and a field: an enable written as a sequence, a "
+      "multitone through multipath, a tolerance handed to a recipe ==")
+_pmb = dict(t_s=200e-6, gap_s=40e-6)
+_pmedges = np.sort(np.concatenate(_sws.recipes.bounce_times(**_pmb)))
+_pmres = []
+for _pmname, _pmsrc in (
+        ("an OFDM envelope", lambda: Signal(seed=1, grid=_ofmg).ofdm(**_ofmp)),
+        ("a laser's field", lambda: Signal(seed=1, grid=Grid(fs=20e6, n=1 << 14))
+         .laser(start_nm=1549.0, stop_nm=1549.01))):
+    _pmref = _pmsrc().waveform()
+    _pmx, _pmev = _pmsrc().gate(by=_sws.recipes.bounce(**_pmb)).realize()
+    _pmclosed = np.searchsorted(np.round(_pmedges * 20e6).astype(int),
+                                np.arange(_pmref.size), side="right") % 2 == 1
+    _pmflips = np.asarray([e.t_s for e in _pmev if e.kind == "transition"])
+    _pmres.append((_pmname, np.iscomplexobj(_pmx)
+                   and np.array_equal(_pmx[_pmclosed], _pmref[_pmclosed]),
+                   float(np.abs(_pmx[~_pmclosed]).max()), float(_pmclosed.mean()),
+                   _pmflips.size, float(np.abs(_pmflips - _pmedges).max() * 20e6)))
+check("recipes.bounce, a sequence of levels, is a voltage wherever it sits: it keys an OFDM "
+      "envelope and shutters a laser's field -- closed, the samples are the source's bit for "
+      "bit; open, nothing; and the 7 transitions are bounce_times' to half a sample",
+      all(same and off == 0.0 and n == 7 and dt < 0.51 for _, same, off, _, n, dt in _pmres),
+      "; ".join(f"{name}: closed {frac:.4f} of the record, identical there, |x| <= {off:g} "
+                f"open, {n} transitions within {dt:.2f} samples"
+                for name, _, off, frac, n, dt in _pmres))
+
+_pmdf, _pmtau, _pmgain = _ofmg.fs / _ofmg.n, 0.33e-6, 0.4
+_pmplan = dict(f_lo_hz=-2048 * _pmdf, f_hi_hz=2048 * _pmdf, n_tones=9)
+_pmcomb = _sws.recipes.multitone(domain="iq", sig=Signal(seed=1, grid=_ofmg), **_pmplan)
+_pmrx = _sws.recipes.multipath(_pmcomb, delays_s=[0.0, _pmtau], gains=[1.0, _pmgain])
+_pmf = np.asarray(_sws.recipes.multitone_plan(**_pmplan)[0])
+_pmk = np.round(_pmf / _pmdf).astype(int) % _ofmg.n
+_pmh = np.fft.fft(_pmrx.waveform())[_pmk] / np.fft.fft(_pmcomb.waveform())[_pmk]
+_pmerr = float(np.abs(_pmh - (1.0 + _pmgain * np.exp(
+    -2j * np.pi * (_ofmg.fc_hz + _pmf) * _pmtau))).max())
+_pmno = float(np.abs(_pmh - (1.0 + _pmgain * np.exp(-2j * np.pi * _pmf * _pmtau))).max())
+check("an I/Q multitone (a row of spur ops) through recipes.multipath: each of 9 tones comes "
+      "back scaled by H = 1 + g exp(-j 2 pi (fc + f_k) tau) for an echo 6.6 samples late, the "
+      "carrier's turn included",
+      _pmerr < 2e-3 and _pmno > 0.5 * _pmgain and _pmrx.roles() == [],
+      f"|H measured - H stated| <= {_pmerr:.1e} (bound 2e-3: the record's first 7 samples "
+      f"hold no echo); against the echo without the carrier's turn {_pmno:.3f}")
+
+_pmtol = _sws.tol(1.0, 10)
+_pmlas = Signal(seed=1, grid=Grid(fs=1e6, n=1 << 12)).laser(start_nm=1549.0, stop_nm=1551.0)
+_pmsaid = [_qrefusal(f) for f in (
+    lambda: _sws.recipes.fading(doppler_hz=_pmtol),
+    lambda: _sws.recipes.flicker(1e3, 1e5, rms=_pmtol),
+    lambda: _sws.recipes.hum(50.0, amp=0.02, harmonics={3: _pmtol}),
+    lambda: _sws.recipes.bounce(t_s=2e-3, gap_s=_pmtol),
+    lambda: _sws.recipes.buck(v_in=12.0, duty=0.5, f_sw_hz=5e5, l_h=_pmtol, c_f=22e-6,
+                              r_load_ohm=0.5),
+    lambda: _sws.recipes.mzi(_pmlas, delay_s=_pmtol),
+    lambda: _sws.recipes.gas_cell(_pmlas, lines_nm=[_pmtol]))]
+_pmby = _sws.recipes.ring(_pmlas, wavelength_nm=1550.0, q=1e4,
+                          by=_sws.tol(0.0, tol_abs=0.2)).photodetect(shot=False)
+_pmdips = [int(np.argmin(_pmby.unit(k).waveform())) for k in range(3)]
+check("a ws.tol handed to a recipe that converts its numbers is refused by name the same way "
+      "by all of them (7 tried), saying where the tolerance goes; an argument that reaches "
+      "its op untouched, ring(by=), takes one and the dip moves from unit to unit",
+      all("is a ws.tol(...) or holds one" in m and "where the number ends up" in m
+          for m in _pmsaid) and len(set(_pmdips)) == 3 and _pmby.roles() == ["unit/1/by"],
+      f"{_pmsaid[4][:76]}...; ring(by=tol(0, tol_abs=0.2 nm)): dip at samples {_pmdips} of "
+      f"4096 on units 0..2, role {_pmby.roles()}")
+
+_pmshared = _sws.Channels(
+    {"tx": _sws.recipes.multitone(domain="iq", **_pmplan),
+     "rx": _sws.recipes.multipath(Signal().use("tx"), [0.0, _pmtau], [1.0, 0.4j])},
+    seed=1, grid=_ofmg)
+_pmdirect = _sws.recipes.multipath(_pmcomb, [0.0, _pmtau], [1.0, 0.4j]).waveform()
+_pmnamed = float(np.abs(_pmshared.waveforms()["rx"] - _pmdirect).max())
+_pmreal = _qrefusal(lambda: _sws.Channels(
+    {"v": Signal().use("src").gain(by=0.4j)},
+    shared={"src": Signal().carrier("sine", f_hz=1e6)}, seed=1, grid=_ofmg).waveforms())
+check("a path's COMPLEX gain when the transmitter is a named chain: multipath(Signal()"
+      ".use('tx'), gains=[1, 0.4j]) in a Channels record is the record built from the "
+      "transmitter directly (the comb, a row of spur ops, being a channel of its own), and "
+      "the same gain on a named VOLTAGE is refused when it renders",
+      _pmnamed < 1e-12 and "complex and the record is a real voltage" in _pmreal,
+      f"max |named - direct| = {_pmnamed:.1e}; on a voltage: {_pmreal[:60]}...")
 
 print()
 if fails:

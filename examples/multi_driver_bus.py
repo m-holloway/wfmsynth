@@ -55,10 +55,10 @@ V_BIAS, R_TERM, C_BUS = 1.5, 56.0, 60e-12
 V_IH, V_IL = 2.0, 0.8              # LVTTL receiver thresholds -- the caller's, not the library's
 F_BUS = 20e6                       # what each party sends while it holds the bus
 
-# supply, output resistance, 10-90 % edge of the output stage itself, pattern seed
-PARTIES = {"ctrl": (3.3, 20.0, 2e-9, 11),
-           "n1": (2.5, 35.0, 6e-9, 23),
-           "n2": (1.8, 55.0, 10e-9, 37)}
+# supply, output resistance, 10-90 % edge of the output stage itself
+PARTIES = {"ctrl": (3.3, 20.0, 2e-9),
+           "n1": (2.5, 35.0, 6e-9),
+           "n2": (1.8, 55.0, 10e-9)}
 
 T_SLOT, T_GAP, T_START = 1.2e-6, 0.8e-6, 0.4e-6
 T_LEAD, T_LAG = 15e-9, 40e-9       # an output stage conducts a little either side of its slot
@@ -74,11 +74,14 @@ def source(name, grid):
     carrier is normalised amplitude of about +/-1, so a source handed over unconverted would be
     a driver a thousand times too weak and the solve would be perfectly correct about it.
     """
-    v_hi, _ohm, tr, seed = PARTIES[name]
+    v_hi, _ohm, tr = PARTIES[name]
     edge = dict(kind="cmos", v_lo=0.0, v_hi=v_hi, f_hz=F_BUS, tr_s=tr, duty=0.5)
     if name != "ctrl":
         return {**edge, "volts": True}
-    chain = (ws.Signal(seed=seed, grid=grid)
+    # No seed on the chain: a driver's chain is part of the record and draws under the
+    # record's seed by its own name (`net/0/ctrl/timing/1`), so a seed here would be ignored
+    # -- and since 0.46.0 the builder says so.
+    chain = (ws.Signal(grid=grid)
              .carrier(**edge)
              .timing(rj_ps=12.0))          # its own clock, with its own jitter on it
     return {"ops": chain, "volts": True}
@@ -90,7 +93,7 @@ def board(grid):
                          {"id": "cb", "kind": "c", "a": "bus", "b": "gnd", "farad": C_BUS}],
             "drivers": [{"id": nm, "node": "bus", "ohm": ohm, "state": "hiz",
                          "source": source(nm, grid)}
-                        for nm, (_v, ohm, _tr, _s) in PARTIES.items()]}
+                        for nm, (_v, ohm, _tr) in PARTIES.items()]}
 
 
 def slots():
@@ -169,7 +172,7 @@ def main():
     worst = []
     for w in hold_windows(holds, fs, n):
         nm = w["who"]
-        v_hi, ohm, tr, _seed = PARTIES[nm]
+        v_hi, ohm, tr = PARTIES[nm]
         # measure inside the hold only, and after the output stage has had a slot to settle
         k0, k1 = w["start"] + int(0.1e-6 * fs), w["stop"]
         seg, ts = v[k0:k1], t[k0:k1]
@@ -214,7 +217,7 @@ def main():
     naive, resid = 0.0, []
     for w in hold_windows(holds, fs, n):
         nm = w["who"]
-        _v_hi, ohm, _tr, _s = PARTIES[nm]
+        _v_hi, ohm, _tr = PARTIES[nm]
         # the output stage releases T_LAG after the slot ends, and the next one takes over
         # T_LEAD before the next slot begins -- so the bus is nobody's in between
         k_rel = min(n - 1, ws.net.sample_at(w["t1"] + T_LAG, fs))

@@ -486,7 +486,42 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                # exactly as for `cascade` and `sparam` above. Its own sweep is in
                # tests/test_net.py, which moves a resistance, a capacitance and a schedule time
                # and checks each one moves the solved waveform.
-               "net"}
+               "net",
+               # `law` and `filter` are a kind plus that kind's own parameters, so a knob only
+               # exists per kind; tests/test_law_filter.py sweeps every parameter of every kind
+               # and checks each moves the samples and the recipe's content address.
+               "law", "filter",
+               # `iq` is a SOURCE, and `upconvert` / `downconvert` change the record's DOMAIN,
+               # so neither can be dropped into this sweep's real carrier chain. Each knob is
+               # moved against an analytic result in tests/test_iq_domain.py.
+               "iq", "upconvert", "downconvert",
+               # `ofdm` is a SOURCE of an I/Q record too. tests/test_ofdm.py moves every
+               # parameter and checks the samples and the recipe's content address move.
+               "ofdm",
+               # the joins take a second SIGNAL (or a number that is also a signal), so there
+               # is no scalar to swap here; tests/test_joins.py moves every parameter of each
+               # and checks it moves the samples and the recipe's content address.
+               "combine", "gain", "offset", "gate", "delay",
+               # `sequence` and `switch` are SOURCES built from sub-chains. Every parameter --
+               # a duration, the join and its length, a segment's state, the threshold, the
+               # switching time -- is moved against an exact or analytic result in
+               # tests/test_sequence_switch.py.
+               "sequence", "switch",
+               # `use` is another chain of a several-channel record, so it has no knob and no
+               # meaning in a lone carrier chain; tests/test_channels.py checks what it does.
+               "use",
+               # `trigger` SHORTENS the record to its window, so this sweep's same-length
+               # comparison does not apply. tests/test_trigger.py moves every knob and checks
+               # each one moves the samples and the recipe's content address.
+               "trigger",
+               # the I/Q impairments act on a complex record, which this sweep's real carrier
+               # chain is not. tests/test_iq_impairments.py moves every knob of each and checks
+               # the samples and the digest move, and measures each effect on the record.
+               "iq_imbalance", "iq_offset", "freq_offset", "phase_noise", "awgn", "spur", "dac",
+               # `laser` is a SOURCE of an optical field and `resonator` acts on one, which
+               # this sweep's real carrier chain is not. tests/test_swept.py moves every
+               # parameter of each and checks the samples and the digest move.
+               "laser", "resonator"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 
@@ -501,3 +536,23 @@ def test_moving_a_knob_and_rerolling_a_seed_are_different_kinds_of_change():
     seeded = s.reflect(**base).waveform()
     assert _rel_rms(a, knob) > 0.05
     assert _rel_rms(a, knob) > 0.5 * _rel_rms(a, seeded) or _rel_rms(a, seeded) < 1e-12
+
+
+def test_roles_lists_the_receiver_noise_and_the_timebase_jitter_an_op_draws():
+    """`rx_noise` and `timebase` always drew from their own roles; `roles()` now says so, and
+    re-rolling one moves exactly that: a fresh 20 mV noise record differs from the old by
+    sqrt(2) x 20 mV, and the timebase re-roll leaves the noise-only difference at zero."""
+    import numpy as np
+    from wfmsynth import Grid, Signal
+    g = Grid(fs=64e9, baud=4e9, n=1 << 14)
+    sig = (Signal(seed=5, grid=g).carrier("nrz", n_ui=1024).rx_noise(rms=0.02)
+           .timebase(rms_ps=1.0))
+    assert sig.roles() == ["rx_noise/1", "timebase/2"]
+    x = sig.waveform()
+    quiet = Signal(seed=5, grid=g).carrier("nrz", n_ui=1024).rx_noise(rms=0.02)
+    d = quiet.contrast("rx_noise/1") - quiet.waveform()
+    assert abs(d.std() / (np.sqrt(2) * 0.02) - 1) < 0.05, d.std()   # 16384 samples: 0.6 %
+    assert not np.array_equal(sig.contrast("timebase/2"), x)
+    import pytest
+    with pytest.warns(RuntimeWarning, match="draws nothing from it"):   # a real role, no draw
+        assert np.array_equal(sig.contrast("jitter/0"), x)

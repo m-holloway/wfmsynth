@@ -11,8 +11,21 @@ Modules / public API:
                 ac_couple, inject_jitter, nrz, pam4, sine/square/triangle/sawtooth/dc,
                 step/pulse/exp/chirp_sweep/two_tone/analog_noise, cmos, pass_fet,
                 am_modulate/fm_modulate/pm_modulate, am, fm, psk, qam, chirp, ...
+  iq            complex baseband: a constellation source with known symbols (map_bits, shape),
+                upconvert / downconvert between I/Q and a real passband record, the stated
+                low-pass (lowpass, lowpass_error), and the receiver (demodulate)
+  domain        which domain ('real' | 'iq' | 'optical') each op accepts -- ACCEPTS is where
+                an op opts in
+  rf            what a transmitter, an oscillator and a channel do to an I/Q record, one op
+                per effect: iq_imbalance, iq_offset, freq_offset, phase_noise, awgn, spur, dac
+                -- and the measures that read a radio record back: spectrum / band_power /
+                aclr, ccdf, and evm against the transmitted symbols (corrections opt-in, what
+                they removed returned)
   capture       Signal.capture()'s file backend — load_values (.npy/.npz/.csv) and digest
                 (a sha256 over sample VALUES, not file bytes)
+  iqfile        I/Q recordings in open formats: read_iq() / capture(format=...) for
+                interleaved binary, SigMF, CSV and MAT; to_sigmf() / to_interleaved() out;
+                SigMF annotations <-> events; the byte-order check
   impairments   apply_impairment(name, x, rng), domain_randomize(x, rng), IMPAIRMENTS
   events        place_events / apply_events — localized needles + per-window labels
                 (runt, glitch, ring, droop, slow_edge, clamped_exp, ...)
@@ -25,6 +38,41 @@ Modules / public API:
   patterns      a NAME -> symbol-generator registry: register/resolve/describe/replay, a
                 general arbitrary-polynomial LFSR and a block-repeat generator. Mechanisms live
                 here; WHICH pattern a standard names is the caller's to register.
+  stages        the two GENERAL stages behind Signal.law() and Signal.filter() -- a named
+                transfer law (comparator, rectifier, dead zone, ...) and a stated linear
+                filter (butter, cheby1, rrc, zpk, ...) for a shape that has no op of its own
+  joins         where a second signal meets the chain: combine (sum, product, min, max of peer
+                signals) and the signal-driven parameters gain/offset/gate/delay(by=)
+  subchain      the ONE form of a signal held by an op's parameter -- a Signal, {"ops": [...]}
+                or {"from": recipe} -- and its resolver, subchain.signal()
+  sequence      chains joined in time or selected by a signal, behind Signal.sequence() and
+                Signal.switch(): layout() of the segments, the join shape (ramp), splice, mux
+  channels      several correlated channels from ONE recipe: Channels({name: chain}, shared=)
+                and the `use(name)` op by which one chain refers to another
+  tolerance     unit-to-unit variation: tol() / corners() written where a number would go,
+                Signal.unit(), unit_dataset(), unit_of()
+  trigger       a triggered acquisition behind Signal.trigger(): render long, find an edge,
+                pulse-width or runt condition, keep the window (or segments, or an average)
+  baseband      a channel stated at RF (lossy, sparam) applied to an I/Q record's envelope:
+                the same response read at fc_hz + f
+  ofdm          Signal.ofdm(): an OFDM source (an inverse FFT and a cyclic prefix per symbol)
+                on an I/Q record, its resource grid, demodulate() and the EVM per element;
+                register() for a caller's named parameter sets
+  states        carrier("states"): a level that dwells in one of a few states for a time drawn
+                from a stated distribution and jumps to the next -- burst noise, or an
+                activity schedule for gate(by=) / switch(select=); intervals(), occupancy()
+  recipes       useful ARRANGEMENTS as plain functions returning a chain: fading(),
+                multipath() on an envelope; what a capture carries that is not the signal --
+                flicker() (1/f noise from superposed two-state processes), hum(), ripple(),
+                pickup(); a contact as an enable, bounce() and intermittent(); sources,
+                oscillator_startup(), multitone() and buck() (a converter as one `net`);
+                and mzi(), stray_reflection(), ring() and gas_cell() on a swept laser's
+                field
+  swept         Signal.laser(): a swept-wavelength laser, its field held in the frame of its
+                own moving carrier; wavelength_map() is the ground-truth map from time to
+                wavelength; Signal.resonator() is a ring solved in that frame (ring-down and
+                all), steady() its response standing still. Read back with
+                measure.swept_map / transmission / resonances
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 
 A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM
@@ -65,7 +113,9 @@ __version__ = _read_version()
 
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
-               acquire, patterns, quinary, hdf5, capture, net, scenario)
+               acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
+               tolerance, subchain, joins, sequence, channels, trigger, iqfile,
+               rf, baseband, states, recipes, ofdm, swept)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -89,6 +139,9 @@ from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_
 from .compose import Signal, dataset, op_params, rederive_anchor, canonicalize, op_kind
 from .measure import (eye_height, best_phase, attributes, align_symbols, ground_truth,
                       pattern_period)
+from .tolerance import tol, corners, unit_dataset, unit_of
+from .channels import Channels
+from .iqfile import read_iq, to_sigmf, to_interleaved
 from .sweep import hold_constant, realized_table, solve_monotonic
 from .cdr import (recover_clock, jitter_transfer, tracked_out_fraction, ssc_phase,
                   apply_ssc, timing_source, apply_phase, phase_noise, recover_and_fold)
@@ -122,6 +175,7 @@ from .bus import open_drain, combine_drivers, uart_frame, uart_decode
 # `scenario.schedule` is NOT re-exported at package level: `ws.schedule` reads as a verb
 # with no object, and the word is already taken by the net op's own `schedule=`.
 from .scenario import Hold, Agent, merge_holds, hold_windows
+from .stages import LAW_KINDS, FILTER_KINDS
 from .acquire import AcquisitionProfile, acquire_record, record_decimation
 
 __all__ = [
@@ -133,7 +187,10 @@ __all__ = [
     # `resample` holds the interpolation kernel `physics` and `instrument` share. All three
     # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
     # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
-    "capture", "hdf5", "resample", "net", "scenario",
+    "capture", "hdf5", "resample", "net", "scenario", "stages", "iq", "domain", "joins",
+    "trigger", "rf", "baseband", "recipes", "ofdm", "swept",
+    "LAW_KINDS", "FILTER_KINDS",
+    "iqfile", "read_iq", "to_sigmf", "to_interleaved",
     "Hold", "Agent", "merge_holds", "hold_windows",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "combine_drivers", "uart_frame", "uart_decode",
@@ -175,6 +232,8 @@ __all__ = [
     "scope_bandwidth", "probe_loading", "timebase_jitter", "store_record",
     "sinad_noise_rms", "converter_noise_rms",
     "quantisation_floor_db_per_hz",
+    "tol", "corners", "unit_dataset", "unit_of", "tolerance", "subchain", "sequence",
+    "Channels", "channels", "states",
     "Signal", "dataset", "op_params", "rederive_anchor", "canonicalize", "op_kind",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",

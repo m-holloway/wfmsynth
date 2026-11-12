@@ -637,6 +637,38 @@ def _interp_response(fg, freqs, z, band="zero", dc="zero"):
     return H
 
 
+def band_gate(lost_lo, lost_hi, f_lo, f_hi, nyq, band, dc, band_tol, fix):
+    """Decide the band edges for a record with fractions `lost_lo` / `lost_hi` of its power
+    below / above a response measured from `f_lo` to `f_hi`, when the record reaches `nyq`:
+    the warnings and the refusal `sparam_channel` documents. `fix` is what to do about a
+    record that reaches past the file."""
+    if nyq > f_hi and lost_hi > 0.0:
+        msg = (f"the response stops at {f_hi/1e9:.3f} GHz but the record reaches "
+               f"{nyq/1e9:.3f} GHz: {100*lost_hi:.4g} % of the record's power lies above the "
+               f"measured band")
+        if band == "refuse":
+            if lost_hi > band_tol:
+                raise ValueError(
+                    msg + f", above the {100*band_tol:.4g} % band_tol. Zeroing it would delete "
+                    f"that power with no trace in the output. Choose: {fix}, "
+                    f"raise band_tol= if that loss is acceptable, or state "
+                    f"the extrapolation with band='hold' / the truncation with band='zero'.")
+            warnings.warn(msg + " and is being zeroed (within band_tol).", RuntimeWarning,
+                          stacklevel=3)
+        else:
+            warnings.warn(msg + f" and band={band!r}.", RuntimeWarning, stacklevel=3)
+    if dc == "zero" and f_lo > 0.0 and lost_lo > 0.0:
+        warnings.warn(f"dc='zero': the response starts at {f_lo/1e6:.4g} MHz and everything "
+                      f"below it is zeroed, removing {100*lost_lo:.4g} % of the record's power "
+                      f"and DC-BLOCKING it. dc='extend' carries the low band.",
+                      RuntimeWarning, stacklevel=3)
+    elif dc == "extend" and lost_lo > band_tol:
+        warnings.warn(f"dc='extend': the response starts at {f_lo/1e6:.4g} MHz and "
+                      f"{100*lost_lo:.4g} % of the record's power is below that, so that much of "
+                      f"the output rests on holding |S(f_min)| down to DC rather than on a "
+                      f"measurement.", RuntimeWarning, stacklevel=3)
+
+
 def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None,
                    band="refuse", dc="extend", band_tol=1e-3, method="fft"):
     """Apply a measured transfer ``s21`` (complex, sampled at ``freqs`` in Hz) to ``x`` as a
@@ -675,32 +707,9 @@ def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None,
 
     f_lo, f_hi, nyq = float(freqs.min()), float(freqs.max()), 0.5 / dt
     lost_lo, lost_hi = _band_energy(x, dt, f_lo, f_hi)
-    if nyq > f_hi and lost_hi > 0.0:
-        msg = (f"the response stops at {f_hi/1e9:.3f} GHz but the record reaches "
-               f"{nyq/1e9:.3f} GHz: {100*lost_hi:.4g} % of the record's power lies above the "
-               f"measured band")
-        if band == "refuse":
-            if lost_hi > band_tol:
-                raise ValueError(
-                    msg + f", above the {100*band_tol:.4g} % band_tol. Zeroing it would delete "
-                    f"that power with no trace in the output. Choose: resample the record so "
-                    f"its Nyquist is <= {f_hi/1e9:.3f} GHz, use a file that reaches "
-                    f"{nyq/1e9:.3f} GHz, raise band_tol= if that loss is acceptable, or state "
-                    f"the extrapolation with band='hold' / the truncation with band='zero'.")
-            warnings.warn(msg + " and is being zeroed (within band_tol).", RuntimeWarning,
-                          stacklevel=2)
-        else:
-            warnings.warn(msg + f" and band={band!r}.", RuntimeWarning, stacklevel=2)
-    if dc == "zero" and f_lo > 0.0 and lost_lo > 0.0:
-        warnings.warn(f"dc='zero': the response starts at {f_lo/1e6:.4g} MHz and everything "
-                      f"below it is zeroed, removing {100*lost_lo:.4g} % of the record's power "
-                      f"and DC-BLOCKING it. dc='extend' carries the low band.",
-                      RuntimeWarning, stacklevel=2)
-    elif dc == "extend" and lost_lo > band_tol:
-        warnings.warn(f"dc='extend': the response starts at {f_lo/1e6:.4g} MHz and "
-                      f"{100*lost_lo:.4g} % of the record's power is below that, so that much of "
-                      f"the output rests on holding |S(f_min)| down to DC rather than on a "
-                      f"measurement.", RuntimeWarning, stacklevel=2)
+    band_gate(lost_lo, lost_hi, f_lo, f_hi, nyq, band, dc, band_tol,
+              fix=f"resample the record so its Nyquist is <= {f_hi/1e9:.3f} GHz, use a file "
+                  f"that reaches {nyq/1e9:.3f} GHz")
 
     def make_H(nfft):
         return _interp_response(np.fft.rfftfreq(nfft, d=dt), freqs, s21, band=band, dc=dc)
@@ -759,36 +768,10 @@ def check_response(freqs, S, tol=1e-6, n=None):
     return {"passive": passive, "max_singular_value": max_sv, "precursor_frac": precursor_frac}
 
 
-def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
-                       linear=True, guard=None, mode=None, term="SDD21",
-                       band="refuse", dc="extend", band_tol=1e-3, check=True, z0=None,
-                       method="fft"):
-    """Read a Touchstone file and apply one of its transfers to ``x``.
-
-    ``ports`` says WHICH transfer, and its form says which kind:
-
-        ports=(2, 1)              a SINGLE-ENDED term, ``S[2,1]``. Fine for a 2-port file.
-        ports="13_24"             DIFFERENTIAL: pairs (1,3) and (2,4); applies SDD21.
-        ports="12_34"             DIFFERENTIAL: pairs (1,2) and (3,4); applies SDD21.
-        ports=((1, 2), (3, 4))    the same, written out as ((in+, in-), (out+, out-)).
-
-    On a file of FOUR OR MORE PORTS a bare single-ended pair now RAISES. A 4-port file is a
-    differential channel measured single-ended; its transfer is SDD21, which is a combination of
-    four of its terms and is not equal to any one of them (see the comment above
-    `PAIR_CONVENTIONS`). Pass a pairing, or say ``mode="se"`` to mean the single-ended term on
-    purpose. ``term=`` picks a different mixed-mode term (SDD11, SCD21, SCC21, ...).
-
-    ``z0=`` renormalizes the file's S-matrix to a stated system impedance FIRST, if the file's
-    own reference impedance (`read_touchstone`'s ``.z0``, from the option line's ``R`` or 50 if
-    unstated) differs from it -- see `renormalize_s`. Default ``None`` is the file's own
-    impedance, unchanged (an existing ``R 50`` file renders exactly as before). Left unhandled:
-    a Touchstone 2.0 file whose ``[Reference]`` block states a DIFFERENT impedance per port --
-    ``z0=`` on one of those raises rather than renormalizing it wrongly.
-
-    ``check=True`` runs `check_pairing`: the chosen pairing is measured against the other two
-    partitions of the four ports, and a pairing that yields an all-zero or far-too-small
-    response raises instead of returning zeros. ``band=``/``dc=``/``band_tol=`` are
-    `sparam_channel`'s band-edge decisions."""
+def touchstone_transfer(path, ports=(2, 1), n_ports=None, mode=None, term="SDD21", check=True,
+                        z0=None):
+    """``(freqs, h)``: the one transfer of a Touchstone file that `touchstone_channel` applies,
+    chosen by `ports` / `mode` / `term` exactly as documented there."""
     result = read_touchstone(path, n_ports=n_ports)
     freqs, S = result
     if z0 is not None:
@@ -832,6 +815,41 @@ def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
         if not (0 <= i < n and 0 <= j < n):
             raise ValueError(f"{path}: ports={ports!r} outside 1..{n}")
         h = S[:, i, j]
+    return freqs, h
+
+
+def touchstone_channel(x, path, grid=None, dt=None, ports=(2, 1), n_ports=None,
+                       linear=True, guard=None, mode=None, term="SDD21",
+                       band="refuse", dc="extend", band_tol=1e-3, check=True, z0=None,
+                       method="fft"):
+    """Read a Touchstone file and apply one of its transfers to ``x``.
+
+    ``ports`` says WHICH transfer, and its form says which kind:
+
+        ports=(2, 1)              a SINGLE-ENDED term, ``S[2,1]``. Fine for a 2-port file.
+        ports="13_24"             DIFFERENTIAL: pairs (1,3) and (2,4); applies SDD21.
+        ports="12_34"             DIFFERENTIAL: pairs (1,2) and (3,4); applies SDD21.
+        ports=((1, 2), (3, 4))    the same, written out as ((in+, in-), (out+, out-)).
+
+    On a file of FOUR OR MORE PORTS a bare single-ended pair now RAISES. A 4-port file is a
+    differential channel measured single-ended; its transfer is SDD21, which is a combination of
+    four of its terms and is not equal to any one of them (see the comment above
+    `PAIR_CONVENTIONS`). Pass a pairing, or say ``mode="se"`` to mean the single-ended term on
+    purpose. ``term=`` picks a different mixed-mode term (SDD11, SCD21, SCC21, ...).
+
+    ``z0=`` renormalizes the file's S-matrix to a stated system impedance FIRST, if the file's
+    own reference impedance (`read_touchstone`'s ``.z0``, from the option line's ``R`` or 50 if
+    unstated) differs from it -- see `renormalize_s`. Default ``None`` is the file's own
+    impedance, unchanged (an existing ``R 50`` file renders exactly as before). Left unhandled:
+    a Touchstone 2.0 file whose ``[Reference]`` block states a DIFFERENT impedance per port --
+    ``z0=`` on one of those raises rather than renormalizing it wrongly.
+
+    ``check=True`` runs `check_pairing`: the chosen pairing is measured against the other two
+    partitions of the four ports, and a pairing that yields an all-zero or far-too-small
+    response raises instead of returning zeros. ``band=``/``dc=``/``band_tol=`` are
+    `sparam_channel`'s band-edge decisions."""
+    freqs, h = touchstone_transfer(path, ports=ports, n_ports=n_ports, mode=mode, term=term,
+                                   check=check, z0=z0)
     return sparam_channel(x, freqs, h, grid=grid, dt=dt, linear=linear, guard=guard,
                           method=method,
                           band=band, dc=dc, band_tol=band_tol)

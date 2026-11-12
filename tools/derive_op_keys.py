@@ -45,6 +45,8 @@ def _keys_in(body: str) -> set[str]:
     for tup in re.findall(r"for k in \(([^)]*)\)\s*(?::\s*\n\s*)?if k in p", body, re.S):
         ks |= set(re.findall(r'["\']([A-Za-z_]\w*)["\']', tup))
     ks |= set(re.findall(r'["\']([A-Za-z_]\w*)["\']\s*in p\b', body))
+    # a parameter that holds a sub-chain is read by name through `subchain.signal(p, "name", ...)`
+    ks |= set(re.findall(r'SUB\.signals?\(\s*p,\s*["\']([A-Za-z_]\w*)["\']', body))
     return ks
 
 
@@ -110,7 +112,8 @@ def derive() -> dict[str, frozenset[str]]:
             # `events` hands its surplus keywords to `place_events`, which stores them on each
             # event for `apply_events` to read, so the set spans two modules.
             ks |= placement | mech
-        table[op] = frozenset(k for k in ks if not k.startswith("_"))
+        # `p["op"]` is the op's own name being read back (for a message), not a parameter
+        table[op] = frozenset(k for k in ks if not k.startswith("_") and k != "op")
     return table
 
 
@@ -129,12 +132,55 @@ def render() -> str:
            "# underscore is the annotation namespace and is also allowed through.",
            'STRUCTURAL = frozenset({"op"})',
            "",
+           "# The word ANOTHER op uses for the same idea, where the nearest-spelling hint cannot",
+           "# find it: (op, what was passed) -> what this op calls it.",
+           "SAID_AS = {",
+           *[f'    ("{o}", "{k}"): {v!r},' for (o, k), v in sorted(SAID_AS.items())],
+           "}",
+           "",
            "OP_KEYS = {"]
     for op in sorted(table):
         ks = ", ".join(f'"{k}"' for k in sorted(table[op]))
         out.append(f'    "{op}": frozenset({{{ks}}}),')
     out += ["}", "", "", CHECK_SRC]
     return "\n".join(out) + "\n"
+
+
+_PRBS = ("prbs=<order>, e.g. prbs=15 (with prbs_seed= / prbs_phase=); pattern= names a "
+         "sequence on `carrier`")
+_LEVEL = "threshold= (the crossing level; `trigger` calls it level=, a scope's word)"
+SAID_AS = {
+    ("iq", "pattern"): _PRBS,
+    ("iq", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
+    ("ofdm", "pattern"): "prbs=<order>, e.g. prbs=15 (with prbs_seed= / prbs_phase=)",
+    ("ofdm", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
+    ("ofdm", "symbols"): "n_symbols= (how many OFDM symbols); the values on the resource "
+                         "grid come from constellation= with prbs= or bits=, and pilots=",
+    ("laser", "wavelength_nm"): "start_nm= (alone it is a laser standing still; with "
+                                "stop_nm= or speed_nm_per_s= a sweep)",
+    ("laser", "speed_nm_s"): "speed_nm_per_s=",
+    ("resonator", "q"): "intrinsic_hz= and coupling_hz= (its two linewidths); from a Q and "
+                        "an extinction, ws.recipes.ring(chain, wavelength_nm=, q=, "
+                        "extinction_db=)",
+    ("resonator", "fsr_nm"): "fsr_hz= (ws.recipes.ring takes fsr_nm=)",
+    ("carrier", "prbs"): "pattern='prbs7' (also 'prbs15', 'clock', ...), with seed= for its "
+                         "phase; prbs=<order> is how `iq` and `coded` say it",
+    ("carrier", "transition_s"): "tr_s= (the 10-90 % time of an edge, in seconds)",
+    ("trigger", "threshold"): "level= (a scope's word; `gate`, `switch` and "
+                              "law('comparator') call it threshold=)",
+    ("gate", "level"): _LEVEL, ("switch", "level"): _LEVEL, ("law", "level"): _LEVEL,
+    ("combine", "kind"): "how= ('sum' | 'product' | 'min' | 'max')",
+    ("combine", "by"): "others= (the peer signals); by= is the one signal of gain / offset / "
+                       "gate / delay",
+    ("delay", "delay_s"): "by= (seconds: a number, or a sub-chain)",
+    ("delay", "t_s"): "by= (seconds: a number, or a sub-chain)",
+    ("downconvert", "lpf_hz"): "lpf=dict(pass_hz=..., stop_hz=..., atten_db=...): the filter "
+                               "is a spec, and each number in it carries its unit",
+    ("downconvert", "fs_out"): "fs_out_hz= (the decimated rate, in Sa/s)",
+    ("downconvert", "fs_hz"): "fs_out_hz= (the decimated rate, in Sa/s)",
+    ("awgn", "ebn0_db"): "eb_n0_db= (spelled as es_n0_db= is)",
+    ("awgn", "esn0_db"): "es_n0_db=",
+}
 
 
 CHECK_SRC = '''def check(op, params):
@@ -167,7 +213,8 @@ CHECK_SRC = '''def check(op, params):
     lines = []
     for k in sorted(unknown):
         near = difflib.get_close_matches(k, sorted(allowed), n=2, cutoff=0.6)
-        lines.append(f"  {k!r}" + (f" -- did you mean {' or '.join(repr(n) for n in near)}?"
+        lines.append(f"  {k!r}" + (f" -- {op} says {SAID_AS[op, k]}" if (op, k) in SAID_AS
+                                   else f" -- did you mean {' or '.join(repr(n) for n in near)}?"
                                    if near else ""))
     raise TypeError(
         f"op {op!r} does not take " + ", ".join(repr(k) for k in sorted(unknown)) + ".\\n"

@@ -15,6 +15,15 @@ pretending a captured record is just another array:
 v1 formats: ``.npy``, ``.npz`` (an array stored under the key ``"values"``), and a two-column
 ``.csv`` (time, value -- the value column is read; a header row bare CSV would confuse for
 strictly numeric input is not supported, so cell 0 must be a number).
+
+A COMPLEX capture (I/Q) is a complex ``.npy`` / ``.npz``, or a three-column ``.csv`` (time, I,
+Q), and it is read only into a chain whose grid says ``domain="iq"``. Complex samples offered
+to a real record are refused by name: casting them to float keeps the real part and discards
+the rest, which numpy does with a warning and no error.
+
+I/Q EXCHANGE formats -- interleaved binary, SigMF, CSV with named columns, MAT -- are read by
+`wfmsynth/iqfile.py` through the same op (`capture(path=..., format=...)`), under the same
+digest rule.
 """
 from __future__ import annotations
 
@@ -23,12 +32,66 @@ from pathlib import Path
 
 import numpy as np
 
+from .domain import COMPLEX as _COMPLEX, REBUILT as _REBUILT
+
 
 def digest(values):
     """sha256 over the sample VALUES, in one canonical dtype and byte order -- so re-saving the
     same numbers through a different codec, dtype or endianness does not move the digest."""
-    v = np.ascontiguousarray(np.asarray(values, dtype="<f8"))
+    # Complex samples digest as complex. Real ones digest exactly as they always have, so no
+    # recorded real capture moves.
+    v = np.asarray(values)
+    v = np.ascontiguousarray(v.astype("<c16" if np.iscomplexobj(v) else "<f8"))
     return hashlib.sha256(v.tobytes()).hexdigest()
+
+
+_COMPLEX_MSG = (
+    "capture: {what} complex (I/Q) samples, and this chain's record is real: its Grid states "
+    "domain='real', or it has no Grid. A real record cannot hold them and nothing drops the "
+    "imaginary part for you. Give the chain a Grid that does not state a domain (the record "
+    "then follows the file) or one that says domain='iq' (domain='optical' when they are an "
+    "optical field), or pass the part you mean (values=x.real). " + _REBUILT)
+
+
+def holds_complex(path):
+    """True when a .npy / .npz capture file holds complex samples. A .csv is columns of
+    numbers and cannot say, so it is read as the grid states (three columns, time, I, Q, on a
+    grid that says domain='iq')."""
+    p = Path(path)
+    if not p.exists() or p.suffix.lower() not in (".npy", ".npz"):
+        return False
+    y = _load_plain(p, path)
+    if p.suffix.lower() == ".npz":
+        if "values" not in y.files:
+            return False
+        try:
+            y = y["values"]
+        except ValueError:
+            return False
+    return bool(np.iscomplexobj(y))
+
+
+def encode(values, domain="real"):
+    """Samples -> the list a recipe holds: floats for a real capture (unchanged), and
+    ``[[re, im], ...]`` for a complex one, since JSON has no complex number."""
+    a = np.asarray(values)
+    if np.iscomplexobj(a):
+        if domain not in _COMPLEX:
+            raise ValueError(_COMPLEX_MSG.format(what="values= holds"))
+        return [[float(v.real), float(v.imag)] for v in a.ravel()]
+    return [float(v) for v in values]
+
+
+def decode(values, domain="real"):
+    """A recipe's `values` -> samples in the record's domain."""
+    a = np.asarray(values)
+    paired = np.iscomplexobj(a) or (a.ndim == 2 and a.shape[-1] == 2)
+    if domain not in _COMPLEX:
+        if paired:
+            raise ValueError(_COMPLEX_MSG.format(what="values= holds"))
+        return np.asarray(values, float)
+    from . import iq as IQ
+    return IQ.as_complex(a)
 
 
 _PICKLE_MSG = (
@@ -50,9 +113,11 @@ def _load_plain(p, path):
         raise
 
 
-def load_values(path):
+def load_values(path, domain="real"):
     """Read a capture file's samples. Raises with the path named on any failure -- a missing or
-    unreadable file is an error to fix, never a record of zeros."""
+    unreadable file is an error to fix, never a record of zeros. `domain="iq"` (an envelope)
+    or `"optical"` (a field) reads complex samples; a complex file read as real is refused
+    rather than cast."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"capture: no such file {path!r}")
@@ -77,11 +142,19 @@ def load_values(path):
     elif suffix == ".csv":
         raw = np.loadtxt(p, delimiter=",")
         raw = np.atleast_2d(raw)
-        y = raw[:, 1] if raw.shape[1] >= 2 else raw[:, 0]
+        if domain in _COMPLEX:
+            if raw.shape[1] < 3:
+                raise ValueError(f"capture: {path!r} has {raw.shape[1]} column(s); an I/Q "
+                                 f".csv is three -- time, I, Q")
+            y = raw[:, 1] + 1j * raw[:, 2]
+        else:
+            y = raw[:, 1] if raw.shape[1] >= 2 else raw[:, 0]
     else:
         raise ValueError(f"capture: unsupported file type {suffix!r} for {path!r} "
                          f"(use .npy, .npz with a 'values' array, or a two-column .csv)")
-    y = np.asarray(y, dtype=float).ravel()
+    if np.iscomplexobj(y) and domain not in _COMPLEX:
+        raise ValueError(_COMPLEX_MSG.format(what=f"{path!r} holds"))
+    y = np.asarray(y, dtype=complex if domain in _COMPLEX else float).ravel()
     if y.size == 0:
         raise ValueError(f"capture: {path!r} contains no samples")
     return y

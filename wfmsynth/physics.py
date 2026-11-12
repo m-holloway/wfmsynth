@@ -783,8 +783,8 @@ def db_to_coupling(loss_db):
 def crosstalk_sum(x, aggressors, couplings, kinds="fext", td_samples=0, grid=None, td_ps=None):
     """Sum the coupling from EXPLICIT aggressor streams into one victim.
 
-    `crosstalk_matrix` MANUFACTURES its aggressors (one `nrz` per coupling, at a seed and a baud
-    offset) and has no parameter that takes a waveform. That is right when the neighbours are
+    `crosstalk_matrix` MANUFACTURES its aggressors by default (one `nrz` per coupling, at a seed
+    and a baud offset), with the delay a fraction of the record. That is right when the neighbours are
     unknown traffic, and wrong when they are known: on a four-pair link the three near-end
     aggressors are the OTHER THREE LANES OF THE SAME TRANSMITTER, carrying the same line code and
     correlated with the victim's own transmit by construction. This op takes those streams.
@@ -1032,7 +1032,7 @@ def common_mode(p, n):
 
 
 def crosstalk_matrix(x, grid, couplings, baud_offsets=None, seeds=None, kind="fext",
-                     synchronous=False):
+                     synchronous=False, aggressors=None):
     """Add crosstalk from MULTIPLE aggressors weighted by a coupling vector (one entry per
     aggressor — a column of the coupling matrix for this victim). Aggressors are ASYNCHRONOUS
     by default: each runs at a slightly offset baud so its timing is not locked to the victim
@@ -1040,17 +1040,29 @@ def crosstalk_matrix(x, grid, couplings, baud_offsets=None, seeds=None, kind="fe
     clock, which a receiver's CDR partly tracks out and which then looks like ISI rather than
     crosstalk, so a synchronous default quietly makes crosstalk easier to detect than it is.
     Pass ``synchronous=True`` (or explicit ``baud_offsets``) for the locked case. Returns the
-    victim with every aggressor's coupling summed in."""
+    victim with every aggressor's coupling summed in.
+
+    ``aggressors`` gives the aggressor waveforms instead of manufacturing them: one array as
+    long as `x` per coupling, coupled exactly as a manufactured one would be. Their timing is
+    then their own, so `baud_offsets`, `seeds` and `synchronous` do not apply."""
     x = np.asarray(x, float)
     n = len(x)
     m = len(couplings)
+    kinds = kind if isinstance(kind, (list, tuple)) else [kind] * m
+    if aggressors is not None:
+        if len(aggressors) != m:
+            raise ValueError(f"crosstalk_matrix: {len(aggressors)} aggressors for {m} "
+                             f"couplings; it takes one coupling per aggressor")
+        y = x.copy()
+        for c, aggr, kd in zip(couplings, aggressors, kinds):
+            y = y + (crosstalk(x, aggr, coupling=c, kind=kd) - x)
+        return y
     if grid is None or grid.baud is None:
         raise ValueError("crosstalk_matrix needs grid=Grid(fs, baud, ...)")
     if baud_offsets is None:
         baud_offsets = [0.0] * m if synchronous else [0.017 * (i + 1) for i in range(m)]
     if seeds is None:
         seeds = [7 + i for i in range(m)]
-    kinds = kind if isinstance(kind, (list, tuple)) else [kind] * m
     y = x.copy()
     for c, off, sd, kd in zip(couplings, baud_offsets, seeds, kinds):
         n_ui = int(round(n * grid.baud * (1.0 + off) / grid.fs))
@@ -1950,6 +1962,99 @@ def _cycles_and_t(f_hz, cycles, n, fs, grid):
     return t, c / span, span
 
 
+# ------------------------------------------------- an edge train, placed to a fraction of a sample
+#
+# `square` and `cmos` used to build their ideal two-level train as `where(phase(t) < duty)`,
+# evaluated on the samples. Two separate things were wrong with that, and both are the GRID
+# showing up as the signal's own timing:
+#
+#   1. An edge that falls BETWEEN two samples went to the next one. Each edge was therefore late
+#      by a different amount in [0, 1) sample: one sample peak to peak of "jitter" (15.6 ps at
+#      64 GSa/s), deterministic, and indistinguishable on the record from the link's.
+#   2. An edge that falls exactly ON a sample was decided by the rounding of `f * t % 1.0`. At
+#      1 GHz on a 64 GSa/s grid the phase at sample 64*j comes out as 0.0 or as 0.99999...,
+#      so even a commensurate clock had some edges one sample late.
+#
+# The edge times are now computed directly, `(j - phase) * samples_per_period`, never by
+# testing a rounded phase. An edge within `EDGE_SNAP_SAMPLES` of a sample IS on that sample
+# and is the same hard step as before, so a train whose edges are all on samples is the same
+# array it always was (bit for bit, wherever fault 2 did not strike). An edge between samples
+# is that hard step DELAYED by its fraction with a Lagrange fractional-delay interpolator of
+# `EDGE_FD_HALF * 2` taps -- written straight into the ideal train, since delaying a step is
+# the running sum of the interpolator's taps. Everything after is linear, so the shaped edge
+# is the on-sample shaped edge moved by the fraction; the interpolator is exact at DC and
+# maximally flat, and the edge shaper removes what it is not flat for. MEASURED (the residual
+# edge-time error peak to peak, `tests/test_edge_placement.py`): 5.7e-6 sample for an edge of
+# 8 samples, 8e-8 for one of 16, 5.6e-3 at the 2-sample floor -- where there was one whole
+# sample.
+EDGE_SNAP_SAMPLES = 1e-7
+EDGE_FD_HALF = 4
+EDGE_BLOCK = 4096          # edges interpolated at a time: bounds the temporaries, not the result
+
+
+def _samples_per_period(f_hz, cycles, n, fs, grid):
+    """Samples per period as ONE division (`fs / f_hz`, or `n / cycles`), for placing edges.
+    `_cycles_and_t` reaches the same number through the timebase's span, a few ulp away."""
+    if grid is not None:
+        n = int(getattr(grid, "n", n) or N)
+        fs = float(getattr(grid, "fs", fs) or 0.0) or None
+    n = N if n is None else int(n)
+    if f_hz is not None:
+        return (float(fs) if fs else float(n)) / float(f_hz)
+    return n / (10.0 if cycles is None else float(cycles))
+
+
+def _delayed_step(d, half=EDGE_FD_HALF):
+    """A unit step at offset 0 delayed by `d` in (0, 1) samples, MINUS the undelayed step:
+    ``(offsets, correction)`` with `correction` of shape ``(len(d), 2*half - 1)``."""
+    node = np.arange(-half, half)
+    u = -np.asarray(d, float)[:, None]
+    w = np.ones((u.shape[0], node.size))
+    for a, ia in enumerate(node):
+        for q in node:
+            if q != ia:
+                w[:, a] *= (u[:, 0] - q) / (ia - q)
+    tail = np.cumsum(w[:, ::-1], axis=1)[:, ::-1]        # tail[a] = sum of the taps from node a on
+    off = np.arange(-half + 1, half)
+    return off, tail[:, half - off] - (off >= 0)
+
+
+def _edge_train(n, spp, duty, phase_rad):
+    """The ideal +/-1 train of `square`/`cmos`: high for ``duty`` of each period of ``spp``
+    samples, every edge at its own time to a fraction of a sample. See the note above."""
+    n = int(n)
+    duty = float(duty)
+    phi0 = float(phase_rad) / (2 * np.pi)
+    if not 0.0 < duty < 1.0 or not np.isfinite(spp) or spp <= 0:
+        return np.full(n, 1.0 if (phi0 % 1.0) < duty else -1.0)
+    reach = EDGE_FD_HALF + 2
+    j = np.arange(int(np.floor(phi0 - reach / spp)) - 1,
+                  int(np.ceil(phi0 + (n + reach) / spp)) + 2)
+    tau = np.concatenate([(j - phi0) * spp, (j + duty - phi0) * spp])
+    step = np.concatenate([np.full(j.size, 2.0), np.full(j.size, -2.0)])
+    near = np.round(tau)
+    tau = np.where(np.abs(tau - near) <= EDGE_SNAP_SAMPLES, near, tau)
+    m = np.floor(tau).astype(np.int64)
+    d = tau - m
+    # the hard steps: low before the first rising edge listed, each edge toggling at its sample
+    inside = m < n
+    jumps = np.zeros(n)
+    np.add.at(jumps, np.clip(m[inside], 0, None), step[inside])
+    ideal = -1.0 + np.cumsum(jumps)
+    # In blocks of edges, in order: each block's (edges, taps) temporaries are then a few
+    # hundred kilobytes whatever the record holds, and the additions land in the order one
+    # pass over all the edges would make them, so the result is the same bits.
+    frac = np.flatnonzero(d > 0)
+    for a in range(0, frac.size, EDGE_BLOCK):
+        sel = frac[a:a + EDGE_BLOCK]
+        off, corr = _delayed_step(d[sel])
+        idx = m[sel][:, None] + off[None, :]
+        val = step[sel][:, None] * corr
+        ok = (idx >= 0) & (idx < n)
+        np.add.at(ideal, idx[ok], val[ok])
+    return ideal
+
+
 def sine(f_hz=None, cycles=None, amp=1.0, phase_rad=0.0, offset=0.0,
          n=None, fs=None, grid=None):
     """A sinusoid. Give `f_hz` with `fs`/`grid`, or `cycles` over the record."""
@@ -1960,10 +2065,12 @@ def sine(f_hz=None, cycles=None, amp=1.0, phase_rad=0.0, offset=0.0,
 def square(f_hz=None, cycles=None, amp=1.0, duty=0.5, phase_rad=0.0, offset=0.0,
            tr_frac=0.05, n=None, fs=None, grid=None, causal=False):
     """A square/pulse train, band-limited. `duty` is the high fraction, `tr_frac` the
-    transition time as a fraction of the PERIOD."""
+    transition time as a fraction of the PERIOD. Each edge is at its own time to a fraction
+    of a sample (`_edge_train`), so a period or duty that is not a whole number of samples
+    carries no jitter of the grid's."""
     t, f, _ = _cycles_and_t(f_hz, cycles, n, fs, grid)
-    ph = (f * t + phase_rad / (2 * np.pi)) % 1.0
-    ideal = np.where(ph < float(duty), 1.0, -1.0)
+    ideal = _edge_train(t.size, _samples_per_period(f_hz, cycles, t.size, fs, grid),
+                        duty, phase_rad)
     spp = (1.0 / f) / (t[1] - t[0]) if t.size > 1 else 2.0     # samples per period
     tr = max(float(tr_frac) * spp, 2.0)
     return offset + amp * _shape_edges(ideal, tr, causal)
@@ -2372,13 +2479,14 @@ def cmos(v_lo=0.0, v_hi=3.3, duty=0.5, f_hz=None, cycles=None, tr_s=1e-9, phase_
     ``tr_s`` is the edge's 10-90 % duration in ABSOLUTE SECONDS, unlike `square`'s ``tr_frac``:
     a real gate's output-stage edge time does not shrink as the gate is clocked faster. Compose
     with `probe(r_source=..., c_load_f=...)` for the loaded-output RC pole (an output
-    impedance only does something where it drives a load) rather than a knob here."""
+    impedance only does something where it drives a load) rather than a knob here. Each edge
+    is at its own time to a fraction of a sample, as `square`'s is (`_edge_train`)."""
     t, f, _ = _cycles_and_t(f_hz, cycles, n, fs, grid)
     fs_eff = _fs_of(fs, grid)
     if fs_eff is None:
         raise ValueError("cmos: needs fs= or grid= (tr_s is an absolute time)")
-    ph = (f * t + phase_rad / (2 * np.pi)) % 1.0
-    ideal = np.where(ph < float(duty), 1.0, -1.0)
+    ideal = _edge_train(t.size, _samples_per_period(f_hz, cycles, t.size, fs, grid),
+                        duty, phase_rad)
     tr, _ = _resolve_abs_edge(float(tr_s) * fs_eff)
     y01 = 0.5 * (1.0 + _shape_edges(ideal, tr, causal))          # 0 .. 1
     return float(v_lo) + (float(v_hi) - float(v_lo)) * y01

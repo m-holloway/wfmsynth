@@ -28,6 +28,8 @@ expects; it also means the vertical scale is a property of the file rather than 
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import json
 
 import numpy as np
 
@@ -85,6 +87,12 @@ def counts_for(volts, full_scale=None, bits=16):
     is spent on the signal that is actually there. Returns `(codes, y_inc, y_org)` with
     `volts == codes * y_inc + y_org` to within half a code.
     """
+    if np.iscomplexobj(volts):
+        raise ValueError(
+            "this exporter writes one voltage channel, and the record is complex baseband "
+            "(I/Q), which is two. Nothing takes the real part for you: write x.real and x.imag "
+            "as two records, or export the real passband record before downconvert. (An "
+            "optical field is exported after photodetect, as the photocurrent.)")
     v = np.asarray(volts, dtype=float).ravel()
     if v.size == 0:
         raise ValueError("no samples to write")
@@ -116,7 +124,7 @@ def counts_for(volts, full_scale=None, bits=16):
 
 
 def write_hdf5(path, channels, *, fs, t0=0.0, full_scale=None, like=None,
-               model=b"", serial=b"", date=None):
+               model=b"", serial=b"", date=None, names=None, recipe=None):
     """Write one or more channels of a record to `path`.
 
     channels    a 1-D array of volts, or {channel_number: volts}
@@ -129,12 +137,21 @@ def write_hdf5(path, channels, *, fs, t0=0.0, full_scale=None, like=None,
                 -- pass it explicitly when several records have to share one scale.
     like        a path to a reference capture, or the dict `identity_from` returns. Supplies the
                 format marker and frame record so an instrument recognises the file.
+    names       {channel_number: name}, written on each channel group as `wfmsynth_name`.
+    recipe      the recipe that renders these channels, written once as the JSON string
+                dataset `/wfmsynth/recipe` with its `sha256` beside it; `read_recipe` reads it
+                back. Both are additions to the layout above, outside the groups a reader of
+                that layout looks in.
     """
     h5py = _h5py()
     if not isinstance(channels, dict):
         channels = {1: channels}
     if not channels:
         raise ValueError("no channels to write")
+    unknown = sorted(set(names or {}) - set(channels), key=str)
+    if unknown:
+        raise ValueError(f"write_hdf5: names has channel(s) {unknown} that are not being "
+                         f"written; the channels are {sorted(channels)}.")
 
     ident = dict(like) if isinstance(like, dict) else (identity_from(like) if like else {})
     ft_name = ident.get("filetype_name", DEFAULT_FILETYPE_NAME)
@@ -163,7 +180,42 @@ def write_hdf5(path, channels, *, fs, t0=0.0, full_scale=None, like=None,
             _channel_attrs(g, npts=npts, x_inc=x_inc, x_org=float(t0),
                            y_inc=y_inc, y_org=y_org)
             _data_attrs(d, npts=npts)
+            if names and n in names:
+                g.attrs["wfmsynth_name"] = str(names[n])
+        if recipe is not None:
+            text = json.dumps(recipe)
+            d = f.create_dataset("wfmsynth/recipe", data=text, dtype=h5py.string_dtype("utf-8"))
+            d.attrs["sha256"] = hashlib.sha256(
+                json.dumps(recipe, sort_keys=True).encode("utf-8")).hexdigest()
     return str(path)
+
+
+def read_recipe(path):
+    """The recipe a file was written with (`write_hdf5(recipe=)`), checked against the digest
+    stored beside it, and refused by name when the file carries none."""
+    h5py = _h5py()
+    with h5py.File(str(path), "r") as f:
+        if "wfmsynth/recipe" not in f:
+            raise ValueError(f"read_recipe: {str(path)!r} carries no recipe. Only a file "
+                             f"written with write_hdf5(recipe=...) or Channels.write_hdf5 does.")
+        d = f["wfmsynth/recipe"]
+        text = d[()]
+        recipe = json.loads(text.decode("utf-8") if isinstance(text, bytes) else text)
+        want = d.attrs["sha256"]
+    have = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode("utf-8")).hexdigest()
+    if have != want:
+        raise ValueError(f"read_recipe: the recipe in {str(path)!r} hashes to {have[:12]}... "
+                         f"but the file states {str(want)[:12]}...: it was edited after it "
+                         f"was written, so it no longer identifies these samples.")
+    return recipe
+
+
+def channel_names(path):
+    """``{channel_number: name}`` for the channels a file names (`write_hdf5(names=)`)."""
+    h5py = _h5py()
+    with h5py.File(str(path), "r") as f:
+        return {int(str(k).split()[-1]): str(g.attrs["wfmsynth_name"])
+                for k, g in sorted(f["Waveforms"].items()) if "wfmsynth_name" in g.attrs}
 
 
 def _b(v):

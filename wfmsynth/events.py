@@ -40,6 +40,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import math
+
 import numpy as np
 
 
@@ -72,6 +74,17 @@ class Event:
     direction: float = 0.0
     placement: str = ""
     params: dict = field(default_factory=dict)
+    # "" for an event on the record itself. For one placed inside a SUB-CHAIN this is that
+    # sub-chain's namespace (`crosstalk/2/aggressor`): the event happened to the aggressor, at
+    # this sample of the shared grid, and reached the record only through the op that holds it.
+    at: str = ""
+    # Whether the event is ON THESE SAMPLES: what `EventList.on_record()`, `mask()` and
+    # `overlapping()` go by. False for one that reached the record only through another op (an
+    # aggressor's glitch, an enable's edge) and for an observation that changed nothing (a
+    # `trigger`). A sub-chain that BECOMES the record -- a `sequence` segment, a `switch` input
+    # while it is selected, a shared chain brought in by `use` -- keeps `at` for where its
+    # event came from, and stays on the record.
+    on_record: bool = True
 
     def span(self, n=None):
         w = 1 if self.width is None else max(int(self.width), 1)
@@ -94,6 +107,10 @@ class Event:
         if self.params:
             d["params"] = {k: _jsonable(v) for k, v in self.params.items()
                            if k not in ("_n_ui",)}
+        if self.at:
+            d["at"] = str(self.at)
+        if not self.on_record:
+            d["on_record"] = False
         return d
 
 
@@ -112,9 +129,17 @@ class EventList:
     def to_dicts(self):
         return [e.to_dict() if isinstance(e, Event) else dict(e) for e in self.events]
 
+    def on_record(self):
+        """The events on the record's own samples (`Event.on_record`). One inside a sub-chain
+        that only reached the record through another op -- a coupled aggressor, an enable --
+        is in this list as ground truth about that sub-chain, but a window is not labelled
+        with it and the mask does not cover it. One inside a chain that IS the record (a
+        `sequence` segment, a selected `switch` input, a `use`d chain) counts."""
+        return [e for e in self.events if getattr(e, "on_record", True)]
+
     def overlapping(self, start, stop):
         out = []
-        for e in self.events:
+        for e in self.on_record():
             lo, hi = e.span(self.n)
             if lo < stop and hi > start:
                 out.append(e)
@@ -124,11 +149,89 @@ class EventList:
         """Per-sample support (1 where any event was applied). Unknown widths count
         as a single sample — call after ``apply_events`` for the true support."""
         g = np.zeros(int(self.n))
-        for e in self.events:
+        for e in self.on_record():
             lo, hi = e.span(self.n)
             if hi > lo:
                 g[lo:hi] = 1.0
         return g
+
+
+def cut(e, stop, fs):
+    """End the event `e` at sample `stop` of the clock it is on -- where a `sequence` segment,
+    a window or the record ends. Most events are an instant and are untouched. One that
+    states an EXTENT is cut to the part before `stop` and says so: a `state` interval's
+    `dwell_s` (what `states.intervals` reads its end from), an `ofdm_symbol`'s `width`; each
+    then has ``complete=False`` in its params."""
+    if e.kind == "state" and e.t_s is not None:
+        left = stop / fs - e.t_s
+        if left < e.params["dwell_s"]:
+            e.params = dict(e.params, dwell_s=max(float(left), 0.0), complete=False)
+    elif e.kind == "ofdm_symbol" and e.sample + e.width > stop:
+        e.width = max(int(stop) - int(e.sample), 1)
+        e.params = dict(e.params, complete=False)
+
+
+def rescale(events, scale, n, fs):
+    """Move `events` onto a record stored at `scale` times the rate they were placed at --
+    now `fs` -- and `n` samples long, in place: `sample` floored onto the new grid, `width`
+    scaled (never below one sample), `t_s` kept -- time did not move. An event whose sample
+    is past the end of the shorter record is no longer on it and is removed, and one whose
+    extent runs past that end is cut there (`cut`)."""
+    kept = []
+    for e in events:
+        pos = e.sample if scale == 1.0 else int(math.floor(e.sample * scale))
+        if not 0 <= pos < n:
+            continue
+        e.sample = pos
+        if e.width is not None and scale != 1.0:
+            e.width = max(int(math.ceil(e.width * scale)), 1)
+        cut(e, n, fs)
+        kept.append(e)
+    events[:] = kept
+
+
+def shift(events, by, fs, n):
+    """Move `events` through a delay of `by` seconds (a number, or one value per sample of the
+    record), in place. The output at time t is the input at ``t - by(t)``, so an event at input
+    sample s arrives where ``t = s + by(t)``: `sample` and `t_s` are later by the delay AT THE
+    ARRIVAL, found by iterating that (it converges because a delay changes by less than one
+    second per second). An event that states an EXTENT has its end moved the same way, by the
+    delay at the END's arrival, so under a delay that varies a `state` interval's `dwell_s`
+    and an `ofdm_symbol`'s `width` and `cp_s` are what the delayed samples show, stretched
+    or squeezed.
+    One delayed past the end of the `n`-sample record is removed, and one whose extent now
+    runs past that end is cut there (`cut`)."""
+    def delay_at_arrival(sample):
+        if np.ndim(by) == 0:
+            return float(by)
+        pos = float(sample)
+        for _ in range(32):
+            d = float(by[min(max(int(round(pos)), 0), n - 1)])
+            pos = sample + d * fs
+        return d
+
+    kept = []
+    for e in events:
+        d = delay_at_arrival(e.sample)
+        pos = int(e.sample) + int(round(d * fs))
+        if pos >= n:
+            continue
+        if np.ndim(by) and e.kind == "state" and e.t_s is not None:
+            end = e.t_s + e.params["dwell_s"]
+            e.params = dict(e.params, dwell_s=float(
+                e.params["dwell_s"] + delay_at_arrival(end * fs) - d))
+        elif np.ndim(by) and e.kind == "ofdm_symbol":
+            e.width = max(int(round(
+                e.width + (delay_at_arrival(e.sample + e.width) - d) * fs)), 1)
+            cp_s = e.params["cp_s"]
+            e.params = dict(e.params, cp_s=float(
+                cp_s + delay_at_arrival(e.sample + cp_s * fs) - d))
+        e.sample = pos
+        if e.t_s is not None:
+            e.t_s = float(e.t_s + d)
+        cut(e, n, fs)
+        kept.append(e)
+    events[:] = kept
 
 
 def step_overshoot_fraction(zeta):

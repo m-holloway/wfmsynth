@@ -29,6 +29,9 @@ UNIT_SUFFIXES = {
     "_ohm": "ohms", "_rad": "radians", "_ui": "unit intervals", "_km": "kilometres",
     "_nm": "nanometres", "_bd": "baud", "_hz": "hertz", "_ps": "picoseconds",
     "_db": "decibels", "_in": "inches", "_s": "seconds", "_f": "farads", "_v": "volts",
+    # two that 0.46.0's parameters used before the table knew them, so they passed this gate
+    # unlooked-at: an I/Q phase error is quoted in degrees and a headroom in percent
+    "_deg": "degrees", "_pct": "percent",
 }
 
 # Names whose suffix does NOT mean what the table above says, each with the reason. Keep this as
@@ -41,17 +44,25 @@ EXCEPTIONS = {
 # Every unit-suffixed parameter the public API currently has. Frozen deliberately: a new one
 # must be added here, which is the moment to check that its suffix is honest.
 KNOWN_UNIT_PARAMS = frozenset({
-    'D_ps_nm_km', 'ac_fc_hz', 'atten_db_km', 'band_hi_hz', 'band_lo_hz', 'bw_hz', 'c_bus_f',
-    'c_load_f', 'dev_hz', 'dev_rad', 'diode_on_ohm', 'drift_ppm_per_s', 'echo_db',
+    'D_ps_nm_km', 'ac_fc_hz', 'alpha_phi_rad', 'atten_db_km', 'band_hi_hz', 'band_lo_hz', 'bw_hz', 'c_bus_f',
+    # a swept laser and a resonator (wfmsynth/swept.py): wavelengths in nm, linewidths and a
+    # free spectral range in Hz. `speed_nm_per_s` reads as `drift_hz_per_s` does: per second
+    'bow_nm', 'coupling_hz', 'fsr_hz', 'intrinsic_hz', 'ripple_hz', 'ripple_nm',
+    'speed_nm_per_s', 'split_hz', 'start_nm', 'stop_nm',
+    'c_load_f', 'dev_hz', 'dev_rad', 'diode_on_ohm', 'drift_hz_per_s', 'drift_ppm_per_s',
+    'eb_n0_db', 'echo_db', 'es_n0_db',
     'echo_f_hp_hz', 'echo_td_ps', 'edge_frac', 'er_db', 'f0_frac', 'f0_ghz', 'f0_hz', 'f1_hz',
     'f2_hz', 'f_hp_frac', 'f_hp_hz', 'f_hz', 'f_ripple_hz', 'fc_frac', 'fc_hz', 'fext_db',
-    'fp1_ghz', 'fp2_ghz', 'frac_ui', 'fs_hz', 'fz_ghz', 'gain_db', 'gamma_per_w_km',
-    'gamma_s', 'hold_frac', 'isolation_db', 'length_in', 'length_km', 'linewidth_hz',
+    'fold_db',
+    'fp1_ghz', 'fp2_ghz', 'frac_ui', 'fs_hz', 'fs_out_hz', 'fz_ghz', 'gain_db', 'gamma_per_w_km',
+    'gamma_s', 'headroom_pct', 'hold_frac', 'holdoff_s', 'isolation_db', 'jitter_s', 'length_in', 'length_km', 'linewidth_hz',
     'loss_at_ghz', 'loss_db', 'n_ui', 'next_db', 'next_td_ps', 'nf_db', 'overload_tau_s',
-    'phase0_s', 'phase1_rad', 'phase2_rad', 'phase_rad', 'phase_s', 'pink_frac', 'plateau_ui',
+    'phase0_s', 'phase1_rad', 'phase2_rad', 'phase_deg', 'phase_rad', 'phase_s', 'pink_frac', 'plateau_ui', 'post_s', 'pre_s',
     'psij_ps', 'r_load_ohm', 'r_pullup_ohm', 'r_sink_b_ohm', 'r_sink_ohm', 'r_term_ohm',
-    'rate_hz', 'rds_on_ohm', 'rin_db_per_hz', 'rj_ps', 'rms_ps', 'skew_ps', 'snr_db',
-    'spacing_ui', 't_off_s', 't_on_s', 't_start_frac', 't_start_s', 't_step_frac', 't_step_s',
+    'rate_hz', 'rds_on_ohm', 'rin_db_per_hz', 'ripple_db', 'rj_ps', 'rms_ps', 'scs_hz', 'skew_ps',
+    'snr_db', 'stop_db',
+    'spacing_ui', 'span_ui', 't_join_s', 't_off_s', 't_on_s', 't_start_frac', 't_start_s', 't_step_frac', 't_step_s',
+    't_switch_s',
     'tau_frac', 'tau_s', 'td_frac', 'td_ps', 'tr_frac', 'tr_s', 'trend_floor_db',
     'wavelength_nm', 'width_frac', 'width_s'
 })

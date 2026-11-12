@@ -22,8 +22,11 @@ def test_the_skill_and_its_reference_exist_where_an_agent_looks():
 
 def test_there_is_exactly_one_copy_of_the_skill_in_the_tree():
     """A second copy drifts, and the stale one is the one somebody reads."""
+    # `.claude/worktrees/` holds other CHECKOUTS of this repository (git worktrees, ignored by
+    # git), each with its own tree; their copy is that tree's one copy, not a second one here.
     found = sorted(p.relative_to(REPO) for p in REPO.rglob("SKILL.md")
-                   if ".git" not in p.parts and ".venv" not in p.parts)
+                   if ".git" not in p.parts and ".venv" not in p.parts
+                   and "worktrees" not in p.relative_to(REPO).parts)
     assert found == [SKILL.relative_to(REPO)], f"more than one SKILL.md: {found}"
 
 

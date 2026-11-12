@@ -146,7 +146,45 @@ cannot stop — and 12 Ω of series damping is the whole fix, for 131 ps of fall
 inductance is also what makes a line reachable as a lumped ladder (`net.line_ladder`), sized by
 a measured rule rather than a rule of thumb.
 
-### 7. Specialist topics
+### 7. Compose chains that meet
+
+A chain is a line with one source; a capture is not. Take these in order, and stop when you
+have what you need. The cookbook chapter
+[Composing a realistic capture](../docs/COOKBOOK.md#composing-a-realistic-capture) is the text
+that goes with them.
+
+| Example | Use it when |
+|---|---|
+| [`sub_chains.py`](sub_chains.py) | An op's second signal has a chain of its own: an aggressor after its own channel, a filtered message. Start here |
+| [`joins.py`](joins.py) | A second signal is added, multiplies, gates or delays the record: hum on a sensor, gain on a supply ripple, an enable, a Doppler delay |
+| [`sequence_and_switch.py`](sequence_and_switch.py) | The transmission has parts in time (idle, preamble, payload) or a signal selects between sources, and you need per-sample labels of which |
+| [`clock_and_data.py`](clock_and_data.py) | Several channels must be correlated the way one PLL, one supply or one bit stream makes them, from one recipe |
+| [`law_and_filter.py`](law_and_filter.py) | The shape has no named op: a comparator with hysteresis, an anti-alias filter, with the delay accounted for |
+| [`triggered_capture.py`](triggered_capture.py) | The record is what a scope's trigger kept: an edge or pulse-width trigger, segmented memory, holdoff, averaging |
+| [`unit_variation.py`](unit_variation.py) | Parts have tolerances and a model must generalise to units it has not seen; shows the leakage a random split hides |
+| [`composed_capture.py`](composed_capture.py) | You want to see all of the above on one two-channel triggered capture, and each cause of its jitter isolated by changing one named thing |
+| [`state_dwell.py`](state_dwell.py) | A level dwells and jumps at random times: burst noise, an idle/active schedule for a gate or a switch, 1/f noise as a sum of such processes |
+| [`clutter.py`](clutter.py) | A clean record is too clean: mains hum, converter ripple, pickup and 1/f from `ws.recipes`, and what each does to a detector's false alarms |
+
+### 8. I/Q and RF
+
+| Example | Use it when |
+|---|---|
+| [`iq_passband.py`](iq_passband.py) | The signal is a modulated carrier: a complex-baseband record, up to a passband voltage, through a scope, back to symbols. Start here |
+| [`iq_impairments.py`](iq_impairments.py) | A transmitter and its oscillator are not ideal: an EVM budget predicted from the chain's own report against the measured EVM |
+| [`rf_measures.py`](rf_measures.py) | You need ACLR, PAPR and EVM against the transmitted symbols, with an amplifier compressing the passband voltage |
+| [`iq_recordings.py`](iq_recordings.py) | I/Q has to come from or go to a file: SigMF with annotations, raw interleaved samples with a marker channel, an embedded recording |
+| [`ofdm_frame.py`](ofdm_frame.py) | The signal is multicarrier: an OFDM frame (preamble, payload, gap) through an echo and noise, with EVM per subcarrier and per symbol against the resource grid |
+| [`fading_multipath.py`](fading_multipath.py) | The channel is stated at RF and rendered on the envelope: an amplifier's AM/PM, a cable, multipath and Doppler fading at 2.4 GHz on a 4 MSa/s grid |
+
+### 9. Photonics
+
+| Example | Use it when |
+|---|---|
+| [`optical_field.py`](optical_field.py) | The record is light between `eo` and `photodetect`: a coupler, an attenuator, an optical filter, two polarisations, and what is refused on a field. Start here |
+| [`swept_ring.py`](swept_ring.py) | A tunable laser sweeps a ring with a reference interferometer beside it: Q and extinction across dies, and what a stray reflection, a fast sweep and a mode hop do to the reading |
+
+### 10. Specialist topics
 
 | Example | Use it when |
 |---|---|
