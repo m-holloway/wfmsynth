@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); and a record can be complex baseband (I/Q) with RF impairments and measures. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
-version: 7
+version: 8
 ---
 
 # wfmsynth
@@ -39,7 +39,7 @@ mistakes that cost time.
 
   a parameter that takes a signal takes a chain:   .crosstalk(aggressor=Signal().carrier(...).lossy(...))
   several named chains are one record:             ws.Channels({...}, shared={...})  +  .use("name")
-  a record may be a complex envelope:              Grid(domain="iq", fc_hz=)  .iq(...)  .upconvert()
+  a record may be a complex envelope:              .iq("qam16", prbs=15)  ...  .upconvert(fc_hz=)
 ```
 
 Order is physical. A band limit before the sampler is a measurement; after it, an artefact. A
@@ -65,29 +65,24 @@ has each one worked.
 
 - **A sub-chain is a value.** Write it `Signal()` — no seed, no grid — and pass it wherever a
   signal goes (`aggressor=`, `message=`, `by=`, `on=`, `others=`, a `sequence` segment). It
-  becomes part of the record, namespaced by where it sits (`crosstalk/1/aggressor`).
-  `{"from": other.recipe()}` embeds another record as rendered instead.
-- **Joins.** `combine(other)` adds (or `how="product"|"min"|"max"`); `gain`/`offset`/`gate`/
-  `delay` take `by=` a number or a chain; `sequence([...])` and `switch(select=, inputs=)` are
-  sources made of chains.
+  joins the record under a namespace (`crosstalk/1/aggressor`). `{"from": other.recipe()}`
+  embeds another record as rendered instead.
+- **Joins.** `combine(other)`; `gain`/`offset`/`gate`/`delay` with `by=` a number or a chain;
+  `sequence([...])` and `switch(select=, inputs=)` are sources made of chains.
 - **`ws.Channels({name: chain}, shared={name: chain}, seed=, grid=)`** is several channels from
   one recipe; `.use(name)` applies a shared stage or stands for a shared signal.
-  `rec.signal(name)` is one channel as a `Signal`, rendering exactly as it does in the record,
-  for everything a Signal reports about itself (`transmitted()`, `rf_report()`, `subchain()`).
-- **`law(kind, ...)` / `filter(kind, ...)`** are a comparator, rectifier, Butterworth, your own
-  taps: the shape with no named op. The named ops (`scope`, `ctle`, `digitize`, ...) stay
-  canonical for what they name, and asking `filter` for one of them is refused with its name.
-- **`trigger(pre_s=, post_s=, ...)`** cuts the windows; the grid is the LONG render.
-- **`ws.tol(nom, pct)` / `ws.corners({...})`** in place of a number is a toleranced part;
-  `sig.unit(seed)` is another unit under the same noise.
-- **I/Q.** `Grid(domain="iq", fc_hz=)` and `.iq("qam16", prbs=15)` make a complex envelope;
-  `upconvert()` / `downconvert(lpf=)` cross to a real passband voltage and back; `dac`,
-  `iq_imbalance`, `iq_offset`, `phase_noise`, `freq_offset`, `awgn`, `spur` impair it; `ws.rf`
-  measures it (`evm`, `aclr`, `ccdf`, `spectrum`); `ws.read_iq` / `ws.to_sigmf` are files. An
-  op written for a voltage refuses an envelope by name, and says what to use.
+- **`law(kind, ...)` / `filter(kind, ...)`** are the shapes with no named op; **`trigger(pre_s=,
+  post_s=)`** cuts windows from a LONG render; **`ws.tol(nom, pct)`** in place of a number is
+  a toleranced part and `sig.unit(seed)` another unit.
+- **I/Q.** `.iq("qam16", prbs=15)` starts a complex envelope (the record's domain follows its
+  source; `Grid(fc_hz=)` states the centre). `upconvert()` / `downconvert(lpf=dict(pass_hz=))`
+  cross to a real passband voltage and back; `dac`, `iq_imbalance`, `iq_offset`,
+  `phase_noise`, `freq_offset`, `awgn`, `spur` impair it; `ws.rf` measures it; `ws.read_iq` /
+  `ws.to_sigmf` are files. An op or a measure handed the wrong kind of record refuses by name
+  and says what to use.
 
-`sig.summary()` prints any of this as a tree, with the namespaces; `sig.roles()` lists every
-re-rollable randomness, inside sub-chains included.
+`sig.summary()` prints any of this as a tree. `sig.roles()` is exactly the randomness the
+record draws from, and `sig.contrast(name)` re-rolls one of them alone.
 
 **Do not add an op for an arrangement.** If it can be written as a chain, write a function
 that returns the `Signal()` sub-chain. An op is one mechanism nothing else expresses
@@ -196,13 +191,14 @@ was asked for.
     rise time read off it describes the simulation. Put the probe, the front end, the sample rate
     and the converter in the chain before writing the file, and pass the STORED rate to the
     exporter. `REFERENCE.md` has the parameters.
-17. **After `acquire()`, `Signal.grid` is the SYNTHESIS grid — use `Signal.stored_grid(x)`.**
-    `Signal.grid` reports the rate and length the chain was built on, not the record in your
-    hand, and handing it to a measurement raises nothing: `measure` reads `samples_per_ui` off
-    it, folds at the wrong symbol period, and returns a plausible number. MEASURED on an
+17. **After `acquire()`, `trigger` or `downconvert(fs_out_hz=)`, `Signal.grid` is the SYNTHESIS
+    grid — use `Signal.stored_grid(x)`.** `Signal.grid` is the rate and length the chain was
+    built on, not the record in your hand, and handing it to a measurement raises nothing:
+    `measure` folds at the wrong symbol period and returns a plausible number. MEASURED on an
     80 → 40 GSa/s acquisition, `eye_height` reads 0.6184 against the true 0.5896 — 4.9 % out,
-    silently. `sig.stored_grid(x)` returns the grid that describes `x`, and RAISES rather than
-    guess if the chain changed the length in a way it cannot account for.
+    silently. The same rule for ops: the NAMED link and instrument ops (`scope`, `lossy`,
+    `events`, ...) placed AFTER an acquisition still read the synthesis rate, so put them
+    before it; `filter`, `law`, the joins and the I/Q impairments run at the stored rate.
 18. **A unipolar source (`cmos`, and any future one) stays in real volts, not the ±1 the rest of
     `carrier` uses.** `x * 0.5 * v_full` is the wrong conversion once a chain contains one — the
     array already IS volts. `cmos`'s `tr_s` is also an absolute edge time in seconds, unlike
@@ -243,61 +239,34 @@ was asked for.
     grid for 8 samples per ring period (`f0 = 1/(2*pi*sqrt(L*C))`), not just for the edge. The
     solver warns below that and says explicitly when the record's ring is an alias.
 
-Composition added these. Each renders, replays and digests cleanly, and is wrong.
+Composition and I/Q added these. Each renders, replays and digests cleanly, and is wrong.
 
-26. **A builder method MUTATES the Signal and returns it.** `base.lossy(...)` and then
-    `base.rx_noise(...)` are one chain with both ops, not two variants. Build each variant from
-    a function that returns a fresh `Signal`.
-27. **A `Signal()` used as a sub-chain is drawn under the PARENT's seed and namespace**, so with
-    any randomness it is not `that_signal.waveform()`. The waveform as used is
-    `sig.subchain("crosstalk/1/aggressor")`. `{"from": recipe}` is the opposite trap: it is
-    pinned, so a dataset loop that varies only the parent's seed embeds the same lane in every
-    record.
-28. **Give every `nrz`/`pam4` carrier its `n_ui`.** The default is 32 symbols stretched over the
-    record whatever `Grid(baud=)` says: on a 1 GBd grid of 1024 UI the "clock" has an edge
-    every 32 ns. In a sub-chain or a `Channels` chain nothing else will tell you.
-29. **For timing work a clock is `carrier("nrz", n_ui=, pattern="clock")`, not `"square"` or
-    `"cmos"`.** Those two put each edge on the nearest sample: MEASURED at 64 GSa/s, 15.6 ps
-    peak to peak and 2.9 to 4.5 ps rms of jitter that is the grid's, against under 1e-9 ps for
-    the pattern clock. It swamps a picosecond-scale measurement and looks like the link's.
-30. **Randomness inside a SHARED chain is the same draw on every channel that uses it.** That
-    is the point for a PLL and a mistake for noise: `rx_noise` in a shared `scope` stage gives
-    every channel identical noise. Keep the trigger shared and put `rx_noise` on each channel.
-31. **`by=` is the quantity itself.** `gain(by=)` is the factor, so a 3 % ripple is a sine of
-    amplitude 0.03 with `offset=1.0`; without the offset the record is multiplied by a signal
-    that crosses zero. `delay(by=)` is in seconds.
-32. **After `trigger` or `downconvert(fs_out_hz=)`, as after `acquire`, `sig.grid` is not the
-    record** (#17): measure with `sig.stored_grid(x)`. The general stages (`filter`, `law`,
-    `delay`, `gate`, `gain`, `offset`, `combine`) and the I/Q impairments placed after one run
-    at the stored rate, so their Hz and seconds mean what they say; the NAMED link and
-    instrument ops (`scope`, `lossy`, `events`, ...) belong before the acquisition. A trigger's crossing is at `pre_s` only
-    to half a sample; the exact time is the trigger event's `t_s`.
-33. **Label from `events.on_record()`.** `e.on_record` is False for an event that reached the
-    record only through another op (an aggressor's glitch, an enable's edge) and for a trigger
-    firing; `mask()` and `overlapping()` skip those, a loop over `events` does not. `e.at` says
-    which sub-chain an event came from: a chain that IS the record (a `sequence` segment, a
-    `switch` input while selected, a chain brought in by `use`) keeps its events on it. Labels
-    follow the samples through `acquire`, `downconvert(fs_out_hz=)`, `trigger` and `delay`; a
-    `filter` moves them by `filter_delays()`, which you add.
-34. **Split a unit dataset on `ws.unit_of(recipe)`.** A random split puts captures of one unit
-    on both sides and reads as generalisation: MEASURED 1.7 ohm error random against 31.3 ohm
-    on held-out units, where answering the nominal scores 30.2. Also: a tolerance is drawn when
-    the op is ADDED; changing `sig.seed` afterwards redraws nothing, `sig.unit(seed)` does.
-35. **Raw EVM after any front end is a rotation, not distortion.** A group delay turns the
-    constellation by -2*pi*fc*delay: MEASURED 26.7 % raw against 1.8 % with
-    `correct=("gain", "phase")`. `rf.evm` fits nothing unless asked and `["removed"]` says what
-    went. A frequency offset is not removed by gain and phase; name `"frequency"` or de-rotate
-    with `sig.lo_phase()`. A `reference="decided"` EVM reads LOW once decisions fail.
-36. **`awgn`'s reference power is the record as it reaches the op** — start-up, leak and spurs
-    included — so "Es/N0 = 25 dB" against a unit-power constellation needs `ref_power=1.0`.
-    The noise is white over the whole sampled band: `snr_db` is in `bw_hz`, and the SNR of the
-    stored record is 10*log10(fs/bw_hz) lower.
-37. **An I/Q file's `scale` is the value of ONE COUNT, and a wrong one cannot be detected** —
-    every scale gives a self-consistent record. Byte order is checked; scale, and a wrong dtype
-    of the same width, are not. Read with exactly what the writer returned.
-38. **`combine` adds two voltages without complaint, and two DRIVERS on one node do not add.**
-    Superposition holds for a coupled ripple, an interferer, a tone on a supply. Sources that
-    load each other are `Signal.net()`.
+26. **A builder method MUTATES the Signal and returns it.** `base.lossy(...)` then
+    `base.rx_noise(...)` is one chain with both ops. Branch with `base.copy().lossy(...)`.
+27. **A `Signal()` sub-chain is drawn under the PARENT's seed and namespace**, so it is not
+    `that_signal.waveform()`; what was used is `sig.subchain("crosstalk/1/aggressor")`.
+    `{"from": recipe}` is the opposite trap: pinned, unit included, so a loop that varies the
+    parent's seed (or calls `unit()`) embeds the same lane in every record.
+28. **Keep samples per UI a whole number, and take jitter from `timing`.** An `nrz` / `pam<N>` /
+    `symbols` carrier puts each edge on a sample: MEASURED at 64 GSa/s, 1000 UI over 32768
+    samples carries 15.5 ps peak to peak that is the grid's, against under 1e-9 ps at 1024
+    UI, and `carrier(jitter=)` moves edges by whole samples. (`square` and `cmos` do not.)
+29. **Randomness inside a SHARED chain is the same draw on every channel that uses it.** Right
+    for a PLL, wrong for noise: put `rx_noise` on each channel.
+30. **`by=` is the quantity itself.** A 3 % ripple is `gain(by=)` a sine of amplitude 0.03 with
+    `offset=1.0`; without the offset the record is multiplied by a signal that crosses zero.
+    `delay(by=)` is seconds. And `combine` ADDS: two drivers on one node are `Signal.net()`.
+31. **Label from `events.on_record()`.** A loop over `events` also sees an aggressor's glitch,
+    an enable's edge and each trigger firing, none a defect on this record.
+32. **Split a unit dataset on `ws.unit_of(recipe)`**, never at random. And a tolerance is drawn
+    when the op is ADDED: changing `sig.seed` later redraws nothing, `sig.unit(seed)` does.
+33. **Raw EVM after any front end is a rotation, not distortion.** `rf.evm` fits nothing unless
+    asked: name `correct=("gain", "phase")` (and `"frequency"`), and read `["removed"]`. A
+    `reference="decided"` EVM reads LOW once decisions fail in noise.
+34. **`awgn`'s reference power is the record as it reaches the op**, start-up, leak and spurs
+    included: "Es/N0 = 25 dB" against a unit-power constellation needs `ref_power=1.0`.
+35. **An I/Q file's `scale` is the value of ONE COUNT, and a wrong one cannot be detected.**
+    Read with exactly what the writer returned.
 
 ## Where the boundary sits
 

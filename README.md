@@ -158,7 +158,7 @@ has what it needs to do so.
 | Build a realistic, reproducible signal path | `Signal` + `Grid` | Recommended high-level API; records each stage in a recipe |
 | Model what a scope stores | `Signal.acquire(AcquisitionProfile)` | Separates fine-grid simulation from front end, sampling, ADC, and record decimation |
 | Several correlated channels (clock and data, a pair, lanes on one supply) | `ws.Channels` + `use(name)` | One recipe and one digest; shared chains draw the same randomness on every channel that uses them |
-| RF: a complex-baseband record, impairments, EVM/ACLR | `Grid(domain="iq", fc_hz=)` + `Signal.iq`, `ws.rf` | The envelope is the record; `upconvert`/`downconvert` cross to a passband voltage and back |
+| RF: a complex-baseband record, impairments, EVM/ACLR | `Signal.iq` on a `Grid(fc_hz=)`, `ws.rf` | The envelope is the record; `upconvert`/`downconvert` cross to a passband voltage and back |
 | Apply or study one physical operation | `wfmsynth.physics` | Low-level NumPy-in/NumPy-out primitives for custom pipelines |
 | Add one named fault to an existing array | `apply_impairment` | Convenient fixed vocabulary for class-labelled augmentation |
 | Plant a rare, localized defect in a long record | `Signal.events` / `place_events` | Targeting (symbols, edges, pattern, aggressor, poisson, …) is independent of mechanism (runt, glitch, ring, droop, …); emits event times for an external segmenter |

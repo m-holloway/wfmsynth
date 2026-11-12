@@ -143,6 +143,14 @@ reflection delay is continuous: `td_ps=100.0` and `td_ps=100.25` give different 
 matters because the echo's phase within the eye is what decides whether it lands on a crossing or
 in the middle.
 
+The SOURCE's own edges are a separate matter. `square` and `cmos` place each edge at its own
+time between samples (measured at 0.997 GHz on 64 GSa/s: 3e-5 ps of edge-time error, where
+snapping to the next sample gave 15.6 ps). An `nrz` / `pam<N>` / `symbols` carrier places its
+edges ON samples, so its clock is clean only when samples per UI is a whole number: choose `n`
+and `n_ui` so `n / n_ui` is whole. `carrier(jitter=)` displaces edges by whole samples for the
+same reason; jitter that means what it says is `timing(rj_ps=)`. `carrier` warns once when
+`n_ui` is left out on a grid whose `baud` the default 32 symbols do not match.
+
 Two places still interpolate linearly, and both act on the synthesis grid where the sizing rule
 keeps the oversample high: the FFE's fractional tap spacing and interleaved-converter channel
 skew. The cost there is bounded and measured (under 0.1 % of peak-to-peak at 20+ samples/UI).
@@ -177,6 +185,15 @@ in symbols with the default `on="symbols"`, or `count=`/`fraction=`/`every=` to 
 for e in events.events:
     stored_index = int(e.t_s * fs_store)     # correct in the record you stored
 ```
+
+Label from `events.on_record()`. `e.on_record` is False for an event that reached the record
+only through another op (an aggressor's glitch, an enable's edge) and for a trigger firing;
+`mask()` and `overlapping()` skip those, a loop over `events` does not. `e.at` says which
+sub-chain an event came from: a chain that IS the record (a `sequence` segment, a `switch`
+input while selected, a chain brought in by `use`) keeps its events on it. Labels follow the
+samples through `acquire`, `downconvert(fs_out_hz=)`, `trigger` and `delay`; a `filter` moves
+them by `filter_delays()`, which you add. A trigger's crossing is at `pre_s` only to half a
+sample; the exact time is the trigger event's `t_s`.
 
 `Event.sample` indexes the grid the event was placed on. After any resampling it points somewhere
 else, and where the synthesis grid outruns the sampler it can exceed the whole stored record. A
@@ -425,9 +442,13 @@ from wfmsynth import Signal
 g = ws.Grid(fs=64e9, baud=1e9, n=1 << 16)            # 64 samples/UI, 1024 UI
 N_UI = 1024
 
-def data(seed=3):                                    # a builder mutates: one fresh Signal per use
+def data(seed=3):                                    # a fresh Signal per call
     return Signal(seed=1, grid=g).carrier("nrz", n_ui=N_UI, pattern="prbs7", seed=seed)
 ```
+
+A builder method appends to the Signal it is called on and returns it, so reusing one base
+builds ONE chain. `base.copy()` is an independent Signal with the same recipe and samples:
+`short, long = base.copy().lossy(loss_db=3, loss_at_ghz=8), base.copy().lossy(loss_db=12, loss_at_ghz=8)`.
 
 ### A sub-chain: three ways to write one, and how to reach inside
 
@@ -449,6 +470,12 @@ moved = a.contrast("crosstalk/1/aggressor/timing/1") # re-roll ONLY the aggresso
 assert not np.array_equal(moved, a.waveform())
 assert Signal.from_recipe(json.loads(a.to_json())).sha256() == a.sha256()
 ```
+
+`roles()` is exactly what the record draws from: a role is listed only when the op's
+parameters make it draw (`store` with `dither_lsb`, `acquire` with a noise floor, a carrier
+with `rj`), so every listed name moves samples when re-rolled. A `{"from": recipe}` record is
+pinned, unit included: `unit()` does not move its toleranced parts and `roles()` lists only
+its noise.
 
 A sub-chain must land on the record's own grid as a real waveform, or it is refused: nothing is
 resampled. Parameters that take one: `crosstalk(aggressor=)`,
@@ -537,7 +564,8 @@ so two channels through `pll` see one realisation, and the same chain under two 
 The trigger above is on `clk_line`, not `clk`: `clk` uses `scope`, and a chain cannot reach
 itself (a cycle is refused, naming it). `rec.waveform(name)`, `rec.stored_grid(name, x)`,
 `rec.unit(seed)` and `rec.write_hdf5(path)` are the per-record counterparts of the `Signal`
-methods. A differential pair is `{"p": chain, "n": Signal().use("p").law("poly", coeffs=[0.0, -1.0])}`.
+methods; `rec.signal(name)` is one channel as a `Signal` that renders exactly as it does in the
+record, for `transmitted()`, `rf_report()`, `subchain()` and the rest. A differential pair is `{"p": chain, "n": Signal().use("p").law("poly", coeffs=[0.0, -1.0])}`.
 
 ### law and filter
 
@@ -644,23 +672,26 @@ goes; `from_recipe` draws it under the recipe's seed. A COUNT (`bits`, `n_ui`, `
 draws would be truncated. `rec.contrast(role)` takes every role `rec.roles()` lists, a part's
 included, on a `Signal` and a `Channels` alike; a name that matches nothing is refused.
 
+Split a unit dataset on `group`, not at random. MEASURED: 1.7 ohm error on a random split
+against 31.3 ohm on held-out units, where answering the nominal scores 30.2 -- the random
+split had captures of every unit on both sides.
+
 ## I/Q and RF
 
 ```python
 import os, tempfile, numpy as np, wfmsynth as ws
 from wfmsynth import Signal, rf
 
-g = ws.Grid(fs=6.4e9, baud=25e6, n=1 << 18, domain="iq", fc_hz=1e9)   # the grid carries the carrier
+g = ws.Grid(fs=6.4e9, baud=25e6, n=1 << 18, fc_hz=1e9)   # the centre; the iq source makes it I/Q
 
-def source():
-    return Signal(seed=1, grid=g).iq("qam16", prbs=15, prbs_phase=100)   # or iq(symbols=[1+0j, 1j, ...])
+src = Signal(seed=1, grid=g).iq("qam16", prbs=15, prbs_phase=100)   # or iq(symbols=[1+0j, 1j, ...])
 # ONE source: prbs=<order> (prbs_seed= is its starting state, 1 unless stated; prbs_phase= steps
 # it that many bits further), bits=[...], or symbols=[...]. Signal(seed=) does NOT move the
 # data: a dataset loop varies prbs_seed (or prbs_phase), as carrier(seed=) does for a voltage.
 
-sent, t_s = source().transmitted()                     # ground truth: complex symbols, centre times
+sent, t_s = src.transmitted()                          # ground truth: complex symbols, centre times
 
-rx = (source()
+rx = (src.copy()                                       # branch: `src` itself stays the source
       .upconvert()                                     # iq -> real passband volts, same grid
       .law("tanh", sat=2.5)                            # an amplifier acts on the voltage
       .probe(bw_hz=3e9)                                # every real op applies here
@@ -679,16 +710,22 @@ rf.band_power(spec, -16.875e6, 16.875e6)
 
 `upconvert` and `downconvert` never resample: the grid must hold the carrier with the envelope's
 bandwidth clear of DC and Nyquist (refused otherwise, stating the folded power), and `lpf` has no
-default (a bare number is the pass edge; stop is twice it, 80 dB). `fs_out_hz` is whole-number
-decimation only. `rf.evm` corrections, each returned in `removed`: `"timing"` (within half a
+default (`lpf=dict(pass_hz=)`; `stop_hz` defaults to twice it, `atten_db` to 80). `fs_out_hz` is
+whole-number decimation only. A record's domain follows its source: `iq(...)` or an I/Q capture
+makes it complex baseband without `Grid(domain="iq")`, and a grid that states `domain="real"`
+refuses them. `rf.evm` corrections, each returned in `removed`: `"timing"` (within half a
 symbol of `delay_s`), `"frequency"`, `"offset"`, `"gain"`, `"phase"`, `"equalizer"` (with
 `equalizer_taps=`). `skip=` drops symbols at each end, which lack their neighbours' tails.
+With `reference="decided"` the carrier is acquired blind before any decision (the line in the
+4th power of the symbols for QPSK and QAM): an offset within +/- baud/8 is found at any phase,
+and a record it cannot lock to is refused instead of measured. Measured, QAM-16 2 kHz off at
+Es/N0 24 dB: 6.29 % decided against 6.29 % truth.
 `rf.evm` is THE EVM of a record: it applies the RRC matched filter itself and returns percent, dB
 and a fraction. `ws.iq.evm(received, sent)` is only its last step, a fraction, for symbols you
 already hold.
 
 ```python
-gi = ws.Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
+gi = ws.Grid(fs=400e6, baud=25e6, n=1 << 16, fc_hz=1e9)
 
 tx = (Signal(seed=1, grid=gi).iq("qam16", prbs=15, prbs_phase=100)
       .dac(bits=8, headroom_pct=5)                     # or full_scale=; clip="hard" to allow clipping
@@ -714,6 +751,10 @@ matched = raw.filter("rrc", beta=0.35, zero_phase=True)             # a recordin
 
 The order of the impairments is physical and is kept: these are `general` stages. All seven
 refuse a real record. `eb_n0_db` needs the source's constellation (or `bits_per_symbol=`).
+`awgn`'s noise is white over the whole sampled band: `snr_db` is in `bw_hz`, and the SNR of the
+stored record is 10*log10(fs/bw_hz) lower. An I/Q file's byte order is checked on read; its
+`scale`, and a wrong dtype of the same width, cannot be, since every scale gives a
+self-consistent record.
 `ws.iqfile.describe(path, format, ...)` reports a file's length, peak counts and full-scale
 fraction without building anything. A file states no symbol rate; pass `baud=` or a matched
 filter has nothing to read. On an envelope `gain(by=)`, `gate(by=)` (real `by`), `combine` (sum,
