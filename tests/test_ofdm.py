@@ -221,6 +221,10 @@ def test_a_named_set_records_its_name_and_its_numbers_and_replays_without_the_re
     ({"cp": 0.8e-6}, r"cp is a count of samples at the FFT rate \(n_fft \* scs_hz = 20000000 "
                      r"Sa/s\).*got 8e-07. If that is seconds, it is cp=16"),
     ({"cp": [16, 0.8e-6]}, "If that is seconds, it is cp=16"),
+    # the entry that is wrong is the one named, as written (not the whole 16 beside it)
+    ({"cp": [16, 18.5]}, r"is a whole number >= 0, got 18.5$"),
+    ({"cp": np.array([16.0, 18.5])}, r"is a whole number >= 0, got 16.0$"),
+    ({"cp": [np.int64(16), np.float32(18.5)]}, r"is a whole number >= 0, got 18.5$"),
     ({"cp": 16.7}, r"cp \(samples at the FFT rate\) is a whole number >= 0, got 16.7"),
     ({"cp": 0.25}, "is a whole number >= 0, got 0.25"),
     ({"cp": 16.0}, "is a whole number >= 0, got 16.0"),

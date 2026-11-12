@@ -166,10 +166,14 @@ def jsonable(params):
     """`params` as a recipe holds them: lists for arrays, ``[re, im]`` pairs for complex
     pilot values."""
     out = dict(params)
-    for k in ("cp", "active"):       # a count stays a count; anything else is refused later
+    # a count stays a count, and each entry what the caller wrote (not one array's common
+    # type, which turns the 16 beside an 18.5 into 16.0): anything else is refused later,
+    # naming the entry that is wrong
+    for k in ("cp", "active"):
         if k in out and isinstance(out[k], (list, tuple, np.ndarray)):
-            out[k] = [int(v) if isinstance(v, np.integer) else v
-                      for v in np.asarray(out[k]).ravel()]
+            out[k] = [v.item() if isinstance(v, np.generic) else v
+                      for v in (out[k].ravel() if isinstance(out[k], np.ndarray)
+                                else out[k])]
     for k in ("n_fft", "cp", "active", "window", "n_symbols"):
         if isinstance(out.get(k), np.integer):
             out[k] = int(out[k])
