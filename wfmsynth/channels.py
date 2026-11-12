@@ -394,6 +394,9 @@ class Channels:
         """Rebuild the record from its recipe; `.waveforms()` reproduces every channel
         bit-for-bit."""
         from .compose import _warn_on_numeric_drift
+        if "segments" in r:
+            raise ValueError("Channels.from_recipe: this recipe is a segmented acquisition. "
+                             "ws.Segments.from_recipe(recipe).waveform() renders it.")
         if "channels" not in r:
             raise ValueError("Channels.from_recipe: this recipe has no `channels`, so it is "
                              "one Signal. Signal.from_recipe(recipe).waveform() renders it.")

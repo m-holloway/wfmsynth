@@ -64,6 +64,26 @@ drawn under the outer seed with the role `<the sub-chain's namespace>/unit/<k>/<
 `unit()` moves it with everything else. `{"from": recipe}` is another record pinned as rendered,
 and so is its unit.
 
+PER OCCURRENCE. A tolerance drawn once per unit is fixed for every capture of that unit. A
+value that changes from one OCCURRENCE of an event to the next -- a surge's amplitude, a
+relay's bounce -- is written the same way with `per="segment"`, and one that moves steadily
+across the occurrences -- a supply sagging, a part warming -- is a `trend`:
+
+    ws.tol(1.0, 5, per="segment")                     drawn again for every occurrence
+    ws.trend("ramp", start=1.0, stop=0.9)             first occurrence 1.0, last 0.9
+    ws.trend("ramp", start=1.0, rate_per_s=-1e-3)     at the occurrence's arrival time
+    ws.trend("step", before=1.0, after=0.8, at=150)   from occurrence 150 on (or at_s=)
+
+Both exist only across the occurrences of `ws.Segments` (`wfmsynth.segments`): the op holds
+the nominal (a trend's starting value) as a placeholder, the spec is kept beside it under
+`_segment`, and a chain that holds one is REFUSED when it is rendered alone, since no single
+number is the truth for it. A segment draw nests inside the unit: the unit's values stay put
+for the whole acquisition and the segment's are drawn under it, role
+`vary/<op index>/<parameter>` (or `vary/<group>`), one uniform number per occurrence. A part
+that varies from unit to unit AND from occurrence to occurrence is two factors on two ops --
+`gain(by=ws.tol(1, 10))` then `gain(by=ws.tol(1, 2, per="segment"))` -- each with its own
+stated distribution, not a tolerance inside a tolerance.
+
 WHAT THIS OVERLAPS. `dataset(build, n)` already randomises anything: `build(rng)` draws a knob
 and the drawn number is baked into the recipe. That stays the general tool, and `unit_dataset`
 is built on it. What it cannot say is what the number was drawn FROM, or which other records are
@@ -87,9 +107,12 @@ from .streams import _role_seed
 
 DISTS = ("uniform", "normal", "corner")
 NORMAL_SIGMAS = 3.0            # "normal": the tolerance is this many sigma, and the draw is truncated there
-_TOL_KEYS = frozenset({"nom", "tol_pct", "tol_abs", "dist", "group"})
-_CORNER_KEYS = frozenset({"corners", "pick", "group"})
-_MARK = ("nom", "tol_pct", "tol_abs", "corners")      # any of these makes a dict a toleranced value
+_TOL_KEYS = frozenset({"nom", "tol_pct", "tol_abs", "dist", "group", "per"})
+_CORNER_KEYS = frozenset({"corners", "pick", "group", "per"})
+_MARK = ("nom", "tol_pct", "tol_abs", "corners", "trend")   # any of these: a value still to draw
+PER = ("unit", "segment")                             # the draw levels a tolerance names
+TRENDS = {"ramp": (("start", "stop"), ("start", "rate_per_s")),
+          "step": (("before", "after", "at"), ("before", "after", "at_s"))}
 ANY = "unit/*"                                        # every unit role at once
 # Parameters that are COUNTS. A tolerance draws a float, which each of these would truncate or
 # render as a different thing than was drawn (8.86 bits is 8); they take named corners.
@@ -99,12 +122,13 @@ WHOLE_NUMBERS = frozenset({
 
 
 # ---- the two forms ----------------------------------------------------------------------------
-def tol(nom, tol_pct=None, *, tol_abs=None, dist="uniform", group=None):
+def tol(nom, tol_pct=None, *, tol_abs=None, dist="uniform", group=None, per="unit"):
     """A toleranced number: `tol(50, 5)` is 50 +/- 5 %, `tol(0.0, tol_abs=5e-12)` is +/- 5 ps.
 
     `dist` is "uniform" (default), "normal" (tol = 3 sigma, truncated at the tolerance) or
     "corner" (one of the two extremes). `group` names parameters that are drawn together.
-    Returns the plain dict a recipe carries, checked."""
+    `per="segment"` draws it again for every occurrence of a `ws.Segments` acquisition
+    instead of once per unit. Returns the plain dict a recipe carries, checked."""
     spec = {"nom": nom}
     if tol_pct is not None:
         spec["tol_pct"] = tol_pct
@@ -114,14 +138,17 @@ def tol(nom, tol_pct=None, *, tol_abs=None, dist="uniform", group=None):
         spec["dist"] = dist
     if group is not None:
         spec["group"] = group
+    if per != "unit":
+        spec["per"] = per
     _check(spec, "tol()")
     return spec
 
 
-def corners(values, pick=None, group=None):
+def corners(values, pick=None, group=None, per="unit"):
     """A named corner set: `corners({"slow": 12.0, "typ": 10.0, "fast": 8.0})` is one of the
     three, equally likely. `pick="slow"` states the corner instead of drawing it; `group` names
-    parameters that share one draw: sets with the same names take the SAME corner."""
+    parameters that share one draw: sets with the same names take the SAME corner.
+    `per="segment"` draws the corner again for every occurrence of a `ws.Segments`."""
     if not isinstance(values, dict):
         raise ValueError(f"corners(): takes {{name: value}}, e.g. corners({{'slow': 12.0, "
                          f"'fast': 8.0}}), got {type(values).__name__}. The names are what the "
@@ -131,8 +158,49 @@ def corners(values, pick=None, group=None):
         spec["pick"] = pick
     if group is not None:
         spec["group"] = group
+    if per != "unit":
+        spec["per"] = per
     _check(spec, "corners()")
     return spec
+
+
+def trend(kind, **params):
+    """A value that moves steadily across the occurrences of a `ws.Segments` acquisition -- a
+    drift, deterministic, with no role: nothing about it is drawn.
+
+        trend("ramp", start=1.0, stop=0.9)              linear in the occurrence's index
+        trend("ramp", start=1.0, rate_per_s=-2e-3)      linear in its arrival time
+        trend("step", before=1.0, after=0.8, at=150)    from occurrence 150 on
+        trend("step", before=1.0, after=0.8, at_s=2.5)  from the first arriving at 2.5 s on
+
+    Its location is `trend/<op index>/<parameter>`; `Segments.without("trend/...")` is the
+    same acquisition with the trend held at its first value. Returns the plain dict."""
+    spec = {"trend": kind, **params}
+    _check(spec, "trend()")
+    return spec
+
+
+def _check_trend(spec, where):
+    kind = spec["trend"]
+    if kind not in TRENDS:
+        raise ValueError(f"{where}: a trend is one of {sorted(TRENDS)}, got {kind!r}")
+    keys = set(spec) - {"trend"}
+    forms = TRENDS[kind]
+    if not any(keys == set(f) for f in forms):
+        raise ValueError(
+            f"{where}: a {kind!r} trend takes "
+            + " or ".join("{" + ", ".join(f) + "}" for f in forms)
+            + f"; got {sorted(keys)}. A trend is deterministic, so it has no dist or group.")
+    for k in keys - {"at"}:
+        if not _real(spec[k]):
+            raise ValueError(f"{where}: {k}={spec[k]!r} is not a real number.")
+    if "at" in spec and (isinstance(spec["at"], bool) or not isinstance(spec["at"], numbers.Integral)
+                         or spec["at"] < 1):
+        raise ValueError(f"{where}: at= is the index of the first occurrence after the step, a "
+                         f"whole number >= 1, got {spec['at']!r}. In seconds it is at_s=.")
+    if "at_s" in spec and spec["at_s"] <= 0:
+        raise ValueError(f"{where}: at_s= is a time after the acquisition starts, > 0, got "
+                         f"{spec['at_s']!r}.")
 
 
 def _real(v):
@@ -142,6 +210,11 @@ def _real(v):
 
 def _check(spec, where):
     """Refuse a toleranced value that cannot be drawn honestly. `where` names it in the message."""
+    if "trend" in spec:
+        return _check_trend(spec, where)
+    if spec.get("per", "unit") not in PER:
+        raise ValueError(f"{where}: per={spec['per']!r} is one of {list(PER)}: drawn once per "
+                         f"unit (the default), or again for every occurrence of a ws.Segments.")
     keys = _CORNER_KEYS if "corners" in spec else _TOL_KEYS
     unknown = sorted(k for k in spec if k not in keys)
     if unknown:
@@ -149,8 +222,8 @@ def _check(spec, where):
         raise ValueError(
             f"{where}: a toleranced value does not take {unknown}"
             + (f" -- did you mean {near[0]!r}?" if near else "")
-            + f". It is {{'nom', 'tol_pct' or 'tol_abs', 'dist', 'group'}} or "
-              f"{{'corners', 'pick', 'group'}}.")
+            + f". It is {{'nom', 'tol_pct' or 'tol_abs', 'dist', 'group', 'per'}} or "
+              f"{{'corners', 'pick', 'group', 'per'}}.")
     group = spec.get("group")
     if group is not None and (not isinstance(group, str) or not group or "/" in group
                               or group == "*" or group.isdigit()):
@@ -238,15 +311,16 @@ def quantile(spec, u):
     return nom + (half / NORMAL_SIGMAS) * z, None
 
 
-def located(i, name, op=None, pre=""):
+def located(i, name, op=None, pre="", level="unit"):
     """Where a toleranced parameter sits, written the way every other role is. In the chain
     itself: `unit/<op index>/<parameter>`. Inside a sub-chain: that sub-chain's namespace,
     then the same -- `crosstalk/1/aggressor/unit/1/loss_db` beside
     `crosstalk/1/aggressor/rx_noise/2`. `pre` is the chain's name in a several-channel
-    record (`clk/`)."""
+    record (`clk/`). `level` is the first word: "unit", or "vary" / "trend" for a value
+    that changes from one occurrence of a `ws.Segments` to the next."""
     path = _split(name)
     if op is None or "ops" not in path:
-        return f"{pre}unit/{i}/{name}"
+        return f"{pre}{level}/{i}/{name}"
     ns, k = [], 0
     while "ops" in path[k:]:
         j = path.index("ops", k)
@@ -256,7 +330,7 @@ def located(i, name, op=None, pre=""):
         else:
             ns.append(f"{op.get('op')}/{i}/" + "/".join(map(str, held)))
         op, i, k = _get(op, path[k:j + 2]), path[j + 1], j + 2
-    return f"{pre}{'/'.join(ns)}/unit/{i}/" + ".".join(map(str, path[k:]))
+    return f"{pre}{'/'.join(ns)}/{level}/{i}/" + ".".join(map(str, path[k:]))
 
 
 def is_role(name):
@@ -294,7 +368,7 @@ def _find(v, path, out, where):
         for k, c in v.items():
             if k == "from" and isinstance(c, dict):
                 continue      # ANOTHER record, pinned as rendered: its unit is its own
-            if k == "_unit" and path:
+            if k in ("_unit", "_segment") and path:
                 raise ValueError(
                     f"{where}: a nested chain at {'.'.join(map(str, path))!r} arrives with its "
                     f"own resolved tolerances, drawn under its own seed, which this record's "
@@ -338,12 +412,16 @@ def resolve(i, params, seed, pre=""):
     `i` is the op's index (it names the role), `seed` the record's, `pre` the chain's name in
     a several-channel record (see `_role`). With no toleranced value
     the SAME dict comes back untouched, so a record that uses none is byte-identical to what it
-    always was. Otherwise each is replaced by its number and described under `_unit`."""
+    always was. Otherwise each is replaced by its number and described under `_unit`. A value
+    that changes per occurrence (`per="segment"`, a `trend`) is replaced by its placeholder
+    (`placeholder`) and kept under `_segment`, for `ws.Segments` to resolve occurrence by
+    occurrence."""
     paths = []
     _find(params, (), paths, f"op {i}")
     if not paths:
         return params
     unit = dict(params.get("_unit", {}))
+    seg = dict(params.get("_segment", {}))
     for path in paths:
         if any(isinstance(k, str) and ("." in k or k.isdigit()) for k in path):
             raise ValueError(
@@ -352,14 +430,67 @@ def resolve(i, params, seed, pre=""):
         name = ".".join(map(str, path))
         spec = _get(params, path)
         _check(spec, f"op {i}, parameter {name!r}")
-        if "corners" not in spec and path[-1] in WHOLE_NUMBERS:
+        if path[-1] in WHOLE_NUMBERS and ("nom" in spec or spec.get("trend") == "ramp"):
             raise ValueError(
-                f"op {i}, parameter {name!r}: {path[-1]} is a whole number, and a tolerance "
-                f"draws a fraction of one, which would be recorded and then truncated. Name "
-                f"the values it can take: ws.corners({{'lo': ..., 'hi': ...}}).")
+                f"op {i}, parameter {name!r}: {path[-1]} is a whole number, and a "
+                f"{'ramp' if 'trend' in spec else 'tolerance'} gives a fraction of one, which "
+                f"would be recorded and then truncated. Name the values it can take: "
+                f"ws.corners({{'lo': ..., 'hi': ...}}).")
+        if per_segment(spec):
+            seg[name] = spec
+            params = _set(params, path, placeholder(spec))
+            continue
         value, unit[name] = _draw(spec, seed, _role(i, name, spec, pre, params))
         params = _set(params, path, value)
-    return {**params, "_unit": unit}
+    out = {**params, "_unit": unit} if unit else dict(params)
+    if seg:
+        out["_segment"] = seg
+    return out
+
+
+def per_segment(spec):
+    """True for a value that changes from one occurrence of a `ws.Segments` to the next."""
+    return "trend" in spec or spec.get("per") == "segment"
+
+
+def placeholder(spec):
+    """The number an op holds for a per-occurrence value: the nominal, a corner set's first
+    corner by name (or its `pick`), a trend's first value. It is the design's statement, not
+    any occurrence's truth, which is why a chain holding one is refused when rendered alone."""
+    if "trend" in spec:
+        return spec["start"] if spec["trend"] == "ramp" else spec["before"]
+    if "corners" in spec:
+        return spec["corners"][spec.get("pick", sorted(spec["corners"])[0])]
+    return spec["nom"]
+
+
+def refuse_per_segment(ops, who="this record"):
+    """Refuse a chain that still holds a per-occurrence value: rendered alone it has no one
+    number to render, and the placeholder would be a silent stand-in."""
+    for i, op in enumerate(ops):
+        for name, spec in op.get("_segment", {}).items():
+            what = (f"follows ws.trend({spec['trend']!r}, ...)" if "trend" in spec
+                    else "is drawn per occurrence (ws.tol(..., per='segment'))")
+            raise ValueError(
+                f"{op.get('op')} (op {i}): {name} {what}, which has a value only across the "
+                f"occurrences of ws.Segments, and {who} is rendered alone. Hand the chain to "
+                f"ws.Segments(chain, n=, arrival=, trigger=...), or write a number (a "
+                f"unit-to-unit part is ws.tol(...) without per=).")
+
+
+def segment_entries(ops, pre=""):
+    """``(op index, parameter, spec, location, role)`` for every per-occurrence value in an op
+    list. `location` names the parameter (`vary/2/by`, `trend/1/by`); `role` is the
+    randomness a segment draw comes from (`vary/2/by`, or `vary/<group>` shared), None for a
+    trend."""
+    for i, op in enumerate(ops):
+        for name, spec in op.get("_segment", {}).items():
+            if "trend" in spec:
+                yield i, name, spec, located(i, name, op, pre, "trend"), None
+                continue
+            loc = located(i, name, op, pre, "vary")
+            g = spec.get("group")
+            yield i, name, spec, loc, (f"vary/{g}" if g is not None else loc)
 
 
 def stated(ops):
@@ -371,9 +502,11 @@ def stated(ops):
     the unit. An op with no toleranced value comes back as a plain copy."""
     out = []
     for op in ops:
-        new = {k: v for k, v in op.items() if k != "_unit"}
+        new = {k: v for k, v in op.items() if k not in ("_unit", "_segment")}
         for name, entry in op.get("_unit", {}).items():
             spec = {k: v for k, v in entry.items() if k not in ("seed", "corner")}
+            new = _set(new, _split(name), spec)
+        for name, spec in op.get("_segment", {}).items():
             new = _set(new, _split(name), spec)
         out.append(new)
     return out
@@ -405,6 +538,10 @@ def roles(ops, pre=""):
 def _chains(recipe):
     """``(chain name or None, role prefix, ops)`` for each chain of a recipe: the one of a
     Signal's, or every named chain of a `Channels` record's."""
+    if "segments" in recipe:
+        seg = recipe["segments"]
+        return [(None, "", seg["ops"])] + [(name, name + "/", v["ops"])
+                                           for name, v in seg.get("variants", {}).items()]
     if "channels" not in recipe:
         return [(None, "", recipe["ops"])]
     named = {**recipe["channels"], **recipe.get("shared", {})}
@@ -555,5 +692,5 @@ def unit_dataset(build, n_units, n_captures, seed=0):
     return dataset(one, n_units * n_captures, seed)
 
 
-__all__ = ["tol", "corners", "quantile", "resolve", "resolve_ops", "roles", "resolved",
+__all__ = ["tol", "corners", "trend", "quantile", "resolve", "resolve_ops", "roles", "resolved",
            "unit_of", "as_unit", "redrawn", "unit_dataset", "DISTS", "NORMAL_SIGMAS", "ANY"]

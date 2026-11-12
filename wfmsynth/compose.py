@@ -3874,7 +3874,9 @@ class Signal:
         return self._run(streams, _extended=True, _plan=plan), plan
 
     def _run(self, streams=None, collect_events=False, _extended=False, _plan=None, _x=None,
-             _events=(), _carrier=None):
+             _events=(), _carrier=None, _delay_s=0.0):
+        # `_delay_s` delays the SOURCE's output (op 0) by a fraction of a sample: where a
+        # `ws.Segments` occurrence falls between the scope's samples (`wfmsynth.segments`)
         from .events import EventList
         if streams is not None and _plan is None:
             self = TOL.redrawn(self, streams)     # a re-rolled unit/* role is a sibling record
@@ -3898,6 +3900,7 @@ class Signal:
         doms = DOMAIN.trace(ops, grid, start=was,
                             expand=None if rec is None else rec.rec.expand)
         TRIG.check_chain(ops)
+        TOL.refuse_per_segment(ops)
         for i, op in enumerate(ops):
             if i:
                 was = doms[i - 1]
@@ -3929,6 +3932,11 @@ class Signal:
                 x = _EXEC[name](x, op, st, grid, i, win=win)   # range the vertical to the window
             else:
                 x = _EXEC[name](x, op, st, grid, i)
+            if i == 0 and _delay_s:
+                from . import joins as JN
+                x = JN.delay(x, _delay_s, grid.fs, fc_hz=getattr(grid, "fc_hz", None))
+                if sink:
+                    EV.shift(sink, _delay_s, grid.fs, len(x))
             if sink and name in _RESTORES:
                 # the labels follow the samples onto the stored record: its rate, its length
                 was_fs, now_fs = (_stored_rate(ops[:k], float(grid.fs), int(grid.n),
@@ -4167,6 +4175,10 @@ class Signal:
             raise ValueError("Signal.from_recipe: this recipe has several channels, so it is "
                              "not one Signal. ws.Channels.from_recipe(recipe).waveforms() "
                              "renders all of them.")
+        if "segments" in r and "ops" not in r:
+            raise ValueError("Signal.from_recipe: this recipe is a segmented acquisition of "
+                             "many occurrences, not one Signal. "
+                             "ws.Segments.from_recipe(recipe).waveform() renders it.")
         grid = Grid(**r["grid"]) if r.get("grid") else None
         s = cls(seed=r["seed"], grid=grid, lead_in=r.get("lead_in"), lead_out=r.get("lead_out"))
         ops = TOL.resolve_ops([dict(o) for o in r["ops"]], r["seed"])
