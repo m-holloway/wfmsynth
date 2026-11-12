@@ -1030,6 +1030,40 @@ takes `ws.corners({"few": 2, "many": 6})`, which keeps its type. Parameters that
 `group="name"` take one draw, across the chains of a `Channels` record too: the same board, the
 same process corner.
 
+## Many occurrences of a rare event: Segments
+`trigger(n_segments=)` cuts its windows from one long render, which suits a process that runs
+all the time. A surge, a power-on or a relay closing happens now and then, with dead time
+between. `ws.Segments` renders each occurrence on its own short grid and triggers it the same
+way, so the cost is n x window, whatever the arrivals span.
+
+```python
+surge = (Signal().carrier("step", t_step_s=1e-6, tr_s=20e-9, amp=0.5, offset=0.5)
+         .gain(by=ws.tol(1.0, 10, per="segment"))             # each occurrence its own
+         .gain(by=ws.trend("ramp", start=1.0, stop=0.8))       # and a sag across them
+         .rx_noise(rms=0.01))
+seg = ws.Segments(surge, n=200, arrival=dict(dist="exponential", mean_s=50e-3),
+                  trigger=dict(pre_s=200e-9, post_s=1.5e-6, level=0.5), seed=1,
+                  grid=ws.Grid(fs=1e9, n=3000))               # one occurrence's render: 3 us
+x, events = seg.realize()
+rows = x.reshape(200, -1)                              # -> 200 windows of 1700 samples
+fired = [e for e in events if e.kind == "trigger"]
+fired[3].params["timestamp_s"]                         # -> 0.178: as trigger(n_segments=) has it
+amp = [p["by"] for p in ws.segment_params(seg.recipe(), "gain", which=0)]   # the labels
+seg.occurrences()[3]["values"]                         # -> {'vary/1/by': 1.0798, 'trend/2/by': 0.99698}
+flat = seg.without("trend/*")                          # the sag removed; every draw and noise sample kept
+other = seg.contrast("segment/*/rx_noise/3")           # every occurrence's noise re-rolled, nothing else
+```
+
+The output is what `trigger(n_segments=200)` would give: the windows end to end, one
+`trigger` event each with `segment` and `timestamp_s`. `arrival` takes a `carrier("states")`
+dwell (`fixed` is a period; a bare number is refused, since it could be either). `level` must be
+stated. `variants={"late": dict(p=0.02, chain=...)}` makes some occurrences another chain,
+drawn under the role `variant` and recorded on each event. A tolerance without `per=` is still
+a unit part, fixed for the whole acquisition, and `seg.unit(seed)` is another unit captured
+the same way. A chain holding a `per="segment"` value or a trend is refused when rendered on
+its own. [`examples/segmented_events.py`](../examples/segmented_events.py) captures 300 relay
+closures and finds the rare chattering ones and what the sag follows.
+
 ## All of it at once
 [`examples/composed_capture.py`](../examples/composed_capture.py) is a forwarded-clock link on
 two scope channels, 1 GBd at 64 GSa/s, the scope triggered from the clock. The transmitter is a

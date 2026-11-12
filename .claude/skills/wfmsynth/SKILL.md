@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); a record can be complex baseband (I/Q, OFDM, fading and multipath) with RF impairments and measures, or an optical field with a swept laser and resonators; and wfmsynth.recipes ships realistic clutter (hum, ripple, 1/f, contact bounce) as visible chains. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
-version: 11
+version: 12
 ---
 
 # wfmsynth
@@ -88,6 +88,12 @@ has each one worked.
   A `laser`'s field is held in the frame of its own swept carrier, where `delay` makes
   interferometer fringes and `resonator` is a ring; `ws.swept.wavelength_map` is the truth and
   `ws.measure.swept_map` / `transmission` / `resonances` read a record as a bench does.
+- **`ws.Segments(chain, n=, arrival=, trigger=dict(...), seed=, grid=)`** is many occurrences
+  of a RARE event, each rendered on its own short grid (`grid` is one occurrence's render),
+  laid end to end as `trigger(n_segments=)` lays them. `ws.tol(..., per="segment")` draws a
+  value per occurrence, `ws.trend("ramp" | "step", ...)` moves one across them
+  (`seg.without("trend/*")` removes it), `variants=` makes some another chain;
+  `seg.occurrences()` and `ws.segment_params(recipe, op)` are what each one used.
 - **`carrier("states", dwell=[...])`** dwells at levels for random times (burst noise, an
   activity schedule for `gate`/`switch`); `ws.states.intervals(events, at=)` is what it drew.
 - **`ws.recipes`** is the shipped compositions, each a function returning a visible chain:
@@ -325,6 +331,16 @@ these.
     for where.
 45. **`filter` on a laser's field tracks the moving carrier**; it is not a fixed optical
     passband. `fiber` there still uses its own `wavelength_nm`.
+
+A segmented acquisition (0.47) added this one.
+
+46. **A chain moved into `ws.Segments` renders on the OCCURRENCE's grid, not the long one.**
+    Anything the chain sizes from the grid's LENGTH rather than in seconds or samples comes
+    out different there: an `events` op on a carrier with no symbol clock takes its width
+    from a nominal 32 UI across the render. MEASURED: a glitch 703 samples wide on a
+    90000-sample render is 5 wide on a 700-sample one, and nothing says so. State it
+    (`events(..., width=8)` is 8 on both), and compare the event list before trusting a
+    population first built on a long render.
 
 ## Where the boundary sits
 

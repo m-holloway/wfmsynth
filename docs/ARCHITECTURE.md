@@ -121,6 +121,24 @@ are stage kind `general`: `canonical()` refuses to sort a chain that contains on
 `trigger` is the one op that shortens a record: the grid is the long render and the op keeps the
 windows a scope would. `Signal.stored_grid(x)` accounts for it, as it does for `acquire`.
 
+`ws.Segments` (#97) is a composition beside `Channels`, not an option on `trigger`, because
+it changes what is rendered rather than how a render is cut. `trigger` acts on one realised
+waveform of a process that runs all the time; between two occurrences of a rare event there
+is no process, only dead time, so each occurrence is its own render on a short grid, and the
+things that differ between occurrences (a draw, a trend, which chain, when it arrived) belong
+to the acquisition, not to any op in the chain. It reuses everything `trigger` has (the
+condition finder, the arming, the jitter draw, the event and its re-timing), so its output is
+what `trigger(n_segments=)` gives and downstream code cannot tell them apart. Two things are
+new and both are stated rather than hidden: each occurrence's source is delayed by the
+fraction of a sample its arrival falls after one, which is what a free-running sample clock
+does to a trigger's placement; and a value that changes per occurrence (`ws.tol(...,
+per="segment")`, `ws.trend`) holds its nominal in the op as a placeholder, so a chain carrying
+one is refused when rendered alone instead of rendering a number that is no occurrence's truth.
+Removing a cause (`without`) is a different act from re-rolling one (`contrast`), and the
+library had no mechanism for it: `examples/composed_capture.py` rebuilds the record with the
+number changed. A trend is the one cause with nothing drawn, so Segments carries the one
+method that takes it out.
+
 ## Three domains, and what a record is an envelope about
 
 A record is in one domain at each point of its chain, and `wfmsynth.domain` is the whole of
