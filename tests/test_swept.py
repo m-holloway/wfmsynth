@@ -397,6 +397,68 @@ def test_the_ring_down_agrees_with_an_independent_ode_integration():
     assert np.abs(x - (1.0 - ke * sol.y[0])).max() < 3e-5          # measured 6e-6
 
 
+def _hop_ring(df_hz, frac, fs=50e6, n=2000, k=500):
+    """A laser standing on a critically coupled 2 MHz ring that hops `df_hz` at sample
+    `k + frac`: (the rendered field, the closed form). After the hop the detuning is constant,
+    so y relaxes from 2/kappa to 1/z as exp(-z*(t - t_hop)), with z = kappa/2 + j*2*pi*df."""
+    lam, kappa = 1550.0, 2 * np.pi * 2e6
+    th = (k + frac) / fs
+    hop = [{"t_s": th, "by_nm": C_NM / (C_NM / lam + df_hz) - lam}]
+    sig = Signal(seed=1, grid=Grid(fs=fs, n=n)).laser(start_nm=lam, hops=hop).resonator(
+        wavelength_nm=lam, intrinsic_hz=1e6, coupling_hz=1e6)
+    t = np.arange(n) / fs
+    z = 0.5 * kappa + 2j * np.pi * df_hz
+    y = np.where(t < th, 2.0 / kappa,
+                 (2.0 / kappa) * np.exp(-z * (t - th)) - np.expm1(-z * (t - th)) / z)
+    return sig, 1.0 - 0.5 * kappa * y
+
+
+@pytest.mark.parametrize("df_hz, frac", [(3.3e6, 0.37), (20e6, 0.37), (24e6, 0.5),
+                                         (-20e6, 0.999), (20e6, 0.001), (20e6, 0.0)])
+def test_a_mode_hop_between_two_samples_rings_the_resonator_from_its_own_instant(df_hz, frac):
+    sig, exact = _hop_ring(df_hz, frac)
+    x = sig.waveform()
+    assert np.abs(x - exact).max() < 1e-11                         # measured 8e-14
+    # ... and it is the hop's INSTANT that is being checked: half a sample out is far off
+    late = _hop_ring(df_hz, frac + 0.5)[1]
+    assert np.abs(late - exact).max() > 0.05
+
+
+def test_a_hop_that_would_ring_past_nyquist_is_refused_and_one_off_resonance_is_not():
+    with pytest.raises(ValueError, match=r"mode hop at t_s=.*still holds light.*alias"):
+        _hop_ring(123.4e6, 0.37)[0].waveform()                     # Nyquist is 25 MHz
+    with pytest.raises(ValueError, match="Raise Grid.fs=. above 1.2e\\+08 Sa/s"):
+        _hop_ring(60e6, 0.5)[0].waveform()
+    # the same 60 MHz hop on a grid that holds it is solved
+    sig, exact = _hop_ring(60e6, 0.5, fs=200e6, n=8000, k=2000)
+    assert np.abs(sig.waveform() - exact).max() < 1e-11
+    # a hop of gigahertz far from every resonance leaves nothing ringing: accepted
+    far = Signal(seed=1, grid=G).laser(start_nm=1549.0, hops=[{"t_s": 0.0500004, "by_nm": 0.03}])
+    x = far.resonator(wavelength_nm=1550.0, intrinsic_hz=1e6, coupling_hz=1e6).waveform()
+    assert np.abs(np.abs(x) - 1.0).max() < 1e-4
+
+
+@pytest.mark.parametrize("kdt", [0.1, 1.0, 6.0, 30.0])
+def test_an_input_that_ramps_across_a_sample_is_integrated_exactly(kdt):
+    """A shuttered or power-ramped field into a ring. For a standing laser and an input linear
+    across each sample the equation has an exact step, written out here."""
+    fs, n, lam = 1e6, 200, 1550.0
+    width = kdt * fs / (2 * np.pi)
+    for det_hz in (0.0, 0.3 * fs):
+        z = 0.5 * 2 * np.pi * width + 2j * np.pi * det_hz
+        x = (1.0 + 0.5 * np.interp(np.arange(n), [0, 50, 60, 200], [0, 0, 1, 1])).astype(complex)
+        e = np.exp(-z / fs)
+        p1 = (1 - e) / (z / fs)
+        p2 = (z / fs - 1 + e) / (z / fs) ** 2
+        y = np.empty(n, complex)
+        y[0] = x[0] / z
+        for k in range(n - 1):
+            y[k + 1] = e * y[k] + (x[k] * (p1 - p2) + x[k + 1] * p2) / fs
+        got = SW.resonator(x, fs, dict(start_nm=C_NM / (C_NM / lam + det_hz)),
+                           dict(wavelength_nm=lam, intrinsic_hz=width / 2, coupling_hz=width / 2))
+        assert np.abs(got - (x - np.pi * width * y)).max() < 1e-12    # measured 2e-13
+
+
 def test_detector_bandwidth_and_sweep_speed_interact():
     """The same ring, the same detector: a slow sweep keeps the dip, a fast one loses depth
     by what the detector's response does to the dip's shape in TIME."""

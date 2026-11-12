@@ -5264,6 +5264,44 @@ check("a resonance crossed within a photon lifetime is NOT its Lorentzian: the r
       f"{_swpk:.3f} and bottoms at {(np.abs(_swfx) ** 2).min():.4f} (settled: 0.16), "
       f"{(int(np.argmin(np.abs(_swfx))) - _swgf.n // 2) / _swgf.fs * 1e6:.2f} us late")
 
+# ---- a mode hop between two samples, and an input that ramps: both against closed forms
+_swhk2 = 2 * np.pi * 2e6                                   # a critically coupled 2 MHz ring
+_swhth = 500.37 / 50e6
+_swhz = 0.5 * _swhk2 + 2j * np.pi * 20e6                   # after a hop of +20 MHz
+_swhs = Signal(seed=1, grid=Grid(fs=50e6, n=2000)).laser(
+    start_nm=1550.0, hops=[{"t_s": _swhth, "by_nm": _swC / (_swC / 1550.0 + 20e6) - 1550.0}]
+).resonator(wavelength_nm=1550.0, intrinsic_hz=1e6, coupling_hz=1e6)
+_swhtt = np.arange(2000) / 50e6
+
+
+def _swhop(th):
+    return 1 - 0.5 * _swhk2 * np.where(
+        _swhtt < th, 2 / _swhk2,
+        (2 / _swhk2) * np.exp(-_swhz * (_swhtt - th)) - np.expm1(-_swhz * (_swhtt - th)) / _swhz)
+
+
+_swherr = float(np.abs(_swhs.waveform() - _swhop(_swhth)).max())
+_swhedge = float(np.abs(_swhop(501 / 50e6) - _swhop(_swhth)).max())
+_swrx = (1.0 + 0.5 * np.interp(np.arange(200), [0, 50, 60, 200], [0, 0, 1, 1])).astype(complex)
+_swrz = 0.5 * 6.0                                          # kappa*dt = 6, on resonance
+_swre = np.exp(-_swrz)
+_swrp2 = (_swrz - 1 + _swre) / _swrz ** 2
+_swry = [_swrx[0] / _swrz]
+for _k in range(199):
+    _swry.append(_swre * _swry[-1] + _swrx[_k] * ((1 - _swre) / _swrz - _swrp2)
+                 + _swrx[_k + 1] * _swrp2)
+_swrgot = _SW.resonator(_swrx, 1e6, dict(start_nm=1550.0), dict(
+    wavelength_nm=1550.0, intrinsic_hz=3e6 / (2 * np.pi), coupling_hz=3e6 / (2 * np.pi)))
+_swrerr = float(np.abs(_swrgot - (_swrx - _swrz * np.array(_swry))).max())
+check("a mode hop that falls BETWEEN two samples rings the resonator from its own instant "
+      "(the sample's integration is cut at the hop), and an input that ramps across a sample "
+      "is integrated exactly: both against closed forms",
+      _swherr < 1e-11 and _swhedge > 0.5 and _swrerr < 1e-12,
+      f"a 20 MHz hop at sample 500.37 off a 2 MHz ring: max |field - closed form| "
+      f"{_swherr:.1e} (bound 1e-11; the same hop moved to the sample edge would be "
+      f"{_swhedge:.2f} off); an input ramping 0.05 per sample at kappa*dt = 6: max |field - "
+      f"exact step| {_swrerr:.1e} (bound 1e-12)")
+
 # ---- two channels, one laser: the map from the reference, the device on the recovered axis
 _swsrc = lambda: Signal().use("laser")                                   # noqa: E731
 
@@ -5325,11 +5363,16 @@ _swref = [
                                             coupling_hz=2e6).waveform()),
     _qrefusal(lambda: Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096))
               .carrier("nrz", n_ui=512).eo().delay(by=1e-11)),
+    _qrefusal(lambda: Signal(seed=1, grid=Grid(fs=50e6, n=2000)).laser(
+        start_nm=1550.0, hops=[{"t_s": _swhth, "by_nm": -1e-3}]).resonator(
+        wavelength_nm=1550.0, intrinsic_hz=1e6, coupling_hz=1e6).waveform()),
 ]
 check("refused by name: a copy without the carrier's turn (optical_mpi) on a laser's field, "
       "fields about two carriers combined, a delay whose beat leaves the grid, a resonance "
-      "crossed in under 4.4 samples, and a delay on a field that states no carrier",
-      "recipes.stray_reflection" in _swref[0] and "another carrier" in _swref[1]
+      "crossed in under 4.4 samples, a delay on a field that states no carrier, and a mode "
+      "hop that leaves a ring beating with the laser past Nyquist",
+      "still holds light" in _swref[5]
+      and "recipes.stray_reflection" in _swref[0] and "another carrier" in _swref[1]
       and "past this grid's Nyquist" in _swref[2] and "would alias" in _swref[3]
       and "carrier was never stated" in _swref[4] and "laser(start_nm=...)" in _swref[4],
       "; ".join(m.split(":")[0] + ": " + m.split(":", 1)[1].strip()[:58] + "..." for m in _swref))
