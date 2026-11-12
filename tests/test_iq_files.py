@@ -275,7 +275,7 @@ def test_a_byte_swapped_integer_file_is_refused_at_any_level(tmp_path, x, dtype,
     p = _swapped(tmp_path, x, dtype, s)
     with pytest.raises(ValueError, match="probably big-endian") as e:
         ws.read_iq(p, format="iq_interleaved", dtype=dtype, scale=s, fs_hz=FS)
-    assert "check=False" in str(e.value) and str(p) in str(e.value)
+    assert "check=False" in str(e.value) and p.name in str(e.value)   # the path is repr()d
     # the same bytes read the right way are accepted, and so is the right file read as stated
     ws.read_iq(p, format="iq_interleaved", dtype=dtype, byteorder="big", scale=s, fs_hz=FS)
     q = tmp_path / "ok.iq"

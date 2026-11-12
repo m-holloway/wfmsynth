@@ -680,8 +680,8 @@ def apply_filter(x, fs, kind, grid_baud=None, **params):
         try:
             with np.errstate(all="ignore"):
                 zi = _sig.sosfilt_zi(d["sos"])
-        except np.linalg.LinAlgError:
-            zi = np.nan
+        except (np.linalg.LinAlgError, ValueError):      # scipy >= 1.15 refuses a pole at z = 1
+            zi = np.nan                                  # itself; older ones return inf or raise
         if not np.all(np.isfinite(zi)):
             raise ValueError(
                 f"filter({kind!r}): these sections have no settled state to start from -- a "
