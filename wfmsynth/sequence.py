@@ -43,12 +43,13 @@ Outside those windows the record IS the segments spliced, sample for sample. Eac
 emitted as a `segment` event; `layout()` gives every segment's samples.
 
 SWITCH. An analog multiplexer: `inputs[k]` is on the line while `select` is above `k` of the
-thresholds (one `threshold` for two inputs; an ascending list of N-1 for N). A change of
-selection takes `t_switch_s`: over that time the line moves from what it was carrying to the
-newly selected input along the same raised cosine. Each change is emitted as a `switch` event
-whose `t_s` is the time `select` crossed the threshold, between two samples. The mux has no
-hysteresis; a noisy selector chatters, as a real one does -- put `law("comparator",
-hysteresis=...)` at the end of the `select` chain to clean it.
+thresholds (one `threshold` for two inputs, 0.5 unless stated -- `gate`'s convention, and
+`gate` is this op for the case where the other input is nothing; an ascending list of N-1 for
+N). A change of selection takes `t_switch_s`: over that time the line moves from what it was
+carrying to the newly selected input along the same raised cosine. Each change is emitted as a
+`switch` event whose `t_s` is the time `select` crossed the threshold, between two samples. The
+mux has no hysteresis; a noisy selector chatters, as a real one does -- put
+`law("comparator", hysteresis=...)` at the end of the `select` chain to clean it.
 
 One mechanism or two? Two. A sequence is a statement about TIME (durations, written in the
 recipe, on the grid); a switch is a statement about a SIGNAL (the instants are an outcome, and
@@ -278,7 +279,7 @@ def thresholds(threshold, n_inputs):
     return thr
 
 
-def mux(select, inputs, threshold=0.0, m=0):
+def mux(select, inputs, threshold=0.5, m=0):
     """An analog multiplexer on arrays -> ``(y, changes)``.
 
     ``inputs[k]`` is selected while `select` is above `k` of the thresholds (strictly: a sample
@@ -322,7 +323,7 @@ def check_switch(n_inputs, threshold, t_switch_s, grid):
     return thr, m
 
 
-def run_switch(streams, grid, idx, select=None, inputs=None, threshold=0.0, t_switch_s=0.0):
+def run_switch(streams, grid, idx, select=None, inputs=None, threshold=0.5, t_switch_s=0.0):
     """The `switch` op: render the selector and every input, mux, emit the changes."""
     if not isinstance(inputs, (list, tuple)):
         raise ValueError("switch: `inputs` is a list of sub-chains to choose between "

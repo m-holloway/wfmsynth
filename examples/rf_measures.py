@@ -79,17 +79,14 @@ def main():
           f"{np.mean(np.abs(x) ** 2):.3f} in the whole record")
 
     # a decided reference flatters; the truth says by how much
-    clean = ws.Signal(seed=1, grid=ws.Grid(fs=400e6, baud=BAUD, n=1 << 16, domain="iq"))
-    y = clean.iq("qam16", prbs=15, prbs_phase=100, beta=BETA).waveform()
-    sent, _ = clean.transmitted()
-    print("\nnoise added by hand at a stated Es/N0 (EVM against truth is 10**(-EsN0/20)):")
-    rng = np.random.default_rng(0)
+    quiet = ws.Grid(fs=400e6, baud=BAUD, n=1 << 16, domain="iq")
+    print("\nawgn at a stated Es/N0 (EVM against truth is 10**(-EsN0/20)):")
     for esn0_db in (25, 15, 10):
-        var = clean.grid.fs / (BAUD * 10 ** (esn0_db / 10))       # per complex sample
-        noisy = y + np.sqrt(var / 2) * (rng.standard_normal(len(y))
-                                        + 1j * rng.standard_normal(len(y)))
-        truth = rf.evm(noisy, clean.grid, sent, skip=SKIP)
-        blind = rf.evm(noisy, clean.grid, sent, skip=SKIP, reference="decided",
+        link = (ws.Signal(seed=1, grid=quiet).iq("qam16", prbs=15, prbs_phase=100, beta=BETA)
+                .awgn(es_n0_db=esn0_db, ref_power=1.0))    # against the constellation's unit power
+        noisy, (sent, _) = link.waveform(), link.transmitted()
+        truth = rf.evm(noisy, quiet, sent, skip=SKIP)
+        blind = rf.evm(noisy, quiet, sent, skip=SKIP, reference="decided",
                        constellation="qam16")
         print(f"  Es/N0 {esn0_db} dB: analytic {100 * 10 ** (-esn0_db / 20):5.2f} %, against "
               f"truth {truth['evm_pct']:5.2f} %, decided {blind['evm_pct']:5.2f} % "

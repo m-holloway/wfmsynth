@@ -405,3 +405,61 @@ def test_a_random_timing_source_is_a_listed_role():
         pj=dict(amp_ps=1.0, f_hz=1e8)).roles() == []       # deterministic: nothing to re-roll
     x = sig.waveform()
     assert not np.array_equal(sig.contrast("timing/1"), x)
+
+
+# ------------------------------------------------- a named chain inside the other composition ops
+def test_a_named_chain_is_a_segment_a_mux_input_and_the_signal_a_join_takes():
+    """`use` is a sub-chain like any other, so every op that takes one takes a named chain:
+    `sequence` and `switch` (written, like every chain of the record, with no grid of their
+    own), `combine`, and the `by=` of a signal-driven parameter. Each is checked against the
+    named chains' own waveforms, combined here by hand."""
+    n, k = G.n, G.n // 4
+    f = G.fs / 64                                           # a whole number of cycles in the record
+    rec = ws.Channels(
+        {"line": Signal().sequence([{"chain": Signal().use("pre"), "t_s": k / G.fs},
+                                    {"chain": Signal().use("data")}]),
+         "mux": Signal().switch(select=Signal().use("en"),
+                                inputs=[Signal().use("pre"), Signal().use("data")]),
+         "sum": Signal().use("data").combine(Signal().use("pre")).gate(by=Signal().use("en"))},
+        shared={"pre": Signal().carrier("sine", f_hz=f),
+                "data": Signal().carrier("nrz", n_ui=N_UI, jitter=dict(rj=0.3)),
+                "en": Signal().carrier("square", f_hz=f / 8, amp=0.5, offset=0.5)},
+        seed=4, grid=G)
+    x, events = rec.realize()
+    pre, data, en = (rec.waveform(name) for name in ("pre", "data", "en"))
+    assert np.array_equal(x["line"], np.concatenate([pre[:k], data[:n - k]]))
+    assert np.array_equal(x["mux"], np.where(en > 0.5, data, pre))
+    assert np.array_equal(x["sum"], np.where(en > 0.5, data + pre, 0.0))
+    assert [e.kind for e in events["line"].on_record()] == ["segment"]
+    n_changes = int(np.count_nonzero(np.diff(en > 0.5)))
+    assert n_changes > 4
+    assert [e.kind for e in events["mux"].on_record()] == ["switch"] * n_changes
+    assert [e.kind for e in events["sum"].on_record()] == ["transition"] * n_changes
+    # one realisation of the data, wherever it is used: re-rolling it moves all three
+    y = rec.contrast("data/jitter/0")
+    assert all(not np.array_equal(y[name], x[name]) for name in x)
+    back = ws.Channels.from_recipe(json.loads(rec.to_json()))
+    assert back.sha256() == rec.sha256()
+    assert all(np.array_equal(back.waveforms()[name], x[name]) for name in x)
+
+
+def test_one_trigger_shared_by_two_channels_fires_with_one_jitter():
+    """A `trigger` in a shared stage is one scope's trigger circuit: each channel is cut where
+    its own waveform crosses, and the trigger's jitter -- one role, `scope/trigger/0` -- is the
+    same draw on both."""
+    f = G.baud / 8
+    rec = ws.Channels(
+        {"a": Signal().carrier("sine", f_hz=f).use("scope"),
+         "b": Signal().carrier("sine", f_hz=f, amp=0.5).use("scope")},
+        shared={"scope": Signal().trigger(pre_s=4 / f, post_s=4 / f, level=0.0,
+                                          jitter_s=2.0 / G.fs)},
+        seed=2, grid=G)
+    x, events = rec.realize()
+    assert rec.roles() == ["scope/trigger/0"]
+    drawn = {name: [e.params["jitter_s"] for e in events[name] if e.kind == "trigger"]
+             for name in x}
+    assert len(drawn["a"]) == 1 and drawn["a"] == drawn["b"] and drawn["a"][0] != 0.0
+    assert len(x["a"]) == len(x["b"]) == rec.stored_grid("a", x["a"]).n == round(8 / f * G.fs)
+    assert np.allclose(x["b"], 0.5 * x["a"], atol=1e-12)    # the same window of the same tone
+    y = rec.contrast("scope/trigger/0")
+    assert all(not np.array_equal(y[name], x[name]) for name in x)

@@ -381,3 +381,37 @@ def test_module_is_exported_and_measures_change_nothing(clean):
     rf.aclr(x, G, channel_bw_hz=30e6, offsets_hz=[40e6])
     assert np.array_equal(x, before)
     assert ws.rf is rf and "rf" in ws.__all__
+
+
+# ------------------------------------------- the measures read back what the impairment ops state
+def test_the_measures_read_back_what_the_impairment_ops_state():
+    """The two halves of `wfmsynth.rf` against each other: an impairment op states what it did
+    (`rf_report`, `lo_phase`), and a measure that was told nothing reads the same number off
+    the record. Each bound is the estimator's own standard error, stated beside it."""
+    f_off, esn0_db = 1234.0, 25.0
+    sig = (Signal(seed=1, grid=G).iq("qam16", prbs=15, prbs_phase=100)
+           .freq_offset(f_hz=f_off).awgn(es_n0_db=esn0_db, ref_power=1.0))
+    x, (sent, _) = sig.waveform(), sig.transmitted()
+    stated = {r["name"]: r for r in sig.rf_report()}
+    raw = rf.evm(x, G, sent, skip=8)
+    fit = rf.evm(x, G, sent, skip=8, correct=("frequency", "phase"))
+    # the oscillator: lo_phase() is the label, and `removed` is what a receiver would find
+    t = np.arange(len(x)) / G.fs
+    assert np.polyfit(t, sig.lo_phase(), 1)[0] / (2 * np.pi) == pytest.approx(f_off, abs=1e-6)
+    n, span = fit["n_symbols"], fit["n_symbols"] / G.baud
+    evm_stated = 10 ** (-stated["awgn"]["es_n0_db"] / 20)
+    f_se = (evm_stated / np.sqrt(2)) * np.sqrt(12) / (2 * np.pi * span * np.sqrt(n))
+    assert 1.0 < f_se < 4.0                                 # Hz, for this record
+    assert abs(fit["removed"]["frequency_hz"] - f_off) < 4 * f_se
+    # the noise: with the rotation taken out, what is left is the stated Es/N0
+    assert raw["evm"] > 0.5                                 # the offset alone turns it > 60 deg
+    assert fit["evm"] == pytest.approx(evm_stated, rel=4 / np.sqrt(2 * n))
+    # a spur's stated level is the power `spectrum` finds at its frequency
+    spur = Signal(seed=1, grid=G).iq("qam16", prbs=15).spur(f_hz=60e6, dbc=-30, ref_power=1.0)
+    power = rf.band_power(rf.spectrum(spur.waveform(), G, rbw_hz=200e3), 59e6, 61e6)
+    assert power == pytest.approx(spur.rf_report()[0]["amplitude"] ** 2, rel=1e-3)
+    # a carrier leak is the offset `evm` removes when asked, in the symbols' units
+    leak = Signal(seed=1, grid=G).iq("qam16", prbs=15).iq_offset(i=0.02, q=-0.01)
+    got = rf.evm(leak.waveform(), G, leak.transmitted()[0], skip=8,
+                 correct=("offset",))["removed"]["offset"]
+    assert abs(got - (0.02 - 0.01j)) < 2e-3

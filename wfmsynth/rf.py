@@ -4,6 +4,11 @@ the measures that do the reading -- where the power is in frequency (`spectrum`,
 `aclr`), how the envelope's power is distributed (`ccdf`), and how far the symbols are from the
 ones that were sent (`evm`, `constellation_density`).
 
+The two halves check each other: an impairment states what it came to (`Signal.rf_report()`,
+`Signal.lo_phase()`), and a measure that was told nothing reads the same number off the record
+-- the stated Es/N0 as EVM, the oscillator's offset in `evm(...)["removed"]`, a spur's level in
+`band_power` (tests/test_rf_measures.py).
+
 THE IMPAIRMENTS
 
     g = Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=2.4e9)

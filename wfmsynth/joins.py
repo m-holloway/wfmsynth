@@ -36,6 +36,10 @@ the physical effect they name:
                  (and 1 added unless `suppressed`); FM/PM have no combine form. Use `modulate`
                  for a modulation, `combine` for any other product.
     burst        `gate` with a periodic cadence and shaped on/off edges.
+    switch       the SOURCE that chooses among several chains by a signal, with a shaped
+                 change (`wfmsynth.sequence`). `gate` is the stage for the two-way case where
+                 the other way is nothing: the same samples and instants as
+                 `switch(select=enable, inputs=[zero, chain])`, and the same default threshold.
     drift        `gain` or `offset` by a ramp or half-sine across the record.
     timing       `delay` by a named jitter source (SSC, Pj, wander, Rj, phase noise). `timing`
                  may advance as well as delay and interpolates linearly; `delay` is causal and

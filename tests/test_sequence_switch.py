@@ -325,7 +325,10 @@ def test_a_malformed_segment_is_refused_by_name():
             "'restart'", "'continue'", "'resume'")
     refused(lambda: seq([{"chain": np.zeros(8000), "t_s": 2e-6}, {"chain": a}]).waveform(),
             "segments[0]", "`chain`", "ndarray")
-    refused(lambda: Signal().sequence([{"chain": a}]), "grid", "Grid(fs=")
+    # with no grid the durations cannot be checked where they are written (a chain of a
+    # `Channels` record is written that way), so the refusal comes when it is rendered
+    bare = Signal().carrier("dc", level=1.0)
+    refused(lambda: Signal().sequence([{"chain": bare}]).waveform(), "grid", "Grid(fs=")
 
 
 def test_a_segment_chain_is_never_resampled_or_fitted():
@@ -483,7 +486,9 @@ def test_switch_refusals():
     refused(lambda: sw(a, a), "`inputs` is a list")
     refused(lambda: sw(a, [a, b], t_switch_s=1.5e-9), "t_switch_s", "not on the grid")
     refused(lambda: sw(a, [a, b], t_switch_s=-1e-9), "t_switch_s", "at least 0")
-    refused(lambda: Signal().switch(select=a, inputs=[a, b]), "grid", "Grid(fs=")
+    bare = Signal().carrier("dc", level=1.0)
+    refused(lambda: Signal().switch(select=bare, inputs=[bare, bare]).waveform(),
+            "grid", "Grid(fs=")
     recipe = sw(a, [a, b]).recipe()
     del recipe["ops"][0]["select"]
     refused(lambda: Signal.from_recipe(recipe).waveform(), "switch needs select=")
@@ -497,3 +502,18 @@ def test_the_array_level_functions_agree_with_the_ops():
     assert np.array_equal(SEQ.splice([A, B], plan), two().waveform())
     r = SEQ.ramp(4)
     assert np.allclose(r + r[::-1], 1.0) and np.all(np.diff(r) > 0) and 0 < r[0] < r[-1] < 1
+
+
+def test_switch_and_gate_read_a_selecting_signal_the_same_way():
+    """One idea, one convention: a signal that selects is read against 0.5 unless stated,
+    strictly above. So a two-input switch between nothing and a chain IS that chain gated, and
+    the two ops report the same instants."""
+    enable = Signal(grid=G).carrier("sine", f_hz=1e6, amp=0.6, offset=0.4)   # crosses 0.5, not 0
+    muxed = Signal(seed=3, grid=G).switch(select=enable, inputs=[dc(0.0), tone()])
+    gated = Signal(seed=3, grid=G).carrier("sine", f_hz=5e6).gate(by=enable)
+    assert muxed.ops[0]["threshold"] == gated.ops[1]["threshold"] == 0.5
+    (y, ev), (z, ez) = muxed.realize(), gated.realize()
+    assert np.array_equal(y, z) and np.count_nonzero(y == 0.0) > len(y) // 4
+    assert len(ev) > 4 and [e.sample for e in ev] == [e.sample for e in ez]
+    assert np.allclose([e.t_s for e in ev], [e.t_s for e in ez], rtol=0, atol=1e-18)
+    assert [e.direction for e in ev] == [e.direction for e in ez]

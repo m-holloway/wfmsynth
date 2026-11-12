@@ -1298,13 +1298,14 @@ def _op_offset(x, p, streams, grid, idx):
     return JN.offset(_joined(x, p), _by(p, streams, grid, idx, len(x)))
 
 
-def _op_gate(x, p, streams, grid, idx, sink=None):
-    """An ideal switch on an enable. `sink` collects its switching instants for
-    `Signal.realize()`, as it does a comparator's transitions."""
+def _op_gate(x, p, streams, grid, idx):
+    """An ideal switch on an enable. Its switching instants go to the event list a collecting
+    render carries on its streams, as `switch`'s changes and a capture's annotations do."""
     from . import joins as JN
     return JN.gate(_joined(x, p), _by(p, streams, grid, idx, len(x)),
                    threshold=p.get("threshold", 0.5), off=p.get("off", "zero"),
-                   fs=None if grid is None else grid.fs, events=sink, placement=f"gate/{idx}")
+                   fs=None if grid is None else grid.fs, events=getattr(streams, "sink", None),
+                   placement=f"gate/{idx}")
 
 
 def _op_delay(x, p, streams, grid, idx):
@@ -2382,17 +2383,19 @@ class Signal:
         samples. See `wfmsynth.sequence`."""
         from . import sequence as SEQ
         SEQ.refuse_after(self.ops, "sequence", "segments")
-        SEQ.check_sequence(segments, join, t_join_s, self.grid)
+        if self.grid is not None:        # a chain of a `Channels` record is checked on ITS grid
+            SEQ.check_sequence(segments, join, t_join_s, self.grid)
         return self._add("sequence", segments=segments, join=join,
                          **({} if t_join_s is None else {"t_join_s": t_join_s}))
 
-    def switch(self, select, inputs, threshold=0.0, t_switch_s=0.0):
+    def switch(self, select, inputs, threshold=0.5, t_switch_s=0.0):
         """Chains selected by a SIGNAL, sample by sample: an analog multiplexer.
 
             Signal(seed=1, grid=g).switch(select=gate, inputs=[idle, data], threshold=0.5)
 
         `inputs[k]` is on the line while `select` is above k of the thresholds: one `threshold`
-        for two inputs, an ascending list of N-1 for N. A change of selection takes
+        for two inputs (0.5 unless stated, as for `gate`: right for a 0/1 selector and a +/-1
+        one alike), an ascending list of N-1 for N. A change of selection takes
         `t_switch_s`, a raised-cosine move from what the line was carrying to the new input (0
         is an ideal switch). `select` and each input are sub-chains (see `crosstalk`), all
         running for the whole record.
@@ -2405,7 +2408,8 @@ class Signal:
         SEQ.refuse_after(self.ops, "switch", "inputs")
         if not isinstance(inputs, (list, tuple)):
             raise ValueError("switch: `inputs` is a list of sub-chains to choose between.")
-        SEQ.check_switch(len(inputs), threshold, t_switch_s, self.grid)
+        if self.grid is not None:        # a chain of a `Channels` record is checked on ITS grid
+            SEQ.check_switch(len(inputs), threshold, t_switch_s, self.grid)
         return self._add("switch", select=select, inputs=inputs, threshold=threshold,
                          t_switch_s=t_switch_s)
 
@@ -3252,7 +3256,7 @@ class Signal:
             elif op["op"] == "trigger":
                 now = _grid_now(ops[:i], grid, x)         # after an `acquire`, its rate
                 x = _op_trigger(x, op, st, now, i, sink=sink, event_scale=now.fs / grid.fs)
-            elif collect_events and op["op"] in ("events", "law", "gate"):
+            elif collect_events and op["op"] in ("events", "law"):
                 x = _EXEC[op["op"]](x, op, st, grid, i, sink=sink)
             elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
                 x = _EXEC[op["op"]](x, op, st, grid, i, win=win)   # range the vertical to the window
