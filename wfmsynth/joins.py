@@ -17,6 +17,10 @@ A SIGNAL-DRIVEN PARAMETER is one stage whose single parameter `by` is a number o
     gate(by=)     x where by > threshold   an enable from somewhere else
     delay(by=)    x(t - by(t))             a path whose length moves: jitter, Doppler
 
+ON AN I/Q RECORD (`wfmsynth.domain`) three of these keep their meaning: `gain` and `gate`, whose
+`by` stays a REAL signal acting on both rails alike, and `combine(how="sum")`, whose `others`
+are then I/Q signals about the same centre frequency. The rest are refused there by name.
+
 WHERE A SUM STOPS BEING TRUE. Adding two waveforms is superposition, and superposition holds
 exactly when neither source changes what the other one does: a coupled ripple, an interferer, a
 tone on a supply, two currents into one node. It does not hold for two DRIVERS on one node, each
@@ -83,8 +87,33 @@ def _real(x, who):
     return np.asarray(x, float)
 
 
-def _same(x, y, who):
-    y = _real(y, who)
+def _envelope_ok(x):
+    """A waveform that may be a complex envelope: `gain`, `gate` and a `combine` sum mean on
+    I/Q what they mean on a voltage (`wfmsynth.domain`)."""
+    return np.asarray(x) if np.iscomplexobj(x) else np.asarray(x, float)
+
+
+def check_domain(how, domain):
+    """`combine` on an I/Q record is a sum only."""
+    if domain == "iq" and how != "sum":
+        raise ValueError(
+            f"combine: how={how!r} on an I/Q record. Envelopes about the same centre ADD (an "
+            f"interferer, a blocker): how='sum'. A product of two envelopes is not a mixer "
+            f"(`upconvert`/`downconvert` are, and `gain(by=)` scales an envelope by a real "
+            f"signal), and complex samples have no order for min/max.")
+
+
+def _same(x, y, who, peer=False):
+    """`y` on `x`'s grid. A real waveform, unless it is a `peer` of a complex `x`: then an
+    envelope like it."""
+    if peer and np.iscomplexobj(x):
+        if not np.iscomplexobj(y):
+            raise ValueError(f"{who} is a real waveform and the record it joins is I/Q. A "
+                             f"voltage cannot be added to an envelope: give an I/Q signal "
+                             f"about the same centre frequency.")
+        y = np.asarray(y)
+    else:
+        y = _real(y, who)
     if y.shape != x.shape:
         raise ValueError(f"{who} has {y.shape[0] if y.ndim == 1 else y.shape} samples and the "
                          f"waveform it joins has {x.shape[0]}. They must be on the same grid; "
@@ -122,11 +151,12 @@ def combine(x, others, how="sum", gains=None):
 
     `gains` scales each entry of `others` before the join (default 1 each); `x` is taken as it
     stands. See the module docstring for where a sum is physics and where it needs `net`."""
-    x = _real(x, "combine")
+    x = _envelope_ok(x)
+    check_domain(how, "iq" if np.iscomplexobj(x) else "real")
     gains = check_combine(how, gains, len(others))
     y = x
     for k, o in enumerate(others):
-        o = _same(x, o, f"combine: others[{k}]")
+        o = _same(x, o, f"combine: others[{k}]", peer=True)
         if gains is not None and gains[k] != 1.0:
             o = gains[k] * o
         y = (y + o if how == "sum" else y * o if how == "product"
@@ -146,7 +176,7 @@ def _by(x, by, who):
 
 def gain(x, by):
     """`x * by`: `by` is the factor itself (1 leaves `x` alone), a number or a waveform."""
-    x = _real(x, "gain")
+    x = _envelope_ok(x)
     return x * _by(x, by, "gain")
 
 
@@ -176,7 +206,7 @@ def gate(x, by, threshold=0.5, off="zero", fs=None, events=None, placement="gate
     `events.Event(kind="transition")`: `sample` is the first sample in the new state,
     `direction` +1 opening / -1 closing, and `t_s` (given `fs`) the time `by` crossed the
     threshold, linearly interpolated between the two samples either side."""
-    x = _real(x, "gate")
+    x = _envelope_ok(x)
     check_gate(threshold, off)
     by = _by(x, by, "gate")
     thr = float(threshold)

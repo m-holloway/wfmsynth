@@ -35,8 +35,10 @@ and nothing else: the namespace is `<op>/<idx>/<parameter>`, and the builder, `r
 same for a list parameter, and a list entry may hold one beside its own parameters
 (`sequence`'s `segments[k]["chain"]`, namespace `sequence/<idx>/segments/<k>/chain`). The result is a REAL waveform on the record's own grid: an I/Q
 sub-chain ends on `upconvert` (the domain rule, `wfmsynth.domain`, applies inside a sub-chain as
-it does outside), and `same_grid` is the single place that would be relaxed for an op that takes
-a complex envelope.
+it does outside). A sub-chain starts in the domain ITS OWN ops need, whatever record it sits in
+-- `Signal().carrier("sine", ...)` is a voltage inside an I/Q record -- and the parameter that
+takes a PEER of an I/Q record (a `sequence` segment, a `combine` entry) asks for an envelope
+instead with `domain="iq"`.
 
 A TOLERANCE inside a sub-chain (`wfmsynth.tolerance`) belongs to the record it joins: a Signal's
 resolved tolerances are restated on the way in and drawn under the outer seed, so `unit()` moves
@@ -44,12 +46,14 @@ the nested parts with everything else. `{"from": recipe}` is pinned, its unit in
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import warnings
 
 import numpy as np
 
+from . import domain as DOMAIN
 from . import opkeys as OPKEYS
 from . import tolerance as TOL
 from .grid import Grid
@@ -113,6 +117,11 @@ def _signal_ops(sig, parent, who):
             f"part of this record and draws from THIS record's seed ({parent.seed}), so its own "
             f"seed would be ignored. Leave the seed off to make it part of this record, or pass "
             f"{{'from': that_signal.recipe()}} to embed it as its own record with its own seed.")
+    # the same samples and rate is the same grid here: whether the sub-chain is a voltage or
+    # an envelope is what its own ops say (`domain.grid_for`), not the record it joins
+    if sig.grid is not None and parent.grid is not None and dataclasses.replace(
+            sig.grid, domain=parent.grid.domain, fc_hz=parent.grid.fc_hz) == parent.grid:
+        return TOL.stated(sig.ops)
     if sig.grid is not None and sig.grid != parent.grid:
         raise ValueError(
             f"{who} is a Signal on {_grid_words(sig.grid)}, but it would be rendered on this "
@@ -196,7 +205,7 @@ def _chain(spec, streams, grid, at, who):
                 raise ValueError(f"{who} has op {o.get('op')!r} in its chain, which does not "
                                  f"exist. Known ops: {sorted(_EXEC)}")
             OPKEYS.check(o["op"], o)         # the same gate the builders go through
-        sub = Signal(grid=grid)
+        sub = Signal(grid=DOMAIN.grid_for(ops, grid))   # a voltage or an envelope: its ops say
         sub.ops = ops
         return sub, Namespaced(streams, at + "/")
     r = spec["from"]
@@ -216,14 +225,23 @@ def _chain(spec, streams, grid, at, who):
     return sub, Streams(sub.seed, _overrides(streams, at + "/"))
 
 
-def same_grid(y, n, who, sub=None, grid=None):
-    """Refuse a rendered sub-chain that is not a real waveform of `n` samples at the grid's rate."""
-    if np.iscomplexobj(y):
-        raise ValueError(
-            f"{who} renders a COMPLEX waveform (an I/Q envelope or an optical field), and "
-            f"taking it as a signal here would drop its imaginary part. End the sub-chain on "
-            f"`upconvert` (I/Q) or on `photodetect` (optical).")
-    y = np.asarray(y, float)
+def same_grid(y, n, who, sub=None, grid=None, domain=DOMAIN.REAL):
+    """Refuse a rendered sub-chain that is not a waveform of `n` samples at the grid's rate, in
+    the `domain` the parameter takes: a real voltage, or (`"iq"`) a complex envelope."""
+    if domain == DOMAIN.IQ:
+        if not np.iscomplexobj(y):
+            raise ValueError(
+                f"{who} renders a REAL waveform, and here it joins an I/Q record as a peer of "
+                f"its envelope. Give an I/Q chain about the same centre frequency (one that "
+                f"starts with `iq`, or ends on `downconvert`).")
+        y = np.asarray(y, complex)
+    else:
+        if np.iscomplexobj(y):
+            raise ValueError(
+                f"{who} renders a COMPLEX waveform (an I/Q envelope or an optical field), and "
+                f"taking it as a signal here would drop its imaginary part. End the sub-chain "
+                f"on `upconvert` (I/Q) or on `photodetect` (optical).")
+        y = np.asarray(y, float)
     if y.shape != (n,):
         raise ValueError(
             f"{who} rendered {y.shape[0] if y.ndim == 1 else y.shape} samples but this record "
@@ -243,8 +261,11 @@ def same_grid(y, n, who, sub=None, grid=None):
     return y
 
 
-def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None):
+def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domain=DOMAIN.REAL):
     """One nested-signal spec -> a real waveform of `n` samples. The resolver.
+
+    `domain="iq"` is for the parameter that takes a PEER of an I/Q record (a segment, a
+    `combine` entry): the sub-chain must then render a complex envelope instead.
 
     `at` is the namespace (`crosstalk/2/aggressor`): the prefix of every role the sub-chain
     draws and the `Event.at` of every event it places. `who` names the parameter in a refusal.
@@ -298,10 +319,11 @@ def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None):
         for e in placed:
             e.at = at + ("/" + e.at if e.at else "")
         sink.extend(placed.events)
-    return same_grid(y, n, who, sub=sub, grid=grid)
+    return same_grid(y, n, who, sub=sub, grid=grid, domain=domain)
 
 
-def signal(p, name, streams, grid, idx, n=None, carrier=None, default=_REQUIRED):
+def signal(p, name, streams, grid, idx, n=None, carrier=None, default=_REQUIRED,
+           domain=DOMAIN.REAL):
     """The waveform held by op `p`'s parameter `name`: what an executor calls. ONE LINE.
 
         aggr = SUB.signal(p, "aggressor", streams, grid, idx, n=len(x))
@@ -319,10 +341,10 @@ def signal(p, name, streams, grid, idx, n=None, carrier=None, default=_REQUIRED)
                              f"{{'ops': [...]}} or {{'from': <recipe>}}.")
         spec = default
     return render(spec, streams, grid, f"{p['op']}/{idx}/{name}", _length(n, grid, who), who,
-                  carrier=carrier)
+                  carrier=carrier, domain=domain)
 
 
-def signals(p, name, streams, grid, idx, n=None):
+def signals(p, name, streams, grid, idx, n=None, domain=DOMAIN.REAL):
     """A LIST parameter of sub-chains -> a list of waveforms; namespaces `<op>/<idx>/<name>/<k>`."""
     who = f"{p['op']}: `{name}`"
     specs = p[name]
@@ -330,7 +352,8 @@ def signals(p, name, streams, grid, idx, n=None):
         raise ValueError(f"{who} is a list of sub-chains, one per signal; got "
                          f"{type(specs).__name__}.")
     n = _length(n, grid, who)
-    return [render(s, streams, grid, f"{p['op']}/{idx}/{name}/{k}", n, f"{who}[{k}]")
+    return [render(s, streams, grid, f"{p['op']}/{idx}/{name}/{k}", n, f"{who}[{k}]",
+                   domain=domain)
             for k, s in enumerate(specs)]
 
 
@@ -375,7 +398,7 @@ def child(spec, grid):
     """The `Signal` a sub-chain spec describes, for inspection: nothing is validated or run."""
     from .compose import Signal
     if isinstance(spec.get("ops"), (list, tuple)):
-        s = Signal(grid=grid)
+        s = Signal(grid=DOMAIN.grid_for(spec["ops"], grid))
         s.ops = [dict(o) for o in spec["ops"]]
         return s
     r = spec["from"]
@@ -410,7 +433,7 @@ def render_at(sig, path, streams=None):
                 warnings.simplefilter("ignore")      # the record's own render already warned
                 sub, sst = _chain(spec, st, sig.grid, at, at)
             if path == at:
-                return np.asarray(sub._run(sst), float)
+                return sub._run(sst)
             return render_at(sub, path[len(at) + 1:], sst)
     raise ValueError(f"no sub-chain at {path!r}. This signal holds: "
                      f"{list(children(sig)) or 'none'}")

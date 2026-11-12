@@ -1283,7 +1283,10 @@ def _op_combine(x, p, streams, grid, idx):
     from . import joins as JN
     x = _joined(x, p)
     JN.check_combine(p.get("how", "sum"), p.get("gains"), len(p.get("others") or ()))
-    return JN.combine(x, SUB.signals(p, "others", streams, grid, idx, n=len(x)),
+    # on an envelope the peers are envelopes about the same centre; on a voltage, voltages
+    dom = DOMAIN.IQ if np.iscomplexobj(x) else DOMAIN.REAL
+    JN.check_domain(p.get("how", "sum"), dom)
+    return JN.combine(x, SUB.signals(p, "others", streams, grid, idx, n=len(x), domain=dom),
                       how=p.get("how", "sum"), gains=p.get("gains"))
 
 
@@ -1881,13 +1884,13 @@ def _stored_rate(ops, fs, n):
     return fs, n
 
 
-def _grid_now(ops, grid, x):
-    """The grid describing the record `x` after `ops`: its rate, length, domain and centre
-    frequency as they are at that point, not as the chain started."""
+def _grid_now(ops, grid, x, dom, fc):
+    """The grid describing the record `x` after `ops`: its rate and length as they are at that
+    point, not as the chain started, in the domain and about the centre (`dom`, `fc`) the
+    chain has reached there."""
     if grid is None:
         raise ValueError("upconvert/downconvert need a sample rate: Signal(grid=Grid(fs=...))")
     fs, _ = _stored_rate(ops, float(grid.fs), int(grid.n))
-    dom, fc = DOMAIN.trace(ops, grid)[-1] if ops else (DOMAIN.of(grid), grid.fc_hz)
     import dataclasses
     return dataclasses.replace(grid, fs=fs, n=len(x), domain=dom, fc_hz=fc)
 
@@ -2500,6 +2503,8 @@ class Signal:
                              f"{{'ops': [...]}} or {{'from': recipe}}), got "
                              f"{type(others).__name__}.")
         gains = JN.check_combine(how, gains, len(others))
+        if self.ops:                                # on an I/Q record a combine is a sum
+            JN.check_domain(how, DOMAIN.trace(self.ops, self.grid)[-1][0])
         for k, o in enumerate(others):
             if not isinstance(o, (Signal, dict)):
                 raise ValueError(f"combine: others[{k}] is {type(o).__name__}; each entry is a "
@@ -3253,15 +3258,26 @@ class Signal:
         sink = list(_events) if collect_events else None
         if collect_events:
             st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
-        doms = DOMAIN.trace(ops, grid)
+        # where the chain starts: on its grid's domain, or -- a shared stage applied by `use`
+        # -- on whatever the waveform it is handed is; a `use` in it is whatever it names
+        was = None if _x is None else (
+            (DOMAIN.IQ, getattr(grid, "fc_hz", None)) if np.iscomplexobj(_x)
+            else (DOMAIN.REAL, None))
+        rec = getattr(st, "record", None)
+        doms = DOMAIN.trace(ops, grid, start=was,
+                            expand=None if rec is None else rec.rec.expand)
         TRIG.check_chain(ops)
         for i, op in enumerate(ops):
+            if i:
+                was = doms[i - 1]
+            elif was is None:
+                was = (DOMAIN.of(grid), getattr(grid, "fc_hz", None))
             if op["op"] in DOMAIN.EMITS or op["op"] in RF.RATE_AWARE:
                 # a mixer needs the rate the record is at NOW, which after an `acquire` or a
                 # resample is not the synthesis grid's; so does anything stated in Hz on I/Q
-                x = _EXEC[op["op"]](x, op, st, _grid_now(ops[:i], grid, x), i)
+                x = _EXEC[op["op"]](x, op, st, _grid_now(ops[:i], grid, x, *was), i)
             elif op["op"] == "trigger":
-                now = _grid_now(ops[:i], grid, x)         # after an `acquire`, its rate
+                now = _grid_now(ops[:i], grid, x, *was)   # after an `acquire`, its rate
                 x = _op_trigger(x, op, st, now, i, sink=sink, event_scale=now.fs / grid.fs)
             elif collect_events and op["op"] in ("events", "law"):
                 x = _EXEC[op["op"]](x, op, st, grid, i, sink=sink)

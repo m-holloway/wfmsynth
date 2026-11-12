@@ -3874,6 +3874,78 @@ check("the same EVM on a real passband record, through downconvert at a decimate
       f"{_wpe['evm_pct']:.3f} % over {_wpe['n_symbols']} symbols at "
       f"{_wps.stored_grid(_wpx).fs / 1e6:.0f} MSa/s, nothing fitted (floor 0.5 %)")
 
+print("\n== the seams between the pieces: one trigger, one oscillator, an envelope and a "
+      "voltage in one record ==")
+import wfmsynth as _sws
+from wfmsynth import trigger as _STRIG
+_sg = Grid(fs=320e9, baud=10e9, n=1 << 14)
+_slanes = {"clk_line": Signal().carrier("square", f_hz=5e9).lossy(loss_db=2.0, loss_at_ghz=5.0),
+           "tx": Signal().carrier("nrz", n_ui=512, seed=5).lossy(loss_db=4.0, loss_at_ghz=5.0)}
+_srec = _sws.Channels(
+    {"clk": Signal().use("clk_line").use("scope"), "data": Signal().use("tx").use("scope")},
+    shared=dict(_slanes, scope=Signal().trigger(on=Signal().use("clk_line"), pre_s=50e-12,
+                                                post_s=350e-12, level=0.0, n_segments=6,
+                                                holdoff_s=4e-9)), seed=3, grid=_sg)
+_sx, _sev = _srec.realize()
+_slong = _sws.Channels({"clk": Signal().use("clk_line"), "data": Signal().use("tx")},
+                       shared=_slanes, seed=3, grid=_sg).waveforms()
+_sfire = _STRIG.find(_slong["clk"], _sg.fs, level=0.0)["t_s"]
+_sst = [(e.params["start"], e.params["timestamp_s"]) for e in _sev["data"] if e.kind == "trigger"]
+_snw = len(_sx["data"]) // 6
+_sworst = max(float(np.min(np.abs(_sfire - t))) for _a, t in _sst) * _sg.fs
+check("a trigger taken from the clock cuts the DATA at the clock's crossings: every window is "
+      "the long render of that channel, sliced where an independent search finds a clock edge",
+      len(_sst) == 6 and _sworst < 1e-9
+      and all(np.array_equal(_sx[k][j * _snw:(j + 1) * _snw], _slong[k][a:a + _snw])
+              for k in _sx for j, (a, _t) in enumerate(_sst)),
+      f"6 windows of {_snw} samples in each of 2 channels equal the long render exactly; "
+      f"trigger times are clock crossings to {_sworst:.1e} samples")
+
+_sgi = Grid(fs=400e6, baud=5e6, n=1 << 15, domain="iq", fc_hz=60e6)
+_sprof = [(2e4, -70.0), (2e5, -90.0), (2e6, -110.0)]
+_slo = _sws.Channels(
+    {"a": Signal().iq("qpsk", prbs=9, prbs_seed=3).use("lo"),
+     "b": Signal().iq("qpsk", prbs=9, prbs_seed=5).use("lo")},
+    shared={"lo": Signal().phase_noise(profile=_sprof)}, seed=2, grid=_sgi).waveforms()
+_sown = _sws.Channels(
+    {"a": Signal().iq("qpsk", prbs=9, prbs_seed=3).phase_noise(profile=_sprof),
+     "b": Signal().iq("qpsk", prbs=9, prbs_seed=5).phase_noise(profile=_sprof)},
+    seed=2, grid=_sgi).waveforms()
+_scl = {k: Signal(seed=2, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=v).waveform()
+        for k, v in (("a", 3), ("b", 5))}
+_sbusy = (np.abs(_scl["a"]) > 0.2) & (np.abs(_scl["b"]) > 0.2)
+_sturn = {k: np.angle(_slo[k][_sbusy] / _scl[k][_sbusy]) for k in "ab"}
+_sind = {k: np.angle(_sown[k][_sbusy] / _scl[k][_sbusy]) for k in "ab"}
+_srms = float(_sturn["a"].std())
+_sdiff = float(np.abs(_sturn["a"] - _sturn["b"]).max())
+_sdind = float((_sind["a"] - _sind["b"]).std())
+check("one oscillator shared by name turns two different envelopes by the same phase, and an "
+      "oscillator each does not",
+      _sdiff < 1e-9 * _srms and _sdind > 0.5 * _srms,
+      f"shared: {_srms * 1e3:.2f} mrad rms on each channel, largest difference between the "
+      f"two {_sdiff:.1e} rad; an oscillator each: the two differ by {_sdind * 1e3:.2f} mrad "
+      f"rms (bound: more than half the shared rms)")
+
+_senv = Signal(seed=1, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=3)
+_snb = Signal(seed=1, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=11).freq_offset(f_hz=20e6)
+_srip = Signal().carrier("sine", f_hz=40e3, amp=0.2, offset=1.0)
+_sboth = Signal(seed=1, grid=_sgi).iq("qpsk", prbs=9, prbs_seed=3).combine(
+    _snb, gains=[0.1]).gain(by=_srip)
+_sy = _sboth.waveform()
+from wfmsynth import iq as _SIQ
+_srr = _sboth.subchain("gain/2/by")
+_swant = (_SIQ.upconvert(_senv.waveform(), 60e6, 400e6)
+          + 0.1 * _SIQ.upconvert(_snb.waveform(), 60e6, 400e6)) * _srr
+_serr = float(np.abs(_SIQ.upconvert(_sy, 60e6, 400e6) - _swant).max())
+_ssp = _sws.rf.spectrum(_senv.combine(_snb, gains=[0.1]).waveform(), _sgi, rbw_hz=200e3)
+_sratio = 10 * np.log10(_sws.rf.band_power(_ssp, 16e6, 24e6) / _sws.rf.band_power(_ssp, -4e6, 4e6))
+check("on an I/Q record a `combine` sum and a `gain` by a real supply are what they are on the "
+      "passband: an interferer 20 MHz up and 20 dB down, the whole scaled by a 20 % ripple",
+      _serr < 1e-12 and _srr.dtype == np.float64 and abs(_sratio + 20.0) < 0.5,
+      f"upconverted envelope against the same sum and gain done on the real passband records: "
+      f"max difference {_serr:.1e}; neighbour measured {_sratio:.2f} dB against the channel "
+      f"(asked -20, bound 0.5 dB)")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

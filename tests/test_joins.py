@@ -139,18 +139,21 @@ def test_a_recipe_written_by_hand_is_refused_the_same_way():
 
 
 def test_a_different_domain_is_refused_by_name():
-    """An I/Q record is refused where it is written; an I/Q sub-chain where it is rendered."""
+    """Which joins mean something on an I/Q record is `wfmsynth.domain`'s table, checked both
+    ways in tests/test_iq_seams.py. Here: the wrong KIND of other signal is refused where it is
+    rendered, and the joins with no meaning on an envelope where they are written."""
     gi = Grid(fs=16e6, baud=1e6, n=1 << 12, domain="iq", fc_hz=4e6)
     gr = Grid(fs=16e6, baud=1e6, n=1 << 12)
     env = Signal(seed=1, grid=gi).iq("qpsk", prbs=7)
-    with pytest.raises(ValueError, match="complex baseband"):
-        env.combine([{"ops": [{"op": "carrier", "kind": "sine", "f_hz": 1e6}]}])
+    with pytest.raises(ValueError, match="REAL waveform"):
+        env.combine([{"ops": [{"op": "carrier", "kind": "sine", "f_hz": 1e6}]}]).waveform()
     real = Signal(seed=1, grid=gr).carrier("sine", f_hz=1e6)
     with pytest.raises(ValueError, match="COMPLEX"):
         real.combine({"from": Signal(seed=1, grid=gi).iq("qpsk", prbs=7).recipe()}).waveform()
-    for stage in ("gain", "offset", "gate", "delay"):
-        with pytest.raises(ValueError, match="complex baseband"):
+    for stage, instead in (("offset", "iq_offset"), ("delay", "carrier")):
+        with pytest.raises(ValueError, match="complex baseband") as e:
             getattr(Signal(seed=1, grid=gi).iq("qpsk", prbs=7), stage)(by=1.0)
+        assert instead in str(e.value)
 
 
 def test_the_joins_have_no_home_in_canonical_order():

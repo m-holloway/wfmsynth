@@ -328,7 +328,10 @@ def test_every_op_is_real_only_unless_it_is_listed():
     assert both == {"capture", "iq", "upconvert", "filter",
                     # defined on an envelope and nowhere else; tests/test_iq_impairments.py
                     "iq_imbalance", "iq_offset", "freq_offset", "phase_noise", "awgn", "spur",
-                    "dac"}
+                    "dac",
+                    # the general stages that keep their meaning on an envelope, and a named
+                    # chain of a several-channel record; each way in tests/test_iq_seams.py
+                    "gain", "gate", "combine", "sequence", "switch", "use"}
     assert set(DOMAIN.ACCEPTS) | set(DOMAIN.EMITS) <= set(C._EXEC)
 
 

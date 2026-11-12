@@ -51,6 +51,11 @@ carrying to the newly selected input along the same raised cosine. Each change i
 mux has no hysteresis; a noisy selector chatters, as a real one does -- put
 `law("comparator", hysteresis=...)` at the end of the `select` chain to clean it.
 
+ON AN I/Q RECORD (`Grid(domain="iq")`) the parts are I/Q chains and the joined record is their
+envelope: a preamble then a payload about one centre frequency. `select` stays a real signal.
+A segment boundary is still a `segment` event, so `iqfile.to_interleaved(events=)` writes it
+into the marker channel and `to_sigmf` into an annotation.
+
 One mechanism or two? Two. A sequence is a statement about TIME (durations, written in the
 recipe, on the grid); a switch is a statement about a SIGNAL (the instants are an outcome, and
 are emitted). A sequence written as a switch would need a staircase selector invented to carry
@@ -204,7 +209,7 @@ def splice(waves, plan, join="cut", m=0):
     Segment k is ``waves[k][0:count]`` ("restart") or ``waves[k][start:stop]`` ("continue").
     `m` is the join window in samples; see the module docstring for what happens inside it."""
     n = plan[-1]["stop"]
-    y = np.empty(n)
+    y = np.empty(n, dtype=np.result_type(float, *waves))    # complex when the chains are I/Q
     lo = [s["start"] if s["state"] == "continue" else 0 for s in plan]
     for s, w, a in zip(plan, waves, lo):
         y[s["start"]:s["stop"]] = w[a:a + s["stop"] - s["start"]]
@@ -220,15 +225,15 @@ def splice(waves, plan, join="cut", m=0):
     return y
 
 
-def _render(spec, streams, grid, at, who, keep=None, shift=0):
+def _render(spec, streams, grid, at, who, keep=None, shift=0, domain="real"):
     """One sub-chain on the record's grid. Its events reach the record's list only if they
     fall in `keep` (a sample range of the CHAIN's own time), moved by `shift` samples onto the
     record's -- a segment that restarts has its own clock."""
     sink = getattr(streams, "sink", None)
     if sink is None or keep is None:
-        return SUB.render(spec, streams, grid, at, grid.n, who)
+        return SUB.render(spec, streams, grid, at, grid.n, who, domain=domain)
     own = []
-    y = SUB.render(spec, SUB.Namespaced(streams, "", own), grid, at, grid.n, who)
+    y = SUB.render(spec, SUB.Namespaced(streams, "", own), grid, at, grid.n, who, domain=domain)
     for e in own:
         if keep[0] <= e.sample < keep[1]:
             e.sample += shift
@@ -248,7 +253,8 @@ def run_sequence(streams, grid, idx, segments=None, join="cut", t_join_s=None):
         a = s["start"] if s["state"] == "continue" else 0
         waves.append(_render(seg["chain"], streams, grid, f"sequence/{idx}/segments/{k}/chain",
                              f"sequence: segments[{k}]: `chain`",
-                             keep=(a, a + count), shift=s["start"] - a))
+                             keep=(a, a + count), shift=s["start"] - a,
+                             domain=getattr(grid, "domain", "real")))
     sink = getattr(streams, "sink", None)
     if sink is not None:
         for s in plan[1:]:
@@ -291,7 +297,10 @@ def mux(select, inputs, threshold=0.5, m=0):
     thr = thresholds(threshold, len(inputs))
     sel = np.asarray(select, float)
     idx = np.searchsorted(thr, sel, side="left")
-    y = np.asarray(inputs, float)[idx, np.arange(len(sel))]
+    inputs = np.asarray(inputs)                  # real voltages, or I/Q envelopes alike
+    if not np.iscomplexobj(inputs):
+        inputs = inputs.astype(float)
+    y = inputs[idx, np.arange(len(sel))]
     at = np.flatnonzero(np.diff(idx)) + 1
     changes = []
     for c in at:
@@ -306,7 +315,7 @@ def mux(select, inputs, threshold=0.5, m=0):
         busy = np.zeros(len(sel), bool)
         for c in at:
             busy[c:c + m] = True
-        mix = np.zeros(len(sel))
+        mix = np.zeros(len(sel), dtype=inputs.dtype)
         for k, x in enumerate(inputs):
             on = np.concatenate([np.full(m, float(idx[0] == k)), (idx == k).astype(float)])
             mix += np.convolve(on, h)[m:m + len(sel)] * x
@@ -333,7 +342,8 @@ def run_switch(streams, grid, idx, select=None, inputs=None, threshold=0.5, t_sw
         raise ValueError("switch needs select=<a sub-chain>: the signal whose level chooses "
                          "the input (a Signal, {'ops': [...]} or {'from': <recipe>}).")
     sel = _render(select, streams, grid, f"switch/{idx}/select", "switch: `select`")
-    ins = [_render(s, streams, grid, f"switch/{idx}/inputs/{k}", f"switch: `inputs`[{k}]")
+    ins = [_render(s, streams, grid, f"switch/{idx}/inputs/{k}", f"switch: `inputs`[{k}]",
+                   domain=getattr(grid, "domain", "real"))
            for k, s in enumerate(inputs)]
     y, changes = mux(sel, ins, thr, m)
     sink = getattr(streams, "sink", None)

@@ -52,6 +52,8 @@ import dataclasses
 import hashlib
 import json
 
+import numpy as np
+
 from . import domain as DOMAIN
 from . import opkeys as OPKEYS
 from . import subchain as SUB
@@ -154,8 +156,9 @@ class Channels:
                     f"A channel starts with a source (carrier, symbols, coded, capture, iq) "
                     f"or with use(<a chain that does>); a chain meant to be applied to "
                     f"others belongs under `shared`.")
-        for name in self.names:
-            DOMAIN.trace(self._flat(name), self.grid)   # refuse the wrong domain where written
+        for name in self.names:                 # refuse the wrong domain where it is written
+            flat = self._flat(name)
+            DOMAIN.trace(flat, DOMAIN.grid_for(flat, self.grid))
 
     # ------------------------------------------------------------ what refers to what
     def _check_references(self):
@@ -202,9 +205,22 @@ class Channels:
             out += self._flat(o["name"]) if o["op"] == "use" else [o]
         return out
 
-    def _signal(self, name):
+    def expand(self, name):
+        """``(is_signal, ops)`` of a named chain, its own `use`s replaced: what
+        `domain.trace` needs to follow a `use`."""
+        return self.is_signal(name), self._flat(name)
+
+    def _signal(self, name, like=None):
+        """The chain as a Signal on the record's grid, in the domain ITS ops need: a record may
+        hold an I/Q channel and the real supply that scales it. A stage is put in the domain
+        of the waveform `like` that it is being applied to."""
         from .compose import Signal
-        s = Signal(seed=self.seed, grid=self.grid)
+        grid = DOMAIN.grid_for(self._flat(name), self.grid)
+        if like is not None and grid is not None:
+            dom = DOMAIN.IQ if np.iscomplexobj(like) else DOMAIN.REAL
+            if dom != DOMAIN.of(grid):
+                grid = dataclasses.replace(grid, domain=dom, fc_hz=None)
+        s = Signal(seed=self.seed, grid=grid)
         s.ops = self.chains[name]
         return s
 
@@ -241,8 +257,9 @@ class Channels:
         """The `Grid` describing channel `name`'s returned samples `x` (see
         `Signal.stored_grid`): each channel may end in its own acquisition."""
         from .compose import Signal
-        s = Signal(seed=self.seed, grid=self.grid)
-        s.ops = self._flat(name)
+        flat = self._flat(name)
+        s = Signal(seed=self.seed, grid=DOMAIN.grid_for(flat, self.grid))
+        s.ops = flat
         return s.stored_grid(x)
 
     # ------------------------------------------------------------ roles
@@ -389,7 +406,7 @@ def use(x, name, streams):
                 f"use({name!r}): {name!r} is a stage (it starts with `{first}`), which acts "
                 f"on a waveform, and none has arrived: it is the first op here. Put a source "
                 f"before it.")
-        sig = rec._signal(name)
+        sig = rec._signal(name, like=x)
         if sink is None:
             return sig._run(r.view(name), _x=x)
         # the stage sees the events already on the waveform it is handed, so a `trigger` in

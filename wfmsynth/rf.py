@@ -502,7 +502,8 @@ def report(sig):
     for i, op in enumerate(sig.ops):
         if op["op"] in OPS:
             x = dataclasses.replace(sig, ops=sig.ops[:i]).waveform()
-            grid = C._grid_now(sig.ops[:i], sig.grid, x)
+            grid = C._grid_now(sig.ops[:i], sig.grid, x, 
+                                *C.DOMAIN.trace(sig.ops[:i], sig.grid)[-1])
             rng = Streams(sig.seed).role(f"phase_noise/{i}")
             out.append({"op": i, "name": op["op"], **_describe(op, x, grid, rng)})
     return out

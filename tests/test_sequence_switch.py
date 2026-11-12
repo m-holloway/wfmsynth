@@ -361,7 +361,8 @@ def test_both_are_sources_and_say_so(op):
             + (op in C._LEAD_ANALYTIC)) == 1
     refused(lambda: build(Signal(grid=G, lead_in=True)).waveform(), "lead_in")
     iq = Grid(fs=1e9, baud=50e6, n=8000, domain="iq", fc_hz=1e8)
-    refused(lambda: build(Signal(grid=iq)), op, "domain 'real'")
+    # on an I/Q record the parts are I/Q chains (tests/test_iq_seams.py); a voltage is not one
+    refused(lambda: build(Signal(grid=iq)).waveform(), op, "REAL waveform", "I/Q")
 
 
 # ---------------------------------------------------------------------------------- switch
