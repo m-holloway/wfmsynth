@@ -446,7 +446,7 @@ def test_grid_refusals(tmp_path, x):
     ws.to_interleaved(p, x)
     kw = dict(path=p, format="iq_interleaved", dtype="float32")
     with pytest.raises(ValueError, match="complex .I/Q. samples.*domain='iq'"):
-        ws.Signal(grid=ws.Grid(fs=FS, n=N)).capture(**kw)
+        ws.Signal(grid=ws.Grid(fs=FS, n=N, domain="real")).capture(**kw)
     with pytest.raises(ValueError, match="centred on fc_hz=2e\\+09 and the record's grid says "
                                          "fc_hz=1e\\+09"):
         ws.Signal(grid=_grid()).capture(fc_hz=2e9, **kw)

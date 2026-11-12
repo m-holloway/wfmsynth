@@ -2940,8 +2940,28 @@ check("a real-only op handed an I/Q record refuses BY NAME, saying which op conv
       "samples offered to a real record are refused, not cast",
       _qmsg.startswith("lossy") and "'iq'" in _qmsg and "upconvert(" in _qmsg
       and "complex (I/Q)" in _qrefusal(
-          lambda: Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx))).capture(values=_qx)),
+          lambda: Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx), domain="real"))
+          .capture(values=_qx)),
       _qmsg[:118] + "...")
+_qfollow = Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx))).capture(values=_qx)
+_qstated = Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx), domain="iq")).capture(values=_qx)
+_qsrc = Signal(seed=1, grid=Grid(fs=_qgs.fs, baud=_qgs.baud, n=_qgs.n)).iq("qpsk", prbs=9)
+_qsrc_stated = Signal(seed=1, grid=Grid(fs=_qgs.fs, baud=_qgs.baud, n=_qgs.n,
+                                         domain="iq")).iq("qpsk", prbs=9)
+check("a grid that does not state its domain takes its source's: an `iq` source and a complex "
+      "capture are I/Q records with the recipe and samples of one that said domain='iq', a "
+      "real source's recipe is unchanged, and a grid that STATES 'real' refuses `iq` by name",
+      _qfollow.grid.domain == "iq" and _qfollow.to_json() == _qstated.to_json()
+      and np.array_equal(_qfollow.waveform(), _qx)
+      and _qsrc.to_json() == _qsrc_stated.to_json()
+      and np.array_equal(_qsrc.waveform(), _qsrc_stated.waveform())
+      and "domain" not in Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096))
+      .carrier("nrz", n_ui=512).recipe()["grid"]
+      and "STATES domain='real'" in _qrefusal(
+          lambda: Signal(seed=1, grid=Grid(fs=_qgs.fs, baud=_qgs.baud, n=_qgs.n,
+                                           domain="real")).iq("qpsk", prbs=9)),
+      f"inferred and stated I/Q digests equal: capture {_qfollow.sha256()[:12]} == "
+      f"{_qstated.sha256()[:12]}, iq {_qsrc.sha256()[:12]} == {_qsrc_stated.sha256()[:12]}")
 _qr = Signal.from_recipe(_qjson.loads(_qrf.to_json()))
 _qreal = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096)).carrier("nrz", n_ui=512)
 check("waveform() of an I/Q record is complex128 and replays bit for bit from its recipe; a "

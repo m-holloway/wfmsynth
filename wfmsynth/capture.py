@@ -44,10 +44,29 @@ def digest(values):
 
 
 _COMPLEX_MSG = (
-    "capture: {what} complex (I/Q) samples, and this chain's record is real (domain 'real'). "
-    "A real record cannot hold them and nothing drops the imaginary part for you: start the "
-    "chain on Signal(grid=Grid(..., domain='iq', fc_hz=...)), or pass the part you mean "
+    "capture: {what} complex (I/Q) samples, and this chain's record is real: its Grid states "
+    "domain='real', or it has no Grid. A real record cannot hold them and nothing drops the "
+    "imaginary part for you. Give the chain a Grid that does not state a domain (the record "
+    "then follows the file) or one that says domain='iq', or pass the part you mean "
     "(values=x.real).")
+
+
+def holds_complex(path):
+    """True when a .npy / .npz capture file holds complex samples. A .csv is columns of
+    numbers and cannot say, so it is read as the grid states (three columns, time, I, Q, on a
+    grid that says domain='iq')."""
+    p = Path(path)
+    if not p.exists() or p.suffix.lower() not in (".npy", ".npz"):
+        return False
+    y = _load_plain(p, path)
+    if p.suffix.lower() == ".npz":
+        if "values" not in y.files:
+            return False
+        try:
+            y = y["values"]
+        except ValueError:
+            return False
+    return bool(np.iscomplexobj(y))
 
 
 def encode(values, domain="real"):

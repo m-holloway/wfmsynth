@@ -473,7 +473,9 @@ def capture_params(grid, path, format, fs_hz=None, fc_hz=None, embed=False, **la
     Everything the metadata states (rate, centre, annotations) is copied into the recipe here,
     so a replay reads only the samples."""
     lay = _layout(format, layout)
-    if getattr(grid, "domain", "real") != "iq":
+    # a grid that did not state its domain takes the file's, and its centre with it
+    follows = grid is not None and not getattr(grid, "domain_stated", True)
+    if not follows and getattr(grid, "domain", "real") != "iq":
         raise ValueError(CAP._COMPLEX_MSG.format(what=f"{str(path)!r} (format={format!r}) holds"))
     y = read(path, format, **lay)
     params = {"format": format, **lay, "sha256": CAP.digest(y)}
@@ -493,7 +495,8 @@ def capture_params(grid, path, format, fs_hz=None, fc_hz=None, embed=False, **la
         params["scale"] = _scale(lay.get("scale", m.get("scale")), dtype)
         if m.get("annotations"):
             params["annotations"] = m["annotations"]
-    check_centre(fc_hz, grid)
+    if not follows:
+        check_centre(fc_hz, grid)
     if embed:
         params["values"] = CAP.encode(y, "iq")
     else:

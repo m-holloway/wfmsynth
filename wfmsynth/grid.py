@@ -21,6 +21,18 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+class _Follows(str):
+    """The `domain` of a grid that did not state one: it reads as ``"real"`` (and compares,
+    hashes and serialises as that string), and a chain started on such a grid takes the domain
+    of its SOURCE instead -- `iq(...)` or an I/Q capture makes the record complex baseband.
+    A plain ``"real"`` is a statement, and a source that contradicts it is refused. Being the
+    field's own value, the difference survives `dataclasses.replace`, a copy and a pickle."""
+    __slots__ = ()
+
+
+_FOLLOWS_REAL = _Follows("real")
+
+
 @dataclass(frozen=True)
 class Grid:
     fs: float                          # sample rate [Hz]
@@ -36,10 +48,17 @@ class Grid:
     # on `fc_hz`, and `waveform()` returns complex128. This is the domain the chain STARTS in;
     # `upconvert` / `downconvert` move between the two mid-chain, and every op states which it
     # accepts (`wfmsynth.domain`) and refuses the other by name.
-    domain: str = "real"
+    #
+    # LEFT OUT, the domain follows the chain's source: a voltage for `carrier` / `symbols` /
+    # `coded` / a real capture, complex baseband for `iq` or an I/Q capture -- or "iq" at once
+    # when `fc_hz` is given, since only an envelope has a centre frequency. The attribute then
+    # reads "real" or "iq" like a stated one; `domain_stated` says which it was.
+    domain: Optional[str] = None
     fc_hz: Optional[float] = None      # the centre frequency an "iq" record is the envelope of
 
     def __post_init__(self):
+        if self.domain is None:
+            object.__setattr__(self, "domain", "iq" if self.fc_hz is not None else _FOLLOWS_REAL)
         if self.domain not in ("real", "iq"):
             raise ValueError(f"Grid: unknown domain {self.domain!r} (use 'real' or 'iq')")
         if self.domain == "real" and self.fc_hz is not None:
@@ -86,6 +105,12 @@ class Grid:
             out.append((name, int(round(off)), int(round(off + width))))
             off += width
         return out
+
+    @property
+    def domain_stated(self) -> bool:
+        """False for a grid whose `domain` was left out and has not been settled by `fc_hz`:
+        a chain started on it takes the domain of its source."""
+        return not isinstance(self.domain, _Follows)
 
     # ---- derived quantities ----
     @property

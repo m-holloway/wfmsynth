@@ -28,6 +28,7 @@ real, documented parameter — nothing is hidden or randomized-but-unrecorded. R
 order, which is what makes the round-trip exact.
 """
 from __future__ import annotations
+import dataclasses
 from dataclasses import asdict as _asdict, dataclass, field
 from typing import Optional
 import warnings
@@ -2208,6 +2209,8 @@ class Signal:
         params = SUB.flatten(op, params, self)                   # a sub-chain -> data
         new = TOL.resolve(len(self.ops), {"op": op, **params}, self.seed)   # a tolerance -> its number
         OPKEYS.check(op, new)
+        if not self.ops:                              # the source: a grid that did not state
+            self.grid = DOMAIN.follow(self.grid, new)     # its domain takes the source's
         DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
         TRIG.check_chain(self.ops + [new])
         self.ops.append(new); return self
@@ -2372,7 +2375,9 @@ class Signal:
         grid's. The digest and `embed=True` behave exactly as above; a file's annotations are
         copied into the recipe and come back from `realize()` as events."""
         from . import capture as CAP
-        dom = DOMAIN.of(self.grid)
+        # a grid that did not state its domain takes the file's: complex samples make the
+        # record complex baseband, centred where the file says it is
+        follows = (self.grid is not None and not self.grid.domain_stated and not self.ops)
         if format is not None or fc_hz is not None or layout:
             from . import iqfile as IQF
             if path is None or values is not None or format is None:
@@ -2382,11 +2387,19 @@ class Signal:
                     "format= (one of " + ", ".join(IQF.FORMATS) + "), and not values=.")
             params = IQF.capture_params(self.grid, path, format, fs_hz=fs_hz, fc_hz=fc_hz,
                                         embed=embed, **layout)
+            if follows:
+                self.grid = dataclasses.replace(self.grid, domain=DOMAIN.IQ,
+                                                fc_hz=params.get("fc_hz"))
             if n is not None:
                 params["n"] = n
             if resample:
                 params["resample"] = True
             return self._add("capture", **params)
+        if follows:
+            self.grid = DOMAIN.follow(self.grid, {"op": "capture", "path": path} if values is None
+                                      else {"op": "capture", "values": [[0, 0]]
+                                            if np.iscomplexobj(np.asarray(values)) else [0]})
+        dom = DOMAIN.of(self.grid)
         if values is not None:
             params = {"values": CAP.encode(values, dom)}
             if fs_hz is not None:
@@ -2413,7 +2426,9 @@ class Signal:
 
     def iq(self, constellation=None, **params):
         """First op of a COMPLEX BASEBAND chain: symbols on a constellation, pulse-shaped.
-        Needs `Grid(fs=..., baud=..., n=..., domain="iq", fc_hz=...)`.
+        Needs `Grid(fs=..., baud=..., n=...)`; the record is I/Q because this is its source,
+        so the grid need not say `domain="iq"` (one that says `domain="real"` is refused).
+        `fc_hz=` on the grid states the centre frequency, for `upconvert` and for files.
 
             Signal(seed=1, grid=g).iq("qpsk", prbs=9)             # PRBS bits, fills the record
             Signal(seed=1, grid=g).iq("qam16", bits=[...])        # your bits
@@ -3834,6 +3849,8 @@ class Signal:
         for o in ops:                       # the same gate the builders go through: a recipe
             OPKEYS.check(o.get("op"), o)    # carrying a dead parameter says what it is not
         _warn_on_numeric_drift(r.get("wfmsynth_version"), ops)
+        if ops:                             # a hand-written recipe may leave the domain to
+            s.grid = DOMAIN.follow(s.grid, ops[0])        # its source, as a builder may
         s.ops = ops
         return s
 

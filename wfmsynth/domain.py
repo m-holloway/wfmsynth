@@ -7,9 +7,13 @@ A record is in one of two domains:
     "iq"     COMPLEX BASEBAND: each sample is I + jQ, the envelope of a signal centred on
              `fc_hz`. `waveform()` returns complex128.
 
-The domain a chain STARTS in is the grid's (`Grid(domain="iq", fc_hz=...)`). Two ops move
-between them -- `upconvert` (iq -> real passband) and `downconvert` (real -> iq) -- and every
-other op leaves the domain alone.
+The domain a chain STARTS in is its SOURCE's when the grid does not state one: `iq(...)`, an
+I/Q capture, or a `sequence` / `switch` of I/Q chains is an envelope, `carrier` / `symbols` /
+`coded` / a real capture a voltage (`follow`). A grid may state it -- `Grid(domain="iq")`,
+`Grid(domain="real")`, or `fc_hz=`, which only an envelope has -- and a source that
+contradicts a stated domain is refused by name. Two ops move between the domains --
+`upconvert` (iq -> real passband) and `downconvert` (real -> iq) -- and every other op leaves
+the domain alone.
 
 A chain that was NOT handed its grid by its author -- a sub-chain, a named chain of a
 `Channels` record, a `Signal()` not yet given one -- inherits a grid it did not state, so it
@@ -127,7 +131,7 @@ _FIX = {
     IQ: "upconvert(fc_hz=...) turns it into a real passband record first; a chain meant to be "
         "real throughout needs a Grid without domain='iq'.",
     REAL: "downconvert(fc_hz=..., lpf=...) turns a real passband record into I/Q; a chain that "
-          "starts in I/Q needs Signal(grid=Grid(..., domain='iq', fc_hz=...)).",
+          "starts in I/Q starts with .iq(...) or an I/Q capture.",
 }
 
 
@@ -151,6 +155,11 @@ def refuse(op, dom, i=None):
             f"source of a real voltage. An I/Q record starts with "
             f".iq(<constellation>, prbs=<order>); a real one needs a Grid without "
             f"domain='iq'.")
+    if dom == REAL and op == "iq" and not i:
+        return ValueError(
+            f"iq: this chain's grid STATES domain='real', and iq is the source of a "
+            f"complex baseband record. Leave domain= off the Grid -- the record's domain then "
+            f"follows its source -- or state Grid(..., domain='iq', fc_hz=...).")
     instead = _INSTEAD[dom].get(op)
     return ValueError(
         f"{op}{where}: the record is {_WHAT[dom]} at this point in the chain, and {op} takes "
@@ -169,6 +178,56 @@ def needs(ops):
         if name in EMITS:
             break
     return None
+
+
+def _paired(values):
+    """True for a recipe's complex `values`: ``[[re, im], ...]``."""
+    return bool(values) and isinstance(values[0], (list, tuple)) and len(values[0]) == 2
+
+
+def _spec_needs(spec):
+    """The domain a sub-chain spec is in at its START, or None when it does not say."""
+    if not isinstance(spec, dict):
+        return None
+    if isinstance(spec.get("ops"), (list, tuple)):
+        return needs(spec["ops"]) or (source_needs(spec["ops"][0]) if spec["ops"] else None)
+    if isinstance(spec.get("from"), dict):
+        return (spec["from"].get("grid") or {}).get("domain", REAL)
+    return None
+
+
+def source_needs(op):
+    """The domain a chain whose FIRST op is `op` is in, or None when that op does not say (a
+    stage; a capture whose file is real, missing, or a .csv, which cannot say). A `sequence`
+    or `switch` is what its chains are, when they agree."""
+    name = op.get("op")
+    if name == "capture":
+        if op.get("format") is not None:
+            return IQ
+        if op.get("values") is not None:
+            return IQ if _paired(op["values"]) else REAL
+        if op.get("path") is not None:
+            from . import capture as CAP
+            return IQ if CAP.holds_complex(op["path"]) else None
+        return None
+    if name in ("sequence", "switch"):
+        specs = ([s.get("chain") for s in op.get("segments") or () if isinstance(s, dict)]
+                 if name == "sequence" else list(op.get("inputs") or ()))
+        doms = {_spec_needs(s) for s in specs} - {None}
+        return doms.pop() if len(doms) == 1 else None
+    return needs([op])
+
+
+def follow(grid, op):
+    """The grid a chain STARTING with `op` is on: `grid`, in the source's domain when the grid
+    did not state one. A stated domain is left alone, for `trace` to refuse a contradiction."""
+    if grid is None or getattr(grid, "domain_stated", True):
+        return grid
+    want = source_needs(op)
+    if want is None or want == of(grid):
+        return grid
+    import dataclasses
+    return dataclasses.replace(grid, domain=want)
 
 
 def grid_for(ops, grid):

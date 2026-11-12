@@ -138,7 +138,7 @@ def _rate(grid, who):
     baud = getattr(grid, "baud", None) if grid is not None else None
     if fs is None or baud is None:
         raise ValueError(f"{who}: needs the sample rate and the symbol rate -- "
-                         f"Grid(fs=..., baud=..., n=..., domain='iq')")
+                         f"Grid(fs=..., baud=..., n=...)")
     return float(fs), float(baud)
 
 

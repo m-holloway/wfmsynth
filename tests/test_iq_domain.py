@@ -385,8 +385,8 @@ def test_the_converters_refuse_the_domain_they_do_not_convert():
         Signal(seed=1, grid=Grid(fs=FS, n=N)).carrier("sine", f_hz=FC).upconvert(fc_hz=FC)
     with pytest.raises(ValueError, match=r"downconvert.*'iq'.*upconvert\("):
         _src().downconvert(fc_hz=FC, lpf=LPF)
-    with pytest.raises(ValueError, match=r"iq .*'real'.*domain='iq'"):
-        Signal(seed=1, grid=Grid(fs=FS, baud=BAUD, n=N)).iq("qpsk", prbs=9)
+    with pytest.raises(ValueError, match=r"iq.*STATES domain='real'.*Leave domain= off"):
+        Signal(seed=1, grid=Grid(fs=FS, baud=BAUD, n=N, domain="real")).iq("qpsk", prbs=9)
 
 
 def test_the_refusal_also_guards_a_recipe_and_a_hand_edited_op_list():
@@ -413,7 +413,8 @@ def test_a_grid_states_its_domain_or_is_refused():
     with pytest.raises(ValueError, match="unknown domain"):
         Grid(fs=1e9, domain="complex")
     with pytest.raises(ValueError, match="fc_hz.*domain='iq'"):
-        Grid(fs=1e9, fc_hz=1e8)
+        Grid(fs=1e9, fc_hz=1e8, domain="real")
+    assert Grid(fs=1e9, fc_hz=1e8).domain == "iq"          # only an envelope has a centre
     assert Grid(fs=1e9, domain="iq").fc_hz is None                     # a centre is optional
     with pytest.raises(ValueError, match="upconvert needs the carrier"):
         Signal(seed=0, grid=Grid(fs=1e9, n=64, domain="iq")).capture(
@@ -521,14 +522,17 @@ def test_capture_starts_an_iq_chain_from_complex_values_and_replays_them():
 
 def test_complex_samples_offered_to_a_real_record_are_refused_not_cast(tmp_path):
     x = _tones(256)
-    g = Grid(fs=FS, n=256)
+    g = Grid(fs=FS, n=256, domain="real")
     with pytest.raises(ValueError, match=r"complex \(I/Q\) samples.*domain='iq'"):
         Signal(seed=0, grid=g).capture(values=x)
+    with pytest.raises(ValueError, match=r"complex \(I/Q\) samples.*it has no Grid"):
+        Signal(seed=0).capture(values=x)
     np.save(tmp_path / "iq.npy", x)
     with pytest.raises(ValueError, match=r"iq.npy.*complex \(I/Q\) samples"):
         Signal(seed=0, grid=g).capture(path=str(tmp_path / "iq.npy"))
     r = Signal(seed=0, grid=Grid(fs=FS, n=256, domain="iq")).capture(values=x).recipe()
-    del r["grid"]["domain"], r["grid"]["fc_hz"]            # an I/Q recipe relabelled as real
+    r["grid"]["domain"] = "real"                           # an I/Q recipe relabelled as real
+    del r["grid"]["fc_hz"]
     with pytest.raises(ValueError, match=r"complex \(I/Q\) samples"):
         Signal.from_recipe(r).waveform()
 
