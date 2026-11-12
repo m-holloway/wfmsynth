@@ -243,10 +243,26 @@ def test_arrivals_follow_the_stated_distribution():
     fixed = seg(n=10, arrival=dict(dist="fixed", t_s=7e-6))
     occ = fixed.occurrences()
     assert np.allclose(np.diff([o["arrival_s"] for o in occ]), 7e-6, rtol=0, atol=1e-15)
-    # a period shorter than the 3 us render: every other occurrence arrives while the last
-    # is still being stored, and is missed and counted
-    short = seg(n=6, arrival=dict(dist="fixed", t_s=2e-6))
+    # a period shorter than post_s (1.5 us): every other occurrence arrives while the last
+    # window is still being stored, and is missed and counted
+    short = seg(n=6, arrival=dict(dist="fixed", t_s=1e-6))
     assert [o["missed"] for o in short.occurrences()] == [0, 1, 1, 1, 1, 1]
+    # ... and a stated re-arm time lengthens the dead time: 1.5 + 1.6 us takes every fourth
+    slow = seg(n=4, arrival=dict(dist="fixed", t_s=1e-6), trigger=dict(TRIG, rearm_s=1.6e-6))
+    assert [o["missed"] for o in slow.occurrences()] == [0, 3, 3, 3]
+
+
+def test_the_render_length_changes_no_arrival_or_timestamp():
+    """The dead time is the scope's (post_s + rearm_s), not the render's: a longer settling
+    lead renders more samples and captures the same occurrences at the same instants."""
+    chain = Signal().carrier("step", t_step_s=1e-6, tr_s=20e-9, amp=0.5, offset=0.5)
+    got = []
+    for n in (3000, 9000):
+        s = ws.Segments(chain, n=30, arrival=dict(dist="exponential", mean_s=2e-6),
+                        trigger=dict(TRIG, jitter_s=1e-9), seed=1, grid=ws.Grid(fs=FS, n=n))
+        got.append(([(o["arrival_s"], o["missed"]) for o in s.occurrences()],
+                    [e.params["timestamp_s"] for e in s.realize()[1] if e.kind == "trigger"]))
+    assert got[0] == got[1] and sum(m for _, m in got[0][0]) > 0
 
 
 def test_render_cost_is_n_times_window_not_the_arrival_span(monkeypatch):
@@ -297,9 +313,45 @@ def test_a_variants_parts_are_named_under_it():
     s = seg(step(ws.tol(1.0, 10, per="segment")), n=50,
             variants={"late": dict(p=0.2, chain=late)})
     r = s.roles()
-    assert "vary/1/by" in r and "late/vary/1/by" in r and "late/unit/2/by" in r
+    assert "vary/1/by" in r and "late/vary/1/by" in r and "unit/2/by" in r
     rec = s.recipe()
-    assert [e["role"] for e in TOL.resolved(rec)] == ["late/unit/2/by"]
+    assert [e["role"] for e in TOL.resolved(rec)] == ["unit/2/by"]
+
+
+def test_a_variant_is_the_same_unit():
+    """A part the main chain and a variant both hold is ONE draw: unit parts are per unit."""
+    c = step(ws.tol(1.0, 5))
+    s = seg(c, n=20, variants={"late": dict(p=0.3, chain=c.copy().delay(by=100e-9))})
+    vals = {r["chain"] if "chain" in r else "main": r["value"] for r in TOL.resolved(s.recipe())}
+    assert vals["main"] == vals["late"] and s.roles().count("unit/1/by") == 1
+    other = {r.get("chain", "main"): r["value"] for r in TOL.resolved(s.unit(9).recipe())}
+    assert other["main"] == other["late"] != vals["main"]
+
+
+def test_a_grouped_draw_is_named_under_its_variant_and_rerolls_alone():
+    g = ws.tol(1.0, 10, per="segment", group="contact")
+    s = seg(step(g), n=60, variants={"late": dict(p=0.3, chain=step(g).delay(by=100e-9))})
+    r = s.roles()
+    assert "vary/contact" in r and "late/vary/contact" in r
+    a = s.occurrences()
+    b = s.occurrences(ws.Streams(1).reroll("late/vary/contact"))
+    for x, y in zip(a, b):
+        key = "vary/1/by" if x["variant"] == "main" else "late/vary/1/by"
+        assert (x["values"][key] == y["values"][key]) == (x["variant"] == "main")
+
+
+def test_a_variant_stored_at_another_rate_is_refused():
+    with pytest.raises(ValueError, match=r"variant 'd' stores at 5e\+08.*main chain at 1e\+09"):
+        seg(n=5, variants={"d": dict(p=0.2, chain=step().digitize(n_out=1500))})
+
+
+def test_an_event_before_the_scope_arms_says_so_and_not_a_longer_render():
+    s = ws.Segments(step(), n=3, arrival=dict(dist="fixed", t_s=1e-3),
+                    trigger=dict(pre_s=1.5e-6, post_s=1e-6, level=0.5), seed=1,
+                    grid=ws.Grid(fs=FS, n=12000))
+    with pytest.raises(ValueError, match="before pre_s.*move the event later") as e:
+        s.waveform()
+    assert "holdoff" not in str(e.value) and "Render longer" not in str(e.value)
 
 
 # ---------------------------------------------------------------- units nest
@@ -326,7 +378,8 @@ def test_a_unit_holds_for_the_acquisition_and_segments_draw_inside_it():
     (dict(trigger=dict(TRIG, n_segments=4)), "how many occurrences"),
     (dict(variants={"late": dict(p=1.0, chain=step())}), "strictly between 0"),
     (dict(variants={"main": dict(p=0.1, chain=step())}), "not 'main'"),
-    (dict(arrival=dict(dist="poisson", mean_s=1.0)), "'dist' is one of"),
+    (dict(arrival=dict(dist="poisson", mean_s=1.0)), "arrival is a dict whose 'dist'"),
+    (dict(trigger=dict(TRIG, rearm_s=-1.0)), "rearm_s"),
 ])
 def test_refused_by_name(kw, said):
     with pytest.raises(ValueError, match=said):
@@ -338,6 +391,7 @@ def test_an_occurrence_whose_render_is_too_short_is_refused_with_the_length():
                     trigger=dict(pre_s=200e-9, post_s=3e-6, level=0.5), seed=1, grid=G)
     with pytest.raises(ValueError, match=r"occurrence 0.*needs at least (\d+) samples") as e:
         s.waveform()
+    assert "holdoff" not in str(e.value)
     need = int(__import__("re").search(r"needs at least (\d+) samples", str(e.value)).group(1))
     ok = ws.Segments(step(), n=3, arrival=dict(dist="fixed", t_s=1e-3),
                      trigger=dict(pre_s=200e-9, post_s=3e-6, level=0.5), seed=1,

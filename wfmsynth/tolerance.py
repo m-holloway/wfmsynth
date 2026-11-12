@@ -481,8 +481,8 @@ def refuse_per_segment(ops, who="this record"):
 def segment_entries(ops, pre=""):
     """``(op index, parameter, spec, location, role)`` for every per-occurrence value in an op
     list. `location` names the parameter (`vary/2/by`, `trend/1/by`); `role` is the
-    randomness a segment draw comes from (`vary/2/by`, or `vary/<group>` shared), None for a
-    trend."""
+    randomness a segment draw comes from (`vary/2/by`, or `vary/<group>` shared within the
+    chain), None for a trend. `pre` (a `Segments` variant's name) prefixes both."""
     for i, op in enumerate(ops):
         for name, spec in op.get("_segment", {}).items():
             if "trend" in spec:
@@ -490,7 +490,7 @@ def segment_entries(ops, pre=""):
                 continue
             loc = located(i, name, op, pre, "vary")
             g = spec.get("group")
-            yield i, name, spec, loc, (f"vary/{g}" if g is not None else loc)
+            yield i, name, spec, loc, (f"{pre}vary/{g}" if g is not None else loc)
 
 
 def stated(ops):
@@ -540,7 +540,8 @@ def _chains(recipe):
     Signal's, or every named chain of a `Channels` record's."""
     if "segments" in recipe:
         seg = recipe["segments"]
-        return [(None, "", seg["ops"])] + [(name, name + "/", v["ops"])
+        # a variant is the same unit behaving otherwise: its parts are the unit's, unprefixed
+        return [(None, "", seg["ops"])] + [(name, "", v["ops"])
                                            for name, v in seg.get("variants", {}).items()]
     if "channels" not in recipe:
         return [(None, "", recipe["ops"])]

@@ -31,7 +31,10 @@ starting at its arrival. The window is cut where the trigger first fires once `p
 6 sigma of trigger jitter) has passed; everything before the window is the lead, rendered and
 discarded, so put the event far enough in to let the chain settle. A render in which the
 trigger does not fire, or fires too late to keep `post_s`, is refused naming the occurrence
-and the render length that would do. `level` must be stated: a scope sets its level once for
+and the render length that would do; one that fires only before `pre_s` has passed is refused
+saying to move the event later in the chain or shorten `pre_s`, which no render length cures.
+Every variant must store at the main chain's rate, so every window is the same length.
+`level` must be stated: a scope sets its level once for
 the acquisition, and "50 % of each occurrence" would move it with the occurrence.
 
 THE SCOPE'S SAMPLE CLOCK runs on through the dead time, so an occurrence does not start on a
@@ -45,18 +48,24 @@ by a later op) keeps them on the occurrence's render clock.
 ARRIVAL is the time from one occurrence's start to the next, written as a `carrier("states")`
 dwell is (`states.DISTS`): {"dist": "fixed", "t_s": T} is a period, and "exponential",
 "lognormal", "uniform" and "table" are drawn under the role `arrival`. The first occurrence
-arrives one interval after the acquisition starts. One that arrives before the previous
-captured one's render is over is MISSED, as a scope still storing a segment misses it: it is
-counted (`occurrences()[k]["missed"]`) and the next arrival is taken.
+arrives one interval after the acquisition starts. After a capture the scope is busy until its
+window ends and then for `trigger=dict(rearm_s=)` more (default 0); an occurrence arriving
+within `post_s + rearm_s` of the last captured one is MISSED, as a scope still storing misses
+it: it is counted (`occurrences()[k]["missed"]`) and the next arrival is taken. The interval
+is counted from arrival to arrival, which is trigger to trigger because the event sits at the
+same place in every occurrence's render; so the render's length (its settling lead) never
+changes which occurrences are captured or when.
 
 WHAT VARIES, and its role:
   arrival              the inter-arrival times
   variant              which chain each occurrence is (`variants=`, below)
   vary/<i>/<param>     a `ws.tol(..., per="segment")` value, one draw per occurrence
-                       (`vary/<group>` when grouped)
+                       (`vary/<group>` when grouped within a chain)
   trigger              the trigger jitter, one draw per occurrence
   segment/<k>/<role>   occurrence k's own randomness (`segment/4/noise/2`)
-  unit/...             a unit-to-unit part, fixed for the whole acquisition (`unit(seed)`)
+  unit/...             a unit-to-unit part, fixed for the whole acquisition (`unit(seed)`);
+                       a variant is the same unit, so its part at the same op and parameter
+                       is the same draw (`unit/<i>/<param>`, never prefixed)
 `contrast(name)` re-rolls exactly one; `segment/*/<role>` names that role in every
 occurrence. A `ws.trend` draws nothing and has no role: it is a cause, and
 `without("trend/<i>/<param>")` (or "trend/*") is the same acquisition with it held at its
@@ -64,8 +73,8 @@ first value -- every draw, arrival and noise sample the same.
 
 VARIANTS. `variants={"late": dict(p=0.02, chain=other)}` is another chain an occurrence is
 with probability p (the main chain otherwise), drawn under `variant`; `dict(at=[17, 140],
-chain=other)` states which occurrences instead. A variant's own parts are named under it
-(`late/vary/2/by`, `late/unit/1/r_source`). It is a parameter here and not a `switch`:
+chain=other)` states which occurrences instead. A variant's per-occurrence draws are named
+under it (`late/vary/2/by`, `late/vary/<group>`); its unit parts are the unit's. It is a parameter here and not a `switch`:
 `switch` selects between inputs WITHIN one record, sample by sample, by a signal; a variant
 is one choice per occurrence, of which the record is made.
 
@@ -102,8 +111,8 @@ _NOT_HERE = {
     "n_segments": "n= of Segments is how many occurrences, each one window",
     "average": "averaging occurrences is not supported: average the rows of "
                "x.reshape(n, -1) yourself, knowing each is a different occurrence",
-    "holdoff_s": "an occurrence that arrives during the previous one's render is missed and "
-                 "counted; a holdoff would be a second rule for the same thing",
+    "holdoff_s": "the scope's dead time after a capture is post_s plus rearm_s=; an "
+                 "occurrence arriving inside it is missed and counted",
     "on": "the trigger is found on the occurrence itself; triggering one channel from "
           "another is a Channels record, not yet segmented (BACKLOG #97)",
 }
@@ -116,12 +125,19 @@ def _arrival(spec):
             f"Segments: arrival={spec!r} is a number, which could be a period or a mean. Say "
             f"which: dict(dist='fixed', t_s={spec!r}) is a period, dict(dist='exponential', "
             f"mean_s={spec!r}) a Poisson stream.")
+    if not isinstance(spec, dict) or spec.get("dist") not in STATES.DISTS:
+        raise ValueError(
+            f"Segments: arrival is a dict whose 'dist' is one of {sorted(STATES.DISTS)}, as a "
+            f"carrier('states') dwell is: dict(dist='fixed', t_s=...) for a period, "
+            f"dict(dist='exponential', mean_s=...) for a Poisson stream; got {spec!r}.")
     STATES._dwell(spec, "Segments: arrival")
     return {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in spec.items()}
 
 
-def _chain_ops(v, who, seed, grid, pre):
-    """One chain as given -> its op list, its unit parts drawn under the record's seed."""
+def _chain_ops(v, who, seed, grid):
+    """One chain as given -> its op list, its unit parts drawn under the record's seed. A
+    variant's unit parts take the same roles as the main chain's (`unit/<i>/<param>`): a
+    variant is the same unit behaving otherwise, so the same part is the same draw."""
     from .compose import Signal
     if isinstance(v, dict) and set(v) == {"ops"}:
         v = v["ops"]
@@ -140,7 +156,7 @@ def _chain_ops(v, who, seed, grid, pre):
     if not isinstance(v, (list, tuple)) or not v:
         raise ValueError(f"Segments: {who} is a Signal or {{'ops': [...]}} with at least one "
                          f"op, got {type(v).__name__}.")
-    ops = [TOL.resolve(i, dict(o), seed, pre=pre) for i, o in enumerate(v)]
+    ops = [TOL.resolve(i, dict(o), seed) for i, o in enumerate(v)]
     for i, o in enumerate(ops):
         OPKEYS.check(o.get("op"), o)
         if o["op"] in ("trigger", "use"):
@@ -157,6 +173,11 @@ def _chain_ops(v, who, seed, grid, pre):
     return ops
 
 
+def _scope(t):
+    """The trigger's own parameters: what `trigger.apply` reads."""
+    return {k: v for k, v in t.items() if k != "rearm_s"}
+
+
 def _trigger(t):
     if not isinstance(t, dict):
         raise ValueError("Segments: trigger= is a dict of `trigger`'s parameters, e.g. "
@@ -164,7 +185,12 @@ def _trigger(t):
     for k in t:
         if k in _NOT_HERE:
             raise ValueError(f"Segments: trigger does not take {k}= here -- {_NOT_HERE[k]}.")
-    q = TRIG.check(dict(t))
+    rearm = t.get("rearm_s", 0.0)
+    if isinstance(rearm, bool) or not isinstance(rearm, (int, float)) or not rearm >= 0 \
+            or not math.isfinite(rearm):
+        raise ValueError(f"Segments: trigger rearm_s= is the scope's dead time after a window "
+                         f"ends, seconds >= 0, got {rearm!r}.")
+    q = TRIG.check(_scope(t))
     if q["level"] is None:
         raise ValueError("Segments: trigger needs level=. A scope sets its level once for the "
                          "acquisition; 'midway between the extremes' of each occurrence would "
@@ -190,7 +216,7 @@ class Segments:
         self.n = int(n)
         self.arrival = _arrival(arrival)
         self.trigger = _trigger(trigger)
-        self.chains = {MAIN: _chain_ops(chain, "the chain", self.seed, grid, "")}
+        self.chains = {MAIN: _chain_ops(chain, "the chain", self.seed, grid)}
         self.choose = {}                          # variant name -> {"p": ...} or {"at": [...]}
         for name, v in (variants or {}).items():
             if not isinstance(name, str) or not name or "/" in name or name == MAIN:
@@ -200,10 +226,27 @@ class Segments:
                     or set(v) - {"p", "at", "chain"}:
                 raise ValueError(f"Segments: variant {name!r} is dict(p=<probability>, "
                                  f"chain=...) or dict(at=[occurrence indices], chain=...).")
-            self.chains[name] = _chain_ops(v["chain"], f"variant {name!r}", self.seed, grid,
-                                           name + "/")
+            self.chains[name] = _chain_ops(v["chain"], f"variant {name!r}", self.seed, grid)
             self.choose[name] = {k: v[k] for k in ("p", "at") if k in v}
         self._check_choice()
+        self._check_rates()
+
+    def _window(self, name):
+        """``(stored rate, window samples)`` of chain `name`'s occurrence."""
+        from .compose import _stored_rate
+        fs = _stored_rate(self.chains[name], float(self.grid.fs), int(self.grid.n))[0]
+        return fs, TRIG.window_samples(self.trigger, fs)
+
+    def _check_rates(self):
+        fs, n_win = self._window(MAIN)
+        for name in self.choose:
+            vfs, vwin = self._window(name)
+            if (vfs, vwin) != (fs, n_win):
+                raise ValueError(
+                    f"Segments: variant {name!r} stores at {vfs:g} Sa/s, a {vwin}-sample "
+                    f"window, and the main chain at {fs:g} Sa/s, {n_win} samples. The record "
+                    f"is n windows of one length on one timebase (x.reshape(n, -1)); end the "
+                    f"variant in the same acquisition as the main chain.")
 
     def _check_choice(self):
         p = [c["p"] for c in self.choose.values() if "p" in c]
@@ -229,7 +272,7 @@ class Segments:
         "variant", "values", "ops"}]``. Draws from `st` once per role, so call it once per
         render."""
         n, fs = self.n, float(self.grid.fs)
-        render_s = int(self.grid.n) / fs
+        busy_s = float(self.trigger["post_s"]) + float(self.trigger.get("rearm_s", 0.0))
         # the variant of each occurrence: stated, else drawn
         names = sorted(k for k, c in self.choose.items() if "p" in c)
         variant = [MAIN] * n
@@ -251,7 +294,7 @@ class Segments:
                  else STATES.quantile(spec, rng.random(STATES.CHUNK)))
             for dk in d:
                 t += float(dk)
-                if t - last < render_s:
+                if t - last < busy_s:
                     skipped += 1
                     continue
                 arrive.append(t)
@@ -304,7 +347,7 @@ class Segments:
         from .compose import Signal
         from .events import EventList
         fs = float(self.grid.fs)
-        trig = {k: v for k, v in self.trigger.items()}
+        trig = _scope(self.trigger)
         rows, events, dropped = [], [], 0
         jitter = st.role("trigger")
         n_win = None
@@ -328,7 +371,17 @@ class Segments:
                                  **trig)
             except ValueError as e:
                 what = f"occurrence {k}" + (f" ({occ['variant']})" if self.choose else "")
+                early = _fires_before_arming(x, fs_now, trig)
+                if early is not None:
+                    raise ValueError(
+                        f"Segments: {what}: the trigger fires at {early:.6g} s into the "
+                        f"occurrence's render, before pre_s={float(trig['pre_s']):.6g} s (and "
+                        f"room for the trigger jitter) has passed, and never after. No render "
+                        f"length cures that: move the event later in the chain (e.g. "
+                        f"carrier('step', t_step_s=...)) or shorten pre_s.") from None
                 raise ValueError(f"Segments: {what}: " + str(e).replace(
+                    "re-arming after max(holdoff_s, pre_s + post_s), ", "").replace(
+                    ", or shorten the window or the holdoff.", ", or shorten the window.").replace(
                     " (n_segments x average)", "").replace(
                     "the long render", "this occurrence's render").replace(
                     "The long render", "This occurrence's render")) from None
@@ -370,13 +423,12 @@ class Segments:
     def stored_grid(self, x):
         """The `Grid` of what `waveform()` returned -- the windows at the rate the chain ends
         at, as `Signal.stored_grid` says for a `trigger`. Raises when `x` is not n windows."""
-        from .compose import _stored_rate
-        ops = self.chains[MAIN]
-        fs = _stored_rate(ops, float(self.grid.fs), int(self.grid.n))[0]
+        fs, n_win = self._window(MAIN)
         n = len(x) if hasattr(x, "__len__") else int(x)
-        if n != self.n * TRIG.window_samples(self.trigger, fs):
+        if n != self.n * n_win:
             raise ValueError(f"Segments.stored_grid: {n} samples is not {self.n} windows of "
-                             f"{TRIG.window_samples(self.trigger, fs)} at {fs:g} Sa/s.")
+                             f"{n_win} at {fs:g} Sa/s.")
+        ops = self.chains[MAIN]
         dom, fc = DOMAIN.trace(ops, DOMAIN.grid_for(ops, self.grid))[-1]
         return Grid(fs=fs, baud=self.grid.baud, n=n, domain=dom, fc_hz=fc)
 
@@ -384,8 +436,7 @@ class Segments:
     def _unit_roles(self):
         out = []
         for name, ops in self.chains.items():
-            out += [r for r in TOL.roles(ops, "" if name == MAIN else name + "/")
-                    if r not in out]
+            out += [r for r in TOL.roles(ops) if r not in out]
         return out
 
     def roles(self):
@@ -436,7 +487,7 @@ class Segments:
             if not units:
                 self.unit(0)                              # the refusal: nothing is toleranced
             rec = copy.copy(self)
-            rec.chains = {name: TOL.redraw_ops(ops, seed_of, "" if name == MAIN else name + "/")
+            rec.chains = {name: TOL.redraw_ops(ops, seed_of)
                           for name, ops in self.chains.items()}
         x = rec._render(st, False)
         idle = [k for k in st.idle(roles) if k not in seed_of]
@@ -457,8 +508,7 @@ class Segments:
             raise ValueError("Segments.unit(): no part varies from unit to unit here, so there "
                              "is no unit to draw. Write one with ws.tol(...) (without per=).")
         new = copy.copy(self)
-        new.chains = {name: [TOL.resolve(i, o, int(seed), pre="" if name == MAIN else name + "/")
-                             for i, o in enumerate(TOL.stated(ops))]
+        new.chains = {name: [TOL.resolve(i, o, int(seed)) for i, o in enumerate(TOL.stated(ops))]
                       for name, ops in self.chains.items()}
         return new
 
@@ -535,6 +585,20 @@ class Segments:
         _warn_on_numeric_drift(r.get("wfmsynth_version"),
                                [o for ops in rec.chains.values() for o in ops])
         return rec
+
+
+def _fires_before_arming(x, fs, trig):
+    """The first time the condition occurs in `x` when it occurs ONLY before the scope is
+    armed (pre_s plus the jitter room), else None."""
+    q = TRIG.check(trig)
+    found = TRIG.find(x, fs, condition=q["condition"], level=q["level"], slope=q["slope"],
+                      hysteresis=q["hysteresis"], width_s=q["width_s"],
+                      runt_level=q["runt_level"])["t_s"]
+    room = TRIG.JITTER_ROOM * q["jitter_s"] + (1.0 / fs if q["jitter_s"] else 0.0)
+    armed = (q["pre_s"] + room) * (1.0 - TRIG.TIE)
+    if len(found) and found.max() < armed:
+        return float(found[0])
+    return None
 
 
 def _trend_at(spec, k, n, t_s):

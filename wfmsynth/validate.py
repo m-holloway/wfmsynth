@@ -5646,6 +5646,34 @@ check("the trigger timestamps are spaced as the stated arrival distribution draw
       f"{_seg_mean * 1e3:.3f} ms (bound 4 standard errors, "
       f"{400 * _seg_cv / np.sqrt(299):.0f} %)")
 
+# the scope's dead time is post_s + rearm_s: an independent loop over the same arrival draws
+# (role `arrival`, a quantile per uniform) decides which are captured, and two render lengths
+# capture the same occurrences at the same instants
+_seg_dt = dict(pre_s=200e-9, post_s=1.5e-6, level=0.5, rearm_s=0.5e-6)
+_seg_ex = dict(dist="exponential", mean_s=2e-6)
+_seg_runs = [_seg_ws.Segments(Signal().carrier("step", t_step_s=1e-6, tr_s=20e-9, amp=0.5,
+                                               offset=0.5), n=100, arrival=_seg_ex,
+                              trigger=_seg_dt, seed=5, grid=Grid(fs=1e9, n=_n))
+             for _n in (3000, 12000)]
+_seg_occ = [r.occurrences() for r in _seg_runs]
+_seg_tsr = [[e.params["timestamp_s"] for e in r.realize()[1] if e.kind == "trigger"]
+            for r in _seg_runs]
+_seg_u = _seg_ws.Streams(5).role("arrival").random(4096)
+_seg_t, _seg_last, _seg_take = 0.0, -np.inf, []
+for _d in -2e-6 * np.log1p(-_seg_u):
+    _seg_t += _d
+    if _seg_t - _seg_last >= 2e-6:
+        _seg_take.append(_seg_t)
+        _seg_last = _seg_t
+check("an occurrence is missed while the scope stores the last window and re-arms "
+      "(post_s + rearm_s), and the render's length changes no arrival or timestamp",
+      _seg_occ[0] == _seg_occ[1] and _seg_tsr[0] == _seg_tsr[1]
+      and np.allclose([o["arrival_s"] for o in _seg_occ[0]], _seg_take[:100], rtol=0,
+                      atol=1e-15),
+      f"100 captured of {100 + sum(o['missed'] for o in _seg_occ[0])} arrivals "
+      f"(mean gap 2 us, dead time 2 us), the same against an independent loop; renders of "
+      f"3000 and 12000 samples: identical arrivals and timestamps")
+
 _seg_count = []
 _seg_run = _seg_compose.Signal._run
 
