@@ -677,6 +677,41 @@ Split a unit dataset on `group`, not at random. MEASURED: 1.7 ohm error on a ran
 against 31.3 ohm on held-out units, where answering the nominal scores 30.2 -- the random
 split had captures of every unit on both sides.
 
+### A segmented acquisition of a rare event
+
+```python
+closure = (Signal().carrier("step", t_step_s=1e-6, tr_s=20e-9, amp=0.5, offset=0.5)
+           .gain(by=ws.tol(1.0, 10, per="segment"))         # drawn again per occurrence: vary/1/by
+           .gain(by=ws.trend("ramp", start=1.0, rate_per_s=-2e-3))  # or stop=; "step" with at= / at_s=
+           .gain(by=ws.tol(1.0, 5))                         # a unit part: one draw, variants included
+           .rx_noise(rms=0.01))                             # each occurrence's own: segment/<k>/rx_noise/4
+seg = ws.Segments(closure, n=100, seed=1,
+                  grid=ws.Grid(fs=1e9, n=3000),             # ONE occurrence's render, not the span
+                  arrival=dict(dist="lognormal", median_s=0.2, sigma=0.8),  # a states dwell; "fixed" = period
+                  trigger=dict(pre_s=200e-9, post_s=1.5e-6, level=0.5, jitter_s=0.5e-9),
+                  variants={"late": dict(p=0.05, chain=closure.copy().delay(by=300e-9))})
+x, ev = seg.realize()                                 # x.reshape(100, -1); trigger events as trigger(n_segments=)
+seg.stored_grid(x)                                    # the windows' Grid, as Signal.stored_grid after trigger
+seg.occurrences()[0]                                  # arrival_s, missed, variant, values{location: number}
+ws.segment_params(seg.recipe(), "gain", which=0)      # op_params, one dict per occurrence
+seg.roles()                                           # arrival, variant, vary/..., trigger, segment/<k>/..., unit/...
+seg.without("trend/*")                                # the cause removed; draws, arrivals, noise kept
+seg.unit(8)                                           # another unit (tol without per=), same occurrences
+ws.Segments.from_recipe(seg.recipe())                 # bit for bit
+```
+
+Each occurrence starts at its arrival and is cut where the trigger first fires after `pre_s`;
+its source is delayed by the fraction of a sample the arrival falls after one, so placement
+spreads as on a free-running scope. The scope is busy for `post_s` plus `rearm_s=` (in the
+trigger dict, default 0) after each trigger; an arrival then is missed and counted, and the
+render's length changes no arrival. A variant is the same unit: the variant above, a copy of
+`closure`, holds the same `unit/3/by` value as the main chain; its `per="segment"` draws are
+its own (`late/vary/1/by`). Refused by name: `level=None`, a bare-number `arrival`, `holdoff_s`
+/ `average` / `n_segments` / `on` in `trigger`, a render too short for the window (with the
+length that would do), a trigger that fires only before `pre_s` (move the event later), a
+variant stored at another rate, and a `per="segment"` value or a trend in a chain rendered on
+its own.
+
 ## I/Q and RF
 
 ```python

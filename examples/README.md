@@ -161,6 +161,7 @@ that goes with them.
 | [`clock_and_data.py`](clock_and_data.py) | Several channels must be correlated the way one PLL, one supply or one bit stream makes them, from one recipe |
 | [`law_and_filter.py`](law_and_filter.py) | The shape has no named op: a comparator with hysteresis, an anti-alias filter, with the delay accounted for |
 | [`triggered_capture.py`](triggered_capture.py) | The record is what a scope's trigger kept: an edge or pulse-width trigger, segmented memory, holdoff, averaging |
+| [`segmented_events.py`](segmented_events.py) | The event is rare (a relay closing, a surge) and the question is about the population: 300 occurrences, each its own draw, a drift, a rare variant, irregular arrivals -- and which kinds there are and what the drift follows |
 | [`unit_variation.py`](unit_variation.py) | Parts have tolerances and a model must generalise to units it has not seen; shows the leakage a random split hides |
 | [`composed_capture.py`](composed_capture.py) | You want to see all of the above on one two-channel triggered capture, and each cause of its jitter isolated by changing one named thing |
 | [`state_dwell.py`](state_dwell.py) | A level dwells and jumps at random times: burst noise, an idle/active schedule for a gate or a switch, 1/f noise as a sum of such processes |

@@ -53,6 +53,7 @@ DEMOS = [
     "quickstart.py",
     "realistic_scenario.py",
     "rf_measures.py",
+    "segmented_events.py",
     "sim_to_real.py",
     "state_dwell.py",
     "sub_chains.py",

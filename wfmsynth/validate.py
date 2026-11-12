@@ -5533,6 +5533,179 @@ check("a path's COMPLEX gain when the transmitter is a named chain: multipath(Si
       _pmnamed < 1e-12 and "complex and the record is a real voltage" in _pmreal,
       f"max |named - direct| = {_pmnamed:.1e}; on a voltage: {_pmreal[:60]}...")
 
+# ============================================================ segmented acquisition (GitHub #97)
+print("\n== a segmented acquisition of a rare event: each occurrence rendered on its own ==")
+import time as _seg_time                                                         # noqa: E402
+from scipy import stats as _seg_stats                                            # noqa: E402
+import wfmsynth as _seg_ws                                                       # noqa: E402
+from wfmsynth import compose as _seg_compose                                     # noqa: E402
+
+_seg_fs, _seg_n, _seg_j = 1e9, 400, 0.4e-9
+_seg_trig = dict(pre_s=100e-9, post_s=200e-9, level=0.0, jitter_s=_seg_j)
+
+
+def _seg_clock():
+    return Signal().carrier("square", f_hz=3.7e6, tr_frac=0.02).rx_noise(rms=0.01)
+
+
+def _seg_placed(x):
+    """Each window's crossing of 0, interpolated, less pre_s: in samples."""
+    out = []
+    for r in x.reshape(_seg_n, -1):
+        i = 95 + int(np.flatnonzero((r[95:-1] < 0) & (r[96:] >= 0))[0])
+        out.append(i + (0 - r[i]) / (r[i + 1] - r[i]) - 100.0)
+    return np.array(out)
+
+
+_seg_long = Signal(seed=2, grid=Grid(fs=_seg_fs, n=_seg_n * 600))
+_seg_long.ops = _seg_clock().ops
+_seg_pt = _seg_placed(_seg_long.trigger(**_seg_trig, n_segments=_seg_n).waveform())
+_seg_ps = _seg_placed(_seg_ws.Segments(
+    _seg_clock(), n=_seg_n, arrival=dict(dist="exponential", mean_s=1e-3), trigger=_seg_trig,
+    seed=2, grid=Grid(fs=_seg_fs, n=600)).waveform())
+_seg_want = float(np.sqrt(1 / 12 + (_seg_j * _seg_fs) ** 2))
+_seg_p = float(_seg_stats.ks_2samp(_seg_pt, _seg_ps).pvalue)
+check("a clock through Segments places its trigger as trigger(n_segments=) does on one long "
+      "render: pre_s - jitter plus a half-sample rounding spread uniformly by the free-running "
+      "sample clock",
+      _seg_p > 0.01 and abs(_seg_pt.std() / _seg_want - 1) < 0.15
+      and abs(_seg_ps.std() / _seg_want - 1) < 0.15,
+      f"{_seg_n} windows each: crossing rms {_seg_pt.std():.4f} (trigger) and "
+      f"{_seg_ps.std():.4f} (Segments) samples against sqrt(1/12 + jitter^2) = "
+      f"{_seg_want:.4f} (bound 15 %); two-sample KS p = {_seg_p:.3f} (bound 0.01)")
+
+_seg_g = Grid(fs=1e9, n=3000)
+
+
+def _seg_step(sag, noise=0.01):
+    return (Signal().carrier("step", t_step_s=1e-6, tr_s=20e-9, amp=0.5, offset=0.5)
+            .gain(by=_seg_ws.tol(1.0, 10, per="segment")).gain(by=sag).rx_noise(rms=noise))
+
+
+_seg_acq = _seg_ws.Segments(
+    _seg_step(_seg_ws.trend("ramp", start=1.0, stop=0.7)), n=60,
+    arrival=dict(dist="exponential", mean_s=1e-3),
+    trigger=dict(pre_s=200e-9, post_s=1.5e-6, level=0.5), seed=1, grid=_seg_g)
+_seg_x, _seg_ev = _seg_acq.realize()
+_seg_rows = _seg_x.reshape(60, -1)
+_seg_amp = np.array([p["by"] for p in _seg_ws.segment_params(_seg_acq.recipe(), "gain", 0)])
+_seg_sag = np.linspace(1.0, 0.7, 60)
+_seg_lvl = _seg_rows[:, -300:].mean(1)
+_seg_err = _seg_lvl / (_seg_amp * _seg_sag) - 1
+_seg_bound = 4 * 0.01 / np.sqrt(300) / 0.63                # 4 sigma at the lowest plateau
+check("each occurrence's drawn amplitude, read back from the recipe alone "
+      "(segment_params), is what its window shows",
+      np.abs(_seg_err).max() < _seg_bound and np.ptp(_seg_amp) > 0.15,
+      f"60 occurrences drawn over {_seg_amp.min():.3f}..{_seg_amp.max():.3f}: settled level / "
+      f"(drawn x trend) - 1 = {_seg_err.std():.1e} rms, worst {np.abs(_seg_err).max():.1e} "
+      f"(bound {_seg_bound:.1e}, the 0.01 rms noise over 300 samples)")
+
+_seg_flat = _seg_acq.without("trend/*")
+_seg_y, _seg_fev = _seg_flat.realize()
+_seg_nw = len(_seg_x) // 60
+_seg_sx = [e.params["start"] for e in _seg_ev if e.kind == "trigger"]
+_seg_sy = [e.params["start"] for e in _seg_fev if e.kind == "trigger"]
+_seg_noise = 0.0
+for _k in range(60):
+    _d = _seg_sy[_k] - _seg_sx[_k]
+    _u = _seg_x[_k * _seg_nw:(_k + 1) * _seg_nw][max(_d, 0):][:20]
+    _v = _seg_y[_k * _seg_nw:(_k + 1) * _seg_nw][max(-_d, 0):][:20]
+    _seg_noise = max(_seg_noise, float(np.abs(_u - _v).max()))
+_seg_same = (
+    [o["arrival_s"] for o in _seg_acq.occurrences()]
+    == [o["arrival_s"] for o in _seg_flat.occurrences()]
+    and [o["values"]["vary/1/by"] for o in _seg_acq.occurrences()]
+    == [o["values"]["vary/1/by"] for o in _seg_flat.occurrences()])
+_seg_k = np.arange(60.0)
+_seg_slope = np.polyfit(_seg_k, _seg_lvl / _seg_amp, 1)[0]
+_seg_fslope, _seg_fcov = np.polyfit(
+    _seg_k, _seg_y.reshape(60, -1)[:, -300:].mean(1) / _seg_amp, 1, cov=True)
+_seg_fse = float(np.sqrt(_seg_fcov[0, 0]))
+check("without('trend/*') removes the trend and nothing else: arrivals and draws identical, "
+      "the noise before the step equal, the slope across occurrences gone",
+      _seg_same and _seg_noise < 1e-13 and abs(_seg_slope / (-0.3 / 59) - 1) < 0.02
+      and abs(_seg_fslope[0]) < 4 * _seg_fse,
+      f"slope of level / drawn: {_seg_slope:.3e} per occurrence with the trend (stated "
+      f"{-0.3 / 59:.3e}, bound 2 %), {_seg_fslope[0]:.1e} +/- {_seg_fse:.1e} without; arrivals "
+      f"and draws identical: {_seg_same}; pre-step samples differ by at most {_seg_noise:.1e}")
+
+_seg_ln = dict(dist="lognormal", median_s=2e-3, sigma=0.6)
+_seg_la = _seg_ws.Segments(_seg_step(1.0), n=300, arrival=_seg_ln,
+                           trigger=dict(pre_s=200e-9, post_s=1.5e-6, level=0.5), seed=3,
+                           grid=_seg_g)
+_seg_ts = np.array([e.params["timestamp_s"] for e in _seg_la.realize()[1]
+                    if e.kind == "trigger"])
+_seg_gaps = np.diff(_seg_ts)                  # from the events: crossing to crossing
+_seg_lp = float(_seg_stats.kstest(_seg_gaps, _seg_stats.lognorm(s=0.6, scale=2e-3).cdf).pvalue)
+_seg_mean = 2e-3 * np.exp(0.6 ** 2 / 2)
+_seg_cv = float(np.sqrt(np.exp(0.6 ** 2) - 1))            # the lognormal's std / mean
+check("the trigger timestamps are spaced as the stated arrival distribution draws",
+      _seg_lp > 0.01 and abs(_seg_gaps.mean() / _seg_mean - 1) < 4 * _seg_cv / np.sqrt(299),
+      f"299 gaps between trigger timestamps against lognormal(median 2 ms, sigma 0.6): KS p = "
+      f"{_seg_lp:.3f} (bound 0.01), mean {_seg_gaps.mean() * 1e3:.3f} ms against "
+      f"{_seg_mean * 1e3:.3f} ms (bound 4 standard errors, "
+      f"{400 * _seg_cv / np.sqrt(299):.0f} %)")
+
+# the scope's dead time is post_s + rearm_s: an independent loop over the same arrival draws
+# (role `arrival`, a quantile per uniform) decides which are captured, and two render lengths
+# capture the same occurrences at the same instants
+_seg_dt = dict(pre_s=200e-9, post_s=1.5e-6, level=0.5, rearm_s=0.5e-6)
+_seg_ex = dict(dist="exponential", mean_s=2e-6)
+_seg_runs = [_seg_ws.Segments(Signal().carrier("step", t_step_s=1e-6, tr_s=20e-9, amp=0.5,
+                                               offset=0.5), n=100, arrival=_seg_ex,
+                              trigger=_seg_dt, seed=5, grid=Grid(fs=1e9, n=_n))
+             for _n in (3000, 12000)]
+_seg_occ = [r.occurrences() for r in _seg_runs]
+_seg_tsr = [[e.params["timestamp_s"] for e in r.realize()[1] if e.kind == "trigger"]
+            for r in _seg_runs]
+_seg_u = _seg_ws.Streams(5).role("arrival").random(4096)
+_seg_t, _seg_last, _seg_take = 0.0, -np.inf, []
+for _d in -2e-6 * np.log1p(-_seg_u):
+    _seg_t += _d
+    if _seg_t - _seg_last >= 2e-6:
+        _seg_take.append(_seg_t)
+        _seg_last = _seg_t
+check("an occurrence is missed while the scope stores the last window and re-arms "
+      "(post_s + rearm_s), and the render's length changes no arrival or timestamp",
+      _seg_occ[0] == _seg_occ[1] and _seg_tsr[0] == _seg_tsr[1]
+      and np.allclose([o["arrival_s"] for o in _seg_occ[0]], _seg_take[:100], rtol=0,
+                      atol=1e-15),
+      f"100 captured of {100 + sum(o['missed'] for o in _seg_occ[0])} arrivals "
+      f"(mean gap 2 us, dead time 2 us), the same against an independent loop; renders of "
+      f"3000 and 12000 samples: identical arrivals and timestamps")
+
+_seg_count = []
+_seg_run = _seg_compose.Signal._run
+
+
+def _seg_counting(self, *a, **k):
+    out = _seg_run(self, *a, **k)
+    _seg_count.append(len(out[0] if isinstance(out, tuple) else out))
+    return out
+
+
+_seg_took, _seg_spans, _seg_ok_count = [], [], True
+_seg_compose.Signal._run = _seg_counting
+try:
+    for _mean in (1e-3, 1e3):
+        _seg_count.clear()
+        _seg_c = _seg_ws.Segments(_seg_step(1.0), n=100,
+                                  arrival=dict(dist="exponential", mean_s=_mean),
+                                  trigger=dict(pre_s=200e-9, post_s=1.5e-6, level=0.5),
+                                  seed=1, grid=_seg_g)
+        _t0 = _seg_time.perf_counter()
+        _seg_c.waveform()
+        _seg_took.append(_seg_time.perf_counter() - _t0)
+        _seg_spans.append(_seg_c.occurrences()[-1]["arrival_s"])
+        _seg_ok_count &= _seg_count == [_seg_g.n] * 100
+finally:
+    _seg_compose.Signal._run = _seg_run
+check("rendering costs n x the occurrence's render, whatever the span the arrivals cover",
+      _seg_ok_count and _seg_took[1] / _seg_took[0] < 2.0,
+      f"100 occurrences of {_seg_g.n} samples rendered over spans of {_seg_spans[0]:.3g} s and "
+      f"{_seg_spans[1]:.3g} s (a render of the span at 1 GSa/s: {_seg_spans[1] * 1e9:.2g} "
+      f"samples); time ratio {_seg_took[1] / _seg_took[0]:.2f} (bound 2)")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

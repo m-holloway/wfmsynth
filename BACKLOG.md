@@ -950,6 +950,66 @@ named channel models and OFDM numerologies (the caller's registry).
     `state` event in force at the window's start instead of clipping it.
 11. *`Signal.awgn(eb_n0_db=)` on an `ofdm` source* does not infer bits per symbol.
 
+### #97: a segmented acquisition of a rare event
+
+**Status:** DELIVERED in 0.47.0 as `ws.Segments` (`wfmsynth/segments.py`), with
+`ws.tol(..., per="segment")` / `ws.corners(..., per="segment")`, `ws.trend` and
+`ws.segment_params`. User-facing text: COOKBOOK "Many occurrences of a rare event: Segments";
+worked example `examples/segmented_events.py`. Nothing that existed moved:
+`tools/digest_compare.py` against main, 31 chains and 588 example renders in common, 0 differ.
+
+**The issue's three questions, answered.**
+
+- *A composition, or an option on `trigger`?* A composition beside `Channels`. `trigger`
+  cuts a render it is handed; an occurrence needs a render of its own, and what differs between
+  occurrences belongs to the acquisition rather than to an op. It reuses `trigger.apply` for
+  each occurrence, so the output and the `trigger` events are `trigger(n_segments=)`'s
+  (`docs/ARCHITECTURE.md`, "Where chains meet").
+- *What the per-segment level is called, and does it nest in a unit?* `per="segment"` (the
+  event field is `params.segment`, and "occurrence" is the word for the thing captured). Yes:
+  a unit's values stay put for the acquisition and the segment's are drawn under it
+  (`vary/<i>/<param>`), so several units each captured n times is `[seg.unit(s) for s in
+  seeds]`. A part that varies at both levels is two factors on two ops, not a tolerance
+  inside a tolerance (still refused).
+- *How far should carried state go?* None in this release: see deferred item 1.
+
+**Decisions.** A variant is a parameter of `Segments` (`variants=`), not `switch`: `switch`
+selects within a record, sample by sample, by a signal; a variant is one choice per
+occurrence. Removing a cause needed a mechanism the library did not have
+(`composed_capture.py` rebuilds with the number changed): a trend is the one cause with
+nothing drawn, so `Segments.without("trend/...")` holds it at its first value and keeps every
+draw. An arrival is a `carrier("states")` dwell spec through the same parser; a bare number is
+refused (a period or a mean?). Each occurrence's source is delayed by the fraction of a sample
+its arrival falls after one, so the trigger's sub-sample placement spreads as on a
+free-running scope: measured against `trigger(n_segments=400)`, placement rms 0.4790 against
+0.4810 samples, two-sample KS p = 0.81. The scope's dead time is `post_s` plus `rearm_s=`
+(default 0), counted arrival to arrival, so the render's length never changes which
+occurrences are captured. A variant is the same unit: a part it holds at the same op and
+parameter as the main chain is the same draw. `level=None` is refused: a scope's level is
+set once.
+
+**Deferred, each with the reason.**
+
+1. *State carried from one occurrence to the next.* The seam is `Segments._plan`, which
+   resolves each occurrence's ops before any renders; a carrier would be a value read off
+   occurrence k's render and written into occurrence k + 1's ops there. The first named
+   carriers would be a capacitor's residual charge (the settled level at the window's end,
+   feeding the next occurrence's initial level) and a temperature (a first-order lag of
+   dissipated energy per occurrence, feeding a `trend`-like parameter). Each needs a stated
+   law and its own refusal when the render does not reach steady state.
+2. *A `Channels` record as the occurrence.* Each channel's source would need the same
+   sub-sample delay, and a shared signal chain is rendered once for all channels, so
+   `channels._Render` would need an occurrence clock. Until then a multi-channel rare event
+   is a `Channels` record per occurrence in `dataset`, or one channel.
+3. *A trend that is another chain sampled at the arrivals.* The chain's render length would
+   depend on the arrival draw, so re-rolling `arrival` would change the trend's own render.
+4. *`average=`, `holdoff_s=`, `on=` in `Segments(trigger=)`.* Refused by name with what to
+   do; the dead time is `post_s + rearm_s`, and a holdoff would be a second name for it.
+5. *An op after the source that states its own instants* (`events(on="times")`, a later
+   sub-chain) keeps them on the occurrence's render clock, not shifted by the sub-sample
+   delay. Stated in `wfmsynth.segments`; a fix needs a time origin every such op reads.
+6. *An optical field as the occurrence* (the delay on a field needs its laser's frame).
+
 ## Known limitations and claim boundaries
 
 Keep these statements synchronized with user-facing documentation:
