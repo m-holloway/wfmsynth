@@ -156,11 +156,27 @@ class EventList:
         return g
 
 
-def rescale(events, scale, n):
-    """Move `events` onto a record stored at `scale` times the rate they were placed at and
-    `n` samples long, in place: `sample` floored onto the new grid, `width` scaled (never
-    below one sample), `t_s` kept -- time did not move. An event whose sample is past the end
-    of the shorter record is no longer on it and is removed."""
+def cut(e, stop, fs):
+    """End the event `e` at sample `stop` of the clock it is on -- where a `sequence` segment,
+    a window or the record ends. Most events are an instant and are untouched. One that
+    states an EXTENT is cut to the part before `stop` and says so: a `state` interval's
+    `dwell_s` (what `states.intervals` reads its end from), an `ofdm_symbol`'s `width`; each
+    then has ``complete=False`` in its params."""
+    if e.kind == "state" and e.t_s is not None:
+        left = stop / fs - e.t_s
+        if left < e.params["dwell_s"]:
+            e.params = dict(e.params, dwell_s=max(float(left), 0.0), complete=False)
+    elif e.kind == "ofdm_symbol" and e.sample + e.width > stop:
+        e.width = max(int(stop) - int(e.sample), 1)
+        e.params = dict(e.params, complete=False)
+
+
+def rescale(events, scale, n, fs):
+    """Move `events` onto a record stored at `scale` times the rate they were placed at --
+    now `fs` -- and `n` samples long, in place: `sample` floored onto the new grid, `width`
+    scaled (never below one sample), `t_s` kept -- time did not move. An event whose sample
+    is past the end of the shorter record is no longer on it and is removed, and one whose
+    extent runs past that end is cut there (`cut`)."""
     kept = []
     for e in events:
         pos = e.sample if scale == 1.0 else int(math.floor(e.sample * scale))
@@ -169,6 +185,7 @@ def rescale(events, scale, n):
         e.sample = pos
         if e.width is not None and scale != 1.0:
             e.width = max(int(math.ceil(e.width * scale)), 1)
+        cut(e, n, fs)
         kept.append(e)
     events[:] = kept
 
@@ -178,7 +195,8 @@ def shift(events, by, fs, n):
     record), in place. The output at time t is the input at ``t - by(t)``, so an event at input
     sample s arrives where ``t = s + by(t)``: `sample` and `t_s` are later by the delay AT THE
     ARRIVAL, found by iterating that (it converges because a delay changes by less than one
-    second per second). One delayed past the end of the `n`-sample record is removed."""
+    second per second). One delayed past the end of the `n`-sample record is removed, and one
+    whose extent now runs past that end is cut there (`cut`)."""
     kept = []
     for e in events:
         if np.ndim(by) == 0:
@@ -194,6 +212,7 @@ def shift(events, by, fs, n):
         e.sample = pos
         if e.t_s is not None:
             e.t_s = float(e.t_s + d)
+        cut(e, n, fs)
         kept.append(e)
     events[:] = kept
 

@@ -417,13 +417,15 @@ def apply(x, fs, *, pre_s, post_s, condition="edge", level=None, slope="rising",
 
 
 def _retime(events, starts, n_win, fs, average):
-    """Move the long render's events onto the delivered record, in place; return how many
-    fell outside every window. Windows never overlap, so an event is in at most one."""
+    """Move the long render's events onto the delivered record, in place, each cut where its
+    window ends (`events.cut`); return how many fell outside every window. Windows never overlap, so an event is in at most one."""
+    from .events import cut
     kept = []
     for e in events:
         k = int(np.searchsorted(starts, e.sample, "right")) - 1
         if k < 0 or e.sample >= starts[k] + n_win:
             continue
+        cut(e, int(starts[k]) + n_win, fs)                 # the window ends what was under way
         seg = k // average
         move = seg * n_win - int(starts[k])
         e.sample += move

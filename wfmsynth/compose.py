@@ -3928,7 +3928,7 @@ class Signal:
                 # the labels follow the samples onto the stored record: its rate, its length
                 was_fs, now_fs = (_stored_rate(ops[:k], float(grid.fs), int(grid.n),
                                                peak_ok=True)[0] for k in (i, i + 1))
-                EV.rescale(sink, now_fs / was_fs, x.shape[-1])
+                EV.rescale(sink, now_fs / was_fs, x.shape[-1], now_fs)
             if doms[i][0] in DOMAIN.COMPLEX and not np.iscomplexobj(x):
                 raise ValueError(f"{op['op']} (op {i}) returned a real array for a complex "
                                  f"baseband record: it dropped the imaginary part. An op "

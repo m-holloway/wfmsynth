@@ -132,6 +132,62 @@ def test_a_censored_interval_says_so_and_is_not_a_draw():
     assert ks.statistic < KS_1PCT / 20
 
 
+CUTS = {
+    "sequence": (lambda s: Signal(seed=4, grid=Grid(fs=1e6, n=1 << 14)).sequence(
+        [{"chain": s, "duration_s": 3e-3}, {"chain": Signal().carrier("dc", level=0.5)}]), 3e-3),
+    "sample_clock": (lambda s: _on(s).sample_clock(n_out=4096), 4096e-6),
+    "delay": (lambda s: _on(s).delay(by=1.5e-3), (1 << 14) / 1e6),
+    "trigger": (lambda s: _on(s).trigger(pre_s=0.5e-3, post_s=1.5e-3, level=0.5), 2e-3),
+}
+
+
+def _on(s):
+    out = Signal(seed=4, grid=Grid(fs=1e6, n=1 << 14))
+    out.ops = [dict(o) for o in s.ops]
+    return out
+
+
+@pytest.mark.parametrize("name", sorted(CUTS))
+def test_an_interval_that_a_later_cut_ends_stops_there_and_says_so(name):
+    """A segment's end, a shorter stored record, the record's end after a delay, a trigger
+    window: the interval under way is cut where the samples are, and is not a draw."""
+    build, t_cut = CUTS[name]
+    sig = build(Signal().carrier("states", dwell=4e-4))
+    x, ev = sig.realize()
+    iv = S.intervals(ev)
+    last = iv[-1]
+    print(f"{name}: last interval {last['t_start_s']:.6f} .. {last['t_stop_s']:.6f} s, cut at "
+          f"{t_cut:.6f} s, complete={last['complete']}")
+    assert max(r["t_stop_s"] for r in iv) <= t_cut + 1e-12
+    assert abs(last["t_stop_s"] - t_cut) < 1e-9 and not last["complete"]
+    # the intervals tile the record up to the cut, and the samples hold each one's level
+    for a, b in zip(iv[:-1], iv[1:]):
+        assert abs(a["t_stop_s"] - b["t_start_s"]) < 1e-9
+    for r in iv:
+        k = int(0.5 * (r["t_start_s"] + r["t_stop_s"]) * 1e6)
+        if r["t_stop_s"] - r["t_start_s"] > 20e-6:
+            assert abs(x[k] - r["level"]) < 0.02, (r, x[k])
+
+
+def test_intervals_refuses_an_at_that_nothing_is_at_and_lists_what_is():
+    busy = Signal().carrier("states", dwell=20e-6)
+    sig = Signal(seed=1, grid=G).carrier("dc", level=1.0).gate(by=busy)
+    ev = sig.event_list()
+    assert len(S.intervals(ev, at="gate/1/by")) == len(S.intervals(ev)) > 10
+    with pytest.raises(ValueError, match=r"no `state` event is at 'gate/2/by'.*\['gate/1/by'\]"):
+        S.intervals(ev, at="gate/2/by")
+    with pytest.raises(ValueError, match="holds no `state` event at all"):
+        S.intervals(Signal(seed=1, grid=G).carrier("dc", level=1.0).event_list(), at="")
+    # in a Channels record a chain brought in by `use` keeps its name in front
+    rec = ws.Channels({"rx": Signal().use("tx").gain(by=0.5)},
+                      shared={"tx": Signal().carrier("dc", level=1.0).gate(by=busy)},
+                      seed=1, grid=G)
+    ev = rec.realize()[1]["rx"]
+    with pytest.raises(ValueError, match=r"at 'gate/1/by'.*\['tx/gate/1/by'\]"):
+        S.intervals(ev, at="gate/1/by")
+    assert len(S.intervals(ev, at="tx/gate/1/by")) > 10
+
+
 # ------------------------------------------------------------------ occupancy
 P3 = [[0, 0.3, 0.7], [0.5, 0, 0.5], [1, 0, 0]]
 D3 = [5e-6, {"dist": "lognormal", "median_s": 1e-6, "sigma": 0.8},

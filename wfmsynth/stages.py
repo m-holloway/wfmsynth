@@ -442,10 +442,13 @@ def refuse_law(kind, domain):
 
 def window_events(events, window, fs):
     """Events realised on a lead-in render, re-expressed on the DELIVERED window: those inside
-    it, with `sample` and `t_s` measured from the window's first sample."""
+    it, with `sample` and `t_s` measured from the window's first sample, and an extent that
+    runs past the window cut at its end."""
+    from .events import cut
     out = []
     for e in events:
         if window.start <= e.sample < window.stop:
+            cut(e, window.stop, fs)
             e.sample -= window.start
             if e.t_s is not None:
                 e.t_s -= window.start / fs

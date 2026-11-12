@@ -72,11 +72,11 @@ import numbers
 import numpy as np
 
 from . import subchain as SUB
-from .events import Event
+from .events import Event, cut
 
 JOINS = ("cut", "crossfade", "hold")
 STATES = ("restart", "continue")
-_SEGMENT_KEYS = ("chain", "duration_s", "state")
+_SEGMENT_KEYS = ("chain", "duration_s", "state", "label")
 GRID_TOL = 1e-6           # samples: how far t * fs may be from a whole number and still be on it
 
 
@@ -236,7 +236,8 @@ def splice(waves, plan, join="cut", m=0):
 def _render(spec, streams, grid, at, who, keep=None, shift=0, domain="real", is_record=False):
     """One sub-chain on the record's grid. Its events reach the record's list only if they
     fall in `keep` (a sample range of the CHAIN's own time), moved by `shift` samples onto the
-    record's -- a segment that restarts has its own clock. `is_record`: its samples become
+    record's -- a segment that restarts has its own clock -- and one whose extent runs past
+    `keep` (a state's dwell, an OFDM symbol) is cut where the segment ends. `is_record`: its samples become
     the record's, so its events are on the record (`Event.on_record`)."""
     sink = getattr(streams, "sink", None)
     if sink is None or keep is None:
@@ -247,6 +248,7 @@ def _render(spec, streams, grid, at, who, keep=None, shift=0, domain="real", is_
                    is_record=is_record)
     for e in own:
         if keep[0] <= e.sample < keep[1]:
+            cut(e, keep[1], grid.fs)                 # the segment ends what was under way
             e.sample += shift
             if e.t_s is not None:
                 e.t_s += shift / grid.fs

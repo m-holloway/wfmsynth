@@ -487,7 +487,11 @@ def _render(rg):
 
 
 def run(params, grid, idx, n=None, sink=None):
-    """The `ofdm` op: the record, and one event per symbol boundary."""
+    """The `ofdm` op: the record, and one `ofdm_symbol` event per symbol: `t_s` is where its
+    prefix starts and ``t_s + params["cp_s"]`` where its useful part does (both move with the
+    event through a `delay`, a `sequence` or a `trigger`), `width` is its samples, and
+    `complete` is False for one a `sequence` segment or a window cut short (`events.cut`):
+    the complete ones are the rows of `Signal.transmitted()`."""
     pl = _resolved(params, grid, n)
     x, fs = _render(pl), float(grid.fs)
     if sink is not None:
@@ -499,7 +503,7 @@ def run(params, grid, idx, n=None, sink=None):
                 t_s=float(pl["start"][i] / fs), width=int(pl["samples"][i]),
                 placement=f"ofdm/{idx}", on_record=False,
                 params={"symbol": i, "cp_s": float(pl["cp"][i] / pl["fft_rate_hz"]),
-                        "t_useful_s": float(pl["t_s"][i])}))
+                        "complete": True}))
     return x
 
 

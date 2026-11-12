@@ -256,9 +256,43 @@ def test_every_symbol_boundary_is_an_event_and_none_is_a_defect():
     assert [e.width for e in marks] == list(pl["samples"]) == [168, 152] * 6
     assert [e.params["symbol"] for e in marks] == list(range(12))
     assert marks[1].t_s == 168 / g.fs and marks[1].params["cp_s"] == 12 / RATE
-    assert marks[1].params["t_useful_s"] == sig.transmitted()[1][1]
+    assert all(e.params["complete"] for e in marks)
+    assert [e.t_s + e.params["cp_s"] for e in marks] == pytest.approx(sig.transmitted()[1],
+                                                                      abs=1e-15)
     assert marks[0].placement == "ofdm/0"
     assert not ev.mask().any() and ev.on_record() == []      # structure, not a label
+
+
+def useful_starts(sig):
+    return [e.t_s + e.params["cp_s"] for e in sig.event_list()
+            if e.kind == "ofdm_symbol" and e.params["complete"]]
+
+
+def test_a_symbols_event_is_on_the_records_clock_through_a_sequence_and_a_delay():
+    """Where the useful part starts is `t_s + cp_s`, and both follow the event."""
+    o = dict(NUM, constellation="qpsk", prbs=7)
+    seq = Signal(seed=1, grid=Grid(fs=RATE, n=800)).sequence(
+        [{"chain": Signal().ofdm(**o), "duration_s": 240 / RATE}, {"chain": Signal().ofdm(**o)}])
+    assert useful_starts(seq) == pytest.approx(seq.transmitted()[1], abs=1e-15)
+    assert len(useful_starts(seq)) == 10
+    late = Signal(seed=1, grid=grid(40, fc_hz=1e9)).ofdm(**o).delay(by=100e-6)
+    want = late.transmitted()[1] + 100e-6
+    whole = want + 64 / RATE <= 40 * 80 / RATE + 1e-12            # its useful part is in the record
+    assert whole.sum() == 15
+    assert useful_starts(late) == pytest.approx(want[whole], abs=1e-12)
+
+
+def test_a_symbol_that_a_segment_or_the_record_cuts_says_so_and_is_not_in_transmitted():
+    o = dict(NUM, constellation="qpsk", prbs=7)
+    seq = Signal(seed=1, grid=Grid(fs=RATE, n=800)).sequence(
+        [{"chain": Signal().ofdm(**o), "duration_s": 200 / RATE}, {"chain": Signal().ofdm(**o)}])
+    ev = [e for e in seq.event_list() if e.kind == "ofdm_symbol"]
+    assert [(e.sample, e.width, e.params["complete"]) for e in ev] == (
+        [(0, 80, True), (80, 80, True), (160, 40, False)]
+        + [(200 + 80 * k, 80, True) for k in range(7)] + [(760, 40, False)])
+    assert max(e.sample + e.width for e in ev) == 800           # none runs off the record
+    assert useful_starts(seq) == pytest.approx(seq.transmitted()[1], abs=1e-15)
+    assert len(seq.transmitted()[1]) == 9
 
 
 # ------------------------------------------------------------------ frames come from the joins

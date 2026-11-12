@@ -53,7 +53,10 @@ GROUND TRUTH. Every interval is a `state` event at the instant it is entered (`t
 samples), with `params` = {"state", "level", "dwell_s", "complete"}; `intervals()` reads them
 back as a table. `complete` is False for an interval the record cut -- the one in force at
 t = 0 under a stationary start, and the last -- whose `dwell_s` is the part inside the record
-and so is NOT a draw from the stated distribution. `occupancy()` is the fraction of time the
+and so is NOT a draw from the stated distribution. The same holds for an interval a LATER cut
+ends: the end of a `sequence` segment, of a `trigger` / `acquire` / `sample_clock(n_out=)`
+window, or of the record after a `delay` (`events.cut`). An interval already in force when
+such a window BEGINS has no event in it at all. `occupancy()` is the fraction of time the
 process spends in each state.
 
 USED DIRECTLY it is burst noise: add it with `combine`. As `gate(by=)` or `switch(select=)` it
@@ -399,7 +402,21 @@ def intervals(events, at=None):
     with `t_start_s`, `t_stop_s`, `state`, `level` and `complete`.
 
     `at` picks one source when a record holds several: the namespace of the sub-chain it is
-    in (`"gate/1/by"`, `"combine/1/others/0"`), or `""` for the record's own source."""
+    in (`"gate/1/by"`, `"combine/1/others/0"`), or `""` for the record's own source. In a
+    `Channels` record a chain brought in by `use` keeps its name in front (`"tx/gate/1/by"`).
+    An `at` no `state` event carries is refused with the ones that are there: an empty table
+    would read as "never on".
+
+    An interval that a `sequence` segment, a window (`trigger`, `acquire`,
+    `sample_clock(n_out=)`) or a `delay` ended early stops where it was cut, with `complete`
+    False (`events.cut`)."""
+    there = sorted({e.at for e in events if e.kind == "state"})
+    if at is not None and at not in there:
+        raise ValueError(
+            f"states.intervals: no `state` event is at {at!r}. "
+            + (f"This event list has them at {there} ('' is the record's own source)."
+               if there else "This event list holds no `state` event at all: was it made "
+                             "by a chain with a carrier('states') in it?"))
     out = [{"t_start_s": e.t_s, "t_stop_s": e.t_s + e.params["dwell_s"],
             "state": e.params["state"], "level": e.params["level"],
             "complete": e.params["complete"]}
