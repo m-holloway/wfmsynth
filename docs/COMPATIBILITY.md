@@ -131,9 +131,10 @@ Being honest about the edges is what makes the rest credible.
 - **The `JUDGEMENT`-grade models.** Fitted shapes (`resonant_reflection`, the nonlinearity
   defaults, the crosstalk kernels) may be re-fitted as better evidence arrives. Such a re-fit is
   a Tier 2(c) change and goes through the same gate. See [`FIDELITY.md`](FIDELITY.md).
-- **The list `roles()` returns.** It names the randomness a chain draws, and it grows when a
-  role that was always drawn starts being listed (0.46.0 added `timing`, `rx_noise`, `timebase`
-  and sub-chain roles). The draws themselves, and so the samples, are Tier 2.
+- **The list `roles()` returns.** It names the randomness a chain draws, and it changes when
+  the list is made truer: 0.46.0 added every role that draws only under a condition
+  (`acquire`, `store`, `tia`, sub-chain roles, ...) and removed the few that were listed and
+  drew nothing. The draws themselves, and so the samples, are Tier 2.
 - **Warnings.** New ones may appear in any release. They are how this library says "this is
   probably not what you meant", and adding one is not a breaking change. Run with
   `-W error` in CI if you want them to be.

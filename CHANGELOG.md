@@ -75,21 +75,36 @@ The rule that decided what became an op and what did not is in
   recipe, which keeps both it and its stated tolerance. `Signal.unit(seed)` /
   `Channels.unit(seed)` is another unit under the same noise; `ws.unit_dataset` builds units ×
   captures and `ws.unit_of(recipe)` is the key for a held-out-unit split.
-- **Complex baseband records** (#81). `Grid(domain="iq", fc_hz=)`, an `iq` source (BPSK, QPSK,
-  QAM-16/64 or literal symbols, root-raised-cosine), `upconvert` to a real passband record and
-  `downconvert` back with a stated low-pass, and `Signal.transmitted()` as ground truth. An op
-  is real-only unless it has opted in (`wfmsynth.domain`), so nothing drops an imaginary part.
+- **Complex baseband records** (#81). An `iq` source (BPSK, QPSK, QAM-16/64 or literal
+  symbols, root-raised-cosine), `upconvert` to a real passband record and `downconvert` back
+  with a stated low-pass (`lpf=dict(pass_hz=, stop_hz=, atten_db=)`, `fs_out_hz=`), and
+  `Signal.transmitted()` as ground truth. A record's domain follows its source: `iq(...)`, a
+  complex `capture` or a `sequence` of I/Q chains makes it complex baseband with no more
+  said, `Grid(fc_hz=)` states the centre frequency, and a grid that states a domain
+  (`domain="real"` / `"iq"`) is held to it, a contradicting source being refused by name.
+  An op is real-only unless it has opted in (`wfmsynth.domain`), so nothing drops an
+  imaginary part.
 - **I/Q recordings in open formats** (#82). `ws.read_iq` and `capture(format=)` read SigMF,
   raw interleaved, CSV and MAT; `ws.to_sigmf` and `ws.to_interleaved` write. SigMF annotations
   and events convert both ways; interleaved export can write a marker channel. A byte-swapped
   file is detected and refused.
 - **I/Q impairments** (#83). `dac`, `iq_imbalance`, `iq_offset`, `phase_noise` (a stated
-  dBc/Hz profile), `freq_offset`, `awgn` (Es/N0, Eb/N0, or SNR in a stated bandwidth) and
-  `spur`; `rf_report()` says what each request came to on this record and `lo_phase()` returns
+  dBc/Hz profile), `freq_offset`, `awgn` (`es_n0_db=`, `eb_n0_db=`, or `snr_db=` in a stated
+  `bw_hz=`) and `spur`; `rf_report()` says what each request came to on this record and `lo_phase()` returns
   the oscillator's phase per sample.
 - **RF measures against ground truth** (#84). `ws.rf.spectrum`, `band_power`, `aclr`, `ccdf`,
   `constellation_density`, and `evm` against the transmitted symbols, which fits nothing unless
-  a correction is named and returns what each removed.
+  a correction is named and returns what each removed. With `reference="decided"` a carrier
+  is acquired blind before any decision is made (the line in the M-th power of the symbols:
+  an offset within &plusmn;baud/(2M) at any phase) and the lock is checked; a record it
+  cannot lock to is refused, not measured. Measured against the truth-referenced figure on
+  QAM-16 2 kHz off: 0.32 % / 0.32 % clean and 6.29 % / 6.29 % at Es/N0 24 dB, where a
+  decision-directed fit alone returned 24.5 % and 24.9 %.
+- **`Signal.copy()`** branches a chain. A builder method appends to its Signal and returns
+  it, so reusing a base builds one chain holding every variant's ops;
+  `base.copy().lossy(...)` is an independent Signal with the same recipe, digest and samples.
+- **`tools/digest_compare.py`** digests a tree (28 fixed chains and every render every
+  example makes) and compares two digests, so "nothing that existed moved" is a command.
 - **The pieces together.** `gain`, `gate`, `combine` (sum), `sequence`, `switch`, `filter` and
   `use` are defined on an envelope and the rest refuse it naming the alternative; a chain that
   did not state its grid starts in the domain its own ops need; tolerances work inside a
@@ -121,17 +136,37 @@ The rule that decided what became an op and what did not is in
   so replaying an affected pre-0.46.0 recipe says so and one holding only other carriers
   stays silent. Of the 31 examples, one printed figure moved: `sequence_and_switch.py`'s
   mean preamble level, `-0.00` to `+0.00`, a 25 MHz clock over whole periods now averaging
-  to zero. `step`, `pulse`, `sawtooth`, and an `nrz`/`pam` carrier whose samples per UI is
+  to zero; 155 of their 482 renders move, in `clock_and_data`, `joins`, `multi_driver_bus`,
+  `sequence_and_switch` and `unit_variation`, each holding one of the two carriers. `step`, `pulse`, `sawtooth`, and an `nrz`/`pam` carrier whose samples per UI is
   not a whole number still place edges on samples; see *Known gaps*.
 
 ### Changed
 
 None of these moves a rendered sample.
 
-- **`Signal.roles()` lists more of what was always drawn**: `timing/<i>` (with `rj_ps` or
-  `phase_noise`), `rx_noise/<i>`, `timebase/<i>`, sub-chain roles, and a `net` driver chain's
-  roles. Code comparing `roles()` against a stored list will differ. `crosstalk` no longer
-  lists `jitter/xtalk<i>` when its aggressor is a sub-chain.
+- **`Signal.roles()` lists exactly what the record draws from.** Added, each only when the
+  op's parameters make it draw: `timing/<i>`, `rx_noise/<i>`, `timebase/<i>`, `acquire/<i>`,
+  `store/<i>`, `nl_noise/<i>`, `rin/<i>`, `shot/<i>`, `linewidth/<i>`, `ase/<i>`, `tia/<i>`,
+  `carrier_noise/<i>`, `jitter/<i>` for `symbols` and `coded`, the jitter of a bare carrier
+  spec in six ops and a `net` driver, and sub-chain roles. Removed, because nothing was
+  drawn under them: `jitter/xtalk<i>` for an aggressor with no jitter, `jitter/<i>` for a
+  carrier whose `jitter=` has no `rj`, `events/<i>` for events at stated positions, and a
+  pinned (`{"from": recipe}`) record's toleranced parts. Every listed role moves samples when
+  re-rolled and nothing is drawn under an unlisted one, checked against the generators over
+  41 chains. Code comparing `roles()` against a stored list will differ.
+- **`contrast()` says when a re-roll changed nothing.** A name that is no op's role is
+  refused. A real role on an op whose parameters draw nothing from it (`jitter/0` with no
+  `rj`) is accepted as before and now warns that the sibling is the record again.
+- **`carrier` warns when its default 32 symbols disagree with the grid's baud.** `n_ui`
+  still defaults to 32 stretched over the record. On a grid that states a `baud` those 32
+  symbols do not come out at, one RuntimeWarning names both rates and the `n_ui` that
+  agrees. Stating `n_ui` (any value) is silent.
+- **A `net` driver's `{"ops": Signal}` warns when that Signal's seed or grid is dropped and
+  differs from the record's.** The output is unchanged; the fix it names is
+  `{"from": that_signal.recipe()}`.
+- **A measure handed the wrong kind of record refuses by name.** `measure` and `eye` used to
+  cast a complex record to float (keeping I, dropping Q); they now name `rf.evm`,
+  `upconvert` and `x.real`. The envelope measures already refused a voltage.
 - **A complex file read into a real chain is refused.** `capture()` used to keep the real part
   under a numpy warning. HDF5 export of a complex record is likewise refused by name.
 - **A malformed `net` driver source is refused**: `{"ops": [...], <unread key>, "volts": ...}`
@@ -155,10 +190,17 @@ None of these moves a rendered sample.
 
 ### How it stays exact
 
-- **No `NUMERIC_CHANGES` entry was needed.** Recipe digest, samples, JSON replay, `contrast()`
-  output and event lists were compared against `main` at the branch's head: 16 of 16 chains covering every pre-existing signal-taking form, 259 of 259 renders in common (mixed chains, lead-ins and every example `main` ships; two further recipes embed a temporary path and differ between two runs of `main` itself), and 18 of 18 acquisition and capture chains, one of which differs only in its `roles()` list. The comparison scripts were run from outside the tree and are not shipped; in the tree, `tests/test_byte_identity.py` pins the default path.
+- **What moved is two entries in `NUMERIC_CHANGES`, and nothing else.** Recipe digest,
+  samples, JSON replay, event list and a re-rolled sibling were compared with
+  `tools/digest_compare.py` against `main` (0.45.0, 52e0d03). Of its 28 fixed chains, 22 are
+  identical in every field; `pass_fet` differs in its samples (its gate is a `square`, see
+  *Changed output*); five differ only in the sibling, because the first role `roles()` lists
+  for them is one that was drawn and unlisted before. Of the 238 example renders the two
+  trees have in common, 2 differ, both in `multi_driver_bus.py`, both holding `cmos`
+  carriers. Before the `square` / `cmos` change the same comparison was 28 of 28 and 238 of
+  238. `tests/test_byte_identity.py` pins the default path in the tree.
 - **Each effect is asserted against an analytic result or an independent method**, in
-  `wfmsynth.validate` (429 checks) and the test suite (2249 tests): a sub-chain against
+  `wfmsynth.validate` (434 checks) and the test suite (2449 tests): a sub-chain against
   the same chain rendered alone and coupled by hand (equal); Bessel-4 `filter` against the
   scope front end (equal); a product `combine` against `modulate` OOK (equal); the delay's
   error against the exact trigonometric interpolant; trigger instants against an independent
@@ -175,9 +217,12 @@ None of these moves a rendered sample.
   close-in power fell between FFT bins (0.0019 rad for a stated 0.0263); defects in a
   `sequence` segment, a selected `switch` input or a `use`d chain were left out of `mask()`;
   `contrast()` with a mistyped role returned the record unchanged; `iq()` recorded and
-  ignored a second symbol source. After it, the suite's renders were compared again: 721
-  recipes in common with `main`, 0 differ; against the branch before the round, the 59 that
-  differ all hold a `phase_noise` op.
+  ignored a second symbol source.
+- **The rulings on what that round left open** are in BACKLOG.md (#75–#87, *Ruled*), each
+  with its test: sub-sample edges for `square` / `cmos`, the `n_ui` warning, exact
+  `roles()`, the domain following the source, `copy()`, the decided-reference EVM's
+  acquisition, the three renamed parameters, measures refusing the wrong domain, and the
+  `net` source warning.
 
 ### Known gaps
 
@@ -193,7 +238,14 @@ None of these moves a rendered sample.
   1024 UI); `carrier(jitter=)`, which displaces edges by whole samples (BACKLOG, U-13);
   and `step` / `pulse` / `sawtooth`, whose single edge or flyback is rounded to a sample.
   Keep samples per UI whole, and take jitter from `timing`.
-- Not exercised on Python 3.9 (the changed files parse at that grammar; the suite ran on 3.14).
+- Python 3.9, the declared floor, was run on one machine only (macOS arm64, CPython 3.9.6),
+  not in CI. With numpy 2.0.2 and scipy 1.13.1: 2459 passed, 2 failed, both
+  `test_the_demo_does_not_warn` (`i2c_bus.py`, `inductive_handover.py`), on spurious
+  `matmul` floating-point warnings that numpy 2.0 raises with Accelerate inside `net.py`,
+  which this release does not touch; `validate` passes. With the floor's numpy 1.21.6 and
+  scipy 1.7.3 the suite cannot complete on that machine (numpy's own `linalg.solve` dies
+  with a bus error); the 13 test files this release's rulings added or re-pinned, 261
+  tests, pass there. No 3.10+ syntax or API was found in the diff against `main`.
 
 ## 0.45.0 — 2026-11-04
 

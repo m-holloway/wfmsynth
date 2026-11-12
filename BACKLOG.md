@@ -728,7 +728,8 @@ exactly at any length; the only thing they cannot do is sit inside a switched ne
 an op is adopted and stated in `docs/ARCHITECTURE.md` ("What becomes an op"), with its two open
 questions answered there. The user-facing text is the two closing chapters of
 `docs/COOKBOOK.md`; `examples/composed_capture.py` uses the composition primitives together.
-No `NUMERIC_CHANGES` entry: existing chains were compared against `main` by digest.
+Two `NUMERIC_CHANGES` entries (`carrier/square`, `carrier/cmos`, ruling 1 below); everything
+else was compared against `main` by digest with `tools/digest_compare.py`.
 
 | Issue | Delivered as | Module |
 |---|---|---|
@@ -737,7 +738,7 @@ No `NUMERIC_CHANGES` entry: existing chains were compared against `main` by dige
 | #77 | `sequence`, `switch`, `sequence.layout` | `sequence` |
 | #78 | `ws.Channels`, the `use` op, HDF5 with names and the recipe | `channels` |
 | #80 | `law`, `filter`, `filter_delays()` | `stages` |
-| #81 | `Grid(domain="iq", fc_hz=)`, `iq`, `upconvert`, `downconvert`, `transmitted()`, the opt-in table | `iq`, `domain` |
+| #81 | `iq` (the record's domain follows it), `Grid(fc_hz=)`, `upconvert`, `downconvert`, `transmitted()`, the opt-in table | `iq`, `domain` |
 | #82 | `read_iq`, `capture(format=)`, `to_sigmf`, `to_interleaved` | `iqfile` |
 | #83 | `dac`, `iq_imbalance`, `iq_offset`, `phase_noise`, `freq_offset`, `awgn`, `spur`, `rf_report()`, `lo_phase()` | `rf` |
 | #84 | `rf.spectrum`, `band_power`, `aclr`, `ccdf`, `evm`, `constellation_density` | `rf` |
@@ -799,7 +800,7 @@ blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbo
    (`lossy`/`sparam` about `fc_hz`).
 3. The optical field path (`eo` .. `photodetect`) still carries a complex array on a real grid,
    outside the domain model.
-4. `measure` / `eye` cast complex input to float unguarded.
+4. (Done, 0.46.0, ruling 8.) `measure` / `eye` refuse a complex record by name.
 5. A whole-chain delay report: `filter_delays()` covers `filter` ops only.
 6. Crossing finders: `law("comparator")` and `trigger` now run one state machine
    (`stages.schmitt`); `gate` and `switch` are memoryless comparisons and keep their own two
@@ -807,34 +808,67 @@ blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbo
    `events.shift`; `trigger._retime`, `stages.window_events` and the segment shift in
    `sequence._render` each still carry their own.
 
-**Needs a ruling** (found, not changed, because each moves existing output or API):
+**Ruled** (the lead architect ruled on every item the review round left open; each is
+delivered in 0.46.0 with the test named).
 
-1. `carrier("square")` and `carrier("cmos")` place each edge on the nearest sample: 15.6 ps
-   peak to peak at 64 GSa/s. Sub-sample placement, as `nrz` does, needs a `NUMERIC_CHANGES`
-   entry.
-2. `carrier`'s `n_ui` defaults to 32 stretched over the record, whatever `Grid(baud=)` says.
-3. `roles()` still omits roles that draw conditionally: `acquire`, `store`, `nonlinearity`,
-   `tia`, `edfa`, `optical`, `carrier_noise`.
-4. Whether a top-level `Signal` should infer its domain from its source, which would retire
-   `Grid(domain=)` for everything but `capture`.
-5. A builder method mutates its `Signal` and returns it, so `base.a()` then `base.b()` is one
-   chain. Composition makes reusing a base natural; a `copy()` or non-mutating builders would
-   remove the trap. Documented as a gotcha for now.
-6. (Ruled, 0.46.0.) `filter` and `law` draw a tolerance before they check their design, and
-   `ws.tol` on a count (`tolerance.WHOLE_NUMBERS`) is refused naming `ws.corners`.
-7. `es_n0_db` and `ebn0_db` are spelled inconsistently. (`downconvert(fs_out=, lpf=)` is
-   ruled to stay: `fs_out` is a rate as `Grid(fs=)` and `n_out` are, `lpf` is a filter spec and
-   not only a frequency, and `fs_out_hz=` / `lpf_hz=` are refused naming them.)
-8. `net`'s `{"ops": Signal}` drops that Signal's seed and grid silently (the generic sub-chain
-   path refuses the same thing); `Signal.unit()` does not move a `{"from": recipe}` record.
-9. The NAMED link and instrument ops (`scope`, `probe`, `lossy`, `events`, ...) placed after
+1. *`carrier("square")` / `carrier("cmos")` snapped each edge to the sample grid.* Fixed with
+   sub-sample placement. Two mechanisms were found, not one: an edge between samples went
+   to the next sample, and an edge exactly on a sample was decided by the rounding of
+   `f * t % 1.0` (1 GHz at 64 GSa/s: 35 of 510 periods were 63 or 65 samples). Measured
+   edge-time error at 0.997 GHz on 64 GSa/s, by polynomial crossing: 15.58 ps peak to peak
+   before, 3.0e-5 ps after. Edges on samples and rightly placed are bit-identical.
+   `NUMERIC_CHANGES`: `carrier/square`, `carrier/cmos`. `tests/test_edge_placement.py`.
+2. *`n_ui` defaults to 32 whatever `Grid(baud=)` says.* The default is unchanged. One
+   RuntimeWarning when the grid states a baud the 32 symbols do not come out at, naming both
+   rates and the `n_ui` that agrees. It fired in one test file and three `validate` chains,
+   each the trap itself; no example. `tests/test_carrier_default_n_ui.py`.
+3. *`roles()` omitted conditional roles.* It is now exactly what is drawn, both ways, checked
+   against the generators on 41 chains. `tests/test_roles_complete.py`.
+4. *Domain inference.* A grid that does not state a domain takes its source's; a stated one
+   that contradicts the source is refused. Real-record recipes and digests are unchanged.
+   `tests/test_domain_follows_source.py`.
+5. *Builders mutate.* Kept. `Signal.copy()` branches a chain. `Channels` has no builders and
+   takes its chains as data, so it has no such trap and no `copy`. `tests/test_signal_copy.py`.
+6. *`rf.evm(reference="decided")` did not pull in.* It acquires the carrier blind first (the
+   line in the M-th power of the symbols, pull-in &plusmn;baud/(2M)), checks the lock, and
+   refuses a record it cannot lock to. `tests/test_evm_acquisition.py`.
+7. *Naming.* `downconvert(fs_out_hz=)`, `awgn(eb_n0_db=)`, and `downconvert(lpf=dict(pass_hz=))`
+   in place of a bare number; the old 0.46.0-only spellings are refused naming the new. This
+   supersedes the earlier note that `fs_out` and a numeric `lpf` would stay. `_deg` and `_pct`
+   joined the suffix table. `delay(by=)` keeps its name: `by` is the one word the four joins
+   share. `tests/test_046_spellings.py`.
+8. *Measures and the wrong domain.* `measure` and `eye` refuse a complex record by name; the
+   envelope measures already refused a real one. `tests/test_measure_domain.py`.
+9. *`net`'s `{"ops": Signal}` drops that Signal's seed and grid.* Output unchanged; it warns
+   when what is dropped differs from the record's. It fired once, in
+   `examples/multi_driver_bus.py`, which had the trap. `tests/test_net_source_signal.py`.
+10. *`unit()` and a pinned record.* Correct as it was. `roles()` listed the pinned record's
+    toleranced part while `contrast()` refused it; `roles()` no longer lists it.
+    `tests/test_pinned_unit.py`.
+11. (Ruled earlier, 0.46.0.) `filter` and `law` draw a tolerance before they check their
+    design, and `ws.tol` on a count (`tolerance.WHOLE_NUMBERS`) is refused naming
+    `ws.corners`.
+
+**Still open** (each as on `main`; none was ruled on).
+
+1. The NAMED link and instrument ops (`scope`, `probe`, `lossy`, `events`, ...) placed after
    an `acquire` still read the synthesis grid's rate: `scope(bw_hz=2e9)` after an 80 -> 20
    GSa/s acquisition has its -3 dB point at 0.5 GHz (measured; the same on `main`). The
    general stages and the I/Q impairments were moved to the record's own rate in 0.46.0 because
    they were new; moving these changes released records and needs a `NUMERIC_CHANGES` entry,
    or a refusal.
-10. `coded(bits=, prbs=)` lets `bits` win and records `prbs` unused (as on `main`); `iq` now
-    refuses the same pair.
+2. `coded(bits=, prbs=)` lets `bits` win and records `prbs` unused (as on `main`); `iq`
+   refuses the same pair.
+3. Found while fixing ruling 1, the same grid placement in three other sources, unchanged:
+   an `nrz` / `pam<N>` / `symbols` carrier whose samples per UI is not a whole number puts
+   each edge on the next sample (measured: a clock pattern of 1000 UI on 32768 samples at
+   64 GSa/s, 15.5 ps peak to peak; under 1e-9 ps at 1024 UI); `carrier(jitter=)` displaces
+   edges by whole samples (U-13); `step` / `pulse` / `sawtooth` round their one edge or
+   flyback to a sample. `physics._edge_train` is the mechanism to reuse; each would need
+   its own `NUMERIC_CHANGES` entry.
+4. Python 3.9 with numpy 2.0.x on macOS arm64 raises spurious `matmul` floating-point
+   warnings inside `net.py` (the results are finite and the tests of their values pass),
+   which fails `test_the_demo_does_not_warn` for two examples there. Not seen on 3.14.
 
 ## Known limitations and claim boundaries
 

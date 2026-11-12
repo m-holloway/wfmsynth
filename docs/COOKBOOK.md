@@ -786,8 +786,10 @@ assert np.array_equal(pinned.subchain("crosstalk/1/aggressor"), other.waveform()
 ```python
 gs = ws.Grid(fs=1e6, n=20000)                          # 20 ms of a 1 kHz sensor
 
-def sensor():                                          # a builder mutates; make one per variant
-    return Signal(seed=1, grid=gs).carrier("sine", f_hz=1e3)
+base = Signal(seed=1, grid=gs).carrier("sine", f_hz=1e3)
+
+def sensor():                                          # a builder mutates and returns its Signal,
+    return base.copy()                                 # so each variant branches from a copy
 
 def tone(**k):
     return Signal().carrier("sine", **k)
@@ -1042,16 +1044,19 @@ opted in, so nothing silently drops an imaginary part.
 Every block in this chapter runs top to bottom as one script.
 
 ## A record in the I/Q domain
-The domain is the grid's. The `iq` source maps bits onto a constellation and shapes them with a
-root-raised-cosine pulse; `transmitted()` is the ground truth.
+The domain follows the source: `iq(...)` or an I/Q capture makes the record complex baseband,
+so the grid does not have to say `domain="iq"` as well (one that says `domain="real"` is
+refused). `fc_hz` on the grid states the centre frequency. The `iq` source maps bits onto a
+constellation and shapes them with a root-raised-cosine pulse; `transmitted()` is the ground
+truth.
 
 ```python
 import os, tempfile, numpy as np, wfmsynth as ws
 from wfmsynth import Signal, rf
 
-g = ws.Grid(fs=6.4e9, baud=25e6, n=1 << 18, domain="iq", fc_hz=1e9)
+g = ws.Grid(fs=6.4e9, baud=25e6, n=1 << 18, fc_hz=1e9)
 
-def source():                                          # a builder mutates; make one per variant
+def source():                                          # a fresh Signal per call (or base.copy())
     return Signal(seed=1, grid=g).iq("qam16", prbs=15, prbs_phase=100)
 
 x = source().waveform()                                # complex128, 1024 symbols
@@ -1113,7 +1118,10 @@ rf.band_power(spec, -16.875e6, 16.875e6)                         # -> 0.92
 `"timing"`, `"frequency"`, `"offset"`, `"gain"`, `"phase"`, `"equalizer"`. A front end's group
 delay turns the constellation by -2&pi;·fc·delay, so raw EVM after one is a rotation, not
 distortion. `reference="decided"` scores against decisions instead of the truth and reads low
-once decisions fail; pass `sent` as well and it counts them.
+once decisions fail; pass `sent` as well and it counts them. Its `"frequency"` and `"phase"`
+corrections are acquired blind before any decision is made (the carrier line in the 4th power
+of the symbols for QPSK and QAM): an offset within &plusmn;baud/8 is found at any phase, and a
+record it cannot lock to is refused, not measured.
 [`examples/rf_measures.py`](../examples/rf_measures.py) has the table.
 
 ## Impairments, and the report of what they came to
@@ -1122,7 +1130,7 @@ Seven ops act on an envelope: `dac`, `iq_imbalance`, `iq_offset`, `phase_noise`,
 transmitter's, after it the receiver's).
 
 ```python
-gi = ws.Grid(fs=400e6, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)   # 4096 symbols
+gi = ws.Grid(fs=400e6, baud=25e6, n=1 << 16, fc_hz=1e9)   # 4096 symbols
 
 def burst():
     return Signal(seed=1, grid=gi).iq("qam16", prbs=15, prbs_phase=100)
