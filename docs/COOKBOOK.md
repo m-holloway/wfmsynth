@@ -1068,14 +1068,14 @@ converter's full scale from the record.
 applies. `downconvert` needs its low-pass stated, because that decides what the I/Q contains.
 
 ```python
-loop = source().upconvert().downconvert(lpf=20e6, fs_out=400e6)     # about the grid's fc_hz
+loop = source().upconvert().downconvert(lpf=dict(pass_hz=20e6), fs_out_hz=400e6)     # about the grid's fc_hz
 y = loop.waveform()
 gy = loop.stored_grid(y)                               # 400 MSa/s, 16384 samples, domain "iq"
 rf.evm(y, gy, sent, skip=8)["evm_pct"]                 # -> 0.32 %
 ```
 
 Neither mixer resamples. The grid has to carry the carrier, and a carrier too close to DC or
-Nyquist for the envelope's bandwidth is refused with the folded power stated. After `downconvert(fs_out=)` or `acquire`, measure with `stored_grid(x)`.
+Nyquist for the envelope's bandwidth is refused with the folded power stated. After `downconvert(fs_out_hz=)` or `acquire`, measure with `stored_grid(x)`.
 
 An op written for a voltage is refused on an envelope, by name, with what to do:
 
@@ -1097,7 +1097,7 @@ def through(sat=None):
     s = source().upconvert()
     if sat:
         s = s.law("tanh", sat=sat)
-    return s.probe(bw_hz=3e9).downconvert(fc_hz=1e9, lpf=LPF, fs_out=400e6)
+    return s.probe(bw_hz=3e9).downconvert(fc_hz=1e9, lpf=LPF, fs_out_hz=400e6)
 
 z = through(sat=2.5).waveform()
 rf.evm(z, gy, sent, skip=8)["evm_pct"]                           # -> 26.7 %: mostly a rotation
@@ -1148,7 +1148,7 @@ rf.evm(derotated, gi, si, skip=8)["evm_pct"]               # -> 7.0 %, nothing e
 
 `rf_report()` is what each request came to on this record (the DAC's SQNR and clipped fraction,
 the leak in dBc, the noise density), and `lo_phase()` is the phase every oscillator op applied,
-per sample. `awgn` takes exactly one of `es_n0_db`, `ebn0_db`, or `snr_db` with `bw_hz`; an
+per sample. `awgn` takes exactly one of `es_n0_db`, `eb_n0_db`, or `snr_db` with `bw_hz`; an
 SNR with no bandwidth is refused. Its reference power is the record's own mean power as it
 reaches the op unless `ref_power=` states one. `phase_noise` draws nothing outside the offsets
 its profile states. There is no `image` op: `iq_imbalance(**rf.imbalance_for(30))` is an image

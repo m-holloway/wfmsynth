@@ -63,10 +63,10 @@ def test_transmitted_says_what_it_cannot_report():
 def test_ebn0_reads_the_constellation_through_a_sequence_or_asks():
     same = Signal(seed=1, grid=GI).sequence([
         {"chain": Signal().iq("qpsk", prbs=9), "duration_s": N_PRE / GI.baud},
-        {"chain": Signal().iq("qpsk", prbs=15)}]).awgn(ebn0_db=10)
+        {"chain": Signal().iq("qpsk", prbs=15)}]).awgn(eb_n0_db=10)
     assert same.ops[-1]["bits_per_symbol"] == 2
     with pytest.raises(ValueError, match="needs bits_per_symbol="):   # QPSK then 16-QAM: no one Eb
-        frame().awgn(ebn0_db=10).waveform()
+        frame().awgn(eb_n0_db=10).waveform()
 
 
 # ------------------------------------------------------------------ one channel of several

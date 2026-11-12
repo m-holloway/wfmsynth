@@ -266,7 +266,7 @@ Composition added these. Each renders, replays and digests cleanly, and is wrong
 31. **`by=` is the quantity itself.** `gain(by=)` is the factor, so a 3 % ripple is a sine of
     amplitude 0.03 with `offset=1.0`; without the offset the record is multiplied by a signal
     that crosses zero. `delay(by=)` is in seconds.
-32. **After `trigger` or `downconvert(fs_out=)`, as after `acquire`, `sig.grid` is not the
+32. **After `trigger` or `downconvert(fs_out_hz=)`, as after `acquire`, `sig.grid` is not the
     record** (#17): measure with `sig.stored_grid(x)`. The general stages (`filter`, `law`,
     `delay`, `gate`, `gain`, `offset`, `combine`) and the I/Q impairments placed after one run
     at the stored rate, so their Hz and seconds mean what they say; the NAMED link and
@@ -277,7 +277,7 @@ Composition added these. Each renders, replays and digests cleanly, and is wrong
     firing; `mask()` and `overlapping()` skip those, a loop over `events` does not. `e.at` says
     which sub-chain an event came from: a chain that IS the record (a `sequence` segment, a
     `switch` input while selected, a chain brought in by `use`) keeps its events on it. Labels
-    follow the samples through `acquire`, `downconvert(fs_out=)`, `trigger` and `delay`; a
+    follow the samples through `acquire`, `downconvert(fs_out_hz=)`, `trigger` and `delay`; a
     `filter` moves them by `filter_delays()`, which you add.
 34. **Split a unit dataset on `ws.unit_of(recipe)`.** A random split puts captures of one unit
     on both sides and reads as generalisation: MEASURED 1.7 ohm error random against 31.3 ohm

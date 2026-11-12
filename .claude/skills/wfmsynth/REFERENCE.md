@@ -664,7 +664,7 @@ rx = (source()
       .upconvert()                                     # iq -> real passband volts, same grid
       .law("tanh", sat=2.5)                            # an amplifier acts on the voltage
       .probe(bw_hz=3e9)                                # every real op applies here
-      .downconvert(lpf=dict(pass_hz=40e6, stop_hz=120e6, atten_db=80), fs_out=400e6))   # fc_hz: the grid's
+      .downconvert(lpf=dict(pass_hz=40e6, stop_hz=120e6, atten_db=80), fs_out_hz=400e6))   # fc_hz: the grid's
 y = rx.waveform()                                      # complex128
 gy = rx.stored_grid(y)                                 # 400 MSa/s, domain "iq": measure with THIS
 
@@ -679,7 +679,7 @@ rf.band_power(spec, -16.875e6, 16.875e6)
 
 `upconvert` and `downconvert` never resample: the grid must hold the carrier with the envelope's
 bandwidth clear of DC and Nyquist (refused otherwise, stating the folded power), and `lpf` has no
-default (a bare number is the pass edge; stop is twice it, 80 dB). `fs_out` is whole-number
+default (a bare number is the pass edge; stop is twice it, 80 dB). `fs_out_hz` is whole-number
 decimation only. `rf.evm` corrections, each returned in `removed`: `"timing"` (within half a
 symbol of `delay_s`), `"frequency"`, `"offset"`, `"gain"`, `"phase"`, `"equalizer"` (with
 `equalizer_taps=`). `skip=` drops symbols at each end, which lack their neighbours' tails.
@@ -697,7 +697,7 @@ tx = (Signal(seed=1, grid=gi).iq("qam16", prbs=15, prbs_phase=100)
       .phase_noise(profile=[(1e4, -75), (1e5, -95), (1e6, -115)])   # (offset Hz, dBc/Hz)
       .freq_offset(f_hz=2e3)                           # also drift_hz_per_s=
       .spur(f_hz=3.1e6, dbc=-45)
-      .awgn(es_n0_db=25, ref_power=1.0))               # or ebn0_db=, or snr_db= WITH bw_hz=
+      .awgn(es_n0_db=25, ref_power=1.0))               # or eb_n0_db=, or snr_db= WITH bw_hz=
 x = tx.waveform()
 tx.rf_report()                                         # what each request came to, per op
 phase = tx.lo_phase()                                  # rad per sample: phase_noise + freq_offset
@@ -713,7 +713,7 @@ matched = raw.filter("rrc", beta=0.35, zero_phase=True)             # a recordin
 ```
 
 The order of the impairments is physical and is kept: these are `general` stages. All seven
-refuse a real record. `ebn0_db` needs the source's constellation (or `bits_per_symbol=`).
+refuse a real record. `eb_n0_db` needs the source's constellation (or `bits_per_symbol=`).
 `ws.iqfile.describe(path, format, ...)` reports a file's length, peak counts and full-scale
 fraction without building anything. A file states no symbol rate; pass `baud=` or a matched
 filter has nothing to read. On an envelope `gain(by=)`, `gate(by=)` (real `by`), `combine` (sum,

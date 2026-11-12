@@ -263,12 +263,14 @@ def evm(received, sent, fit=False):
 
 # ------------------------------------------------------------------ the stated low-pass
 def lowpass_spec(lpf):
-    """Normalise `lpf` to ``{"pass_hz", "stop_hz", "atten_db"}``. A bare number is the passband
-    edge; the stopband then starts at twice it, 80 dB down."""
+    """Normalise `lpf` to ``{"pass_hz", "stop_hz", "atten_db"}``. Only `pass_hz` is required;
+    the stopband then starts at twice it, 80 dB down. A bare number is refused: it would be a
+    frequency in a parameter whose name does not say so."""
     if lpf is None:
-        raise ValueError("downconvert needs its low-pass STATED: lpf=<passband edge in Hz>, or "
-                         "lpf=dict(pass_hz=..., stop_hz=..., atten_db=...). The filter decides "
-                         "what the I/Q record contains, so it has no silent default.")
+        raise ValueError("downconvert needs its low-pass STATED: lpf=dict(pass_hz=...), with "
+                         "stop_hz= and atten_db= if twice the passband edge and 80 dB are not "
+                         "what is meant. The filter decides what the I/Q record contains, so "
+                         "it has no silent default.")
     if isinstance(lpf, dict):
         extra = sorted(set(lpf) - {"pass_hz", "stop_hz", "atten_db"})
         if extra or "pass_hz" not in lpf:
@@ -276,10 +278,13 @@ def lowpass_spec(lpf):
                              + (f"; it does not take {extra}" if extra else ""))
         spec = dict(lpf)
     elif isinstance(lpf, (int, float, np.integer, np.floating)) and not isinstance(lpf, bool):
-        spec = {"pass_hz": float(lpf)}
+        raise ValueError(f"downconvert: lpf={float(lpf):g} is a bare number, and every number "
+                         f"here carries its unit in its name: lpf=dict(pass_hz={float(lpf):g}) "
+                         f"is that passband edge (stop_hz defaults to twice it, atten_db to "
+                         f"{LPF_ATTEN_DB:g}).")
     else:
-        raise ValueError(f"downconvert: lpf is a passband edge in Hz or a dict of pass_hz, "
-                         f"stop_hz, atten_db; got {lpf!r}")
+        raise ValueError(f"downconvert: lpf is a dict of pass_hz, stop_hz, atten_db; got "
+                         f"{lpf!r}")
     spec.setdefault("stop_hz", 2.0 * spec["pass_hz"])
     spec.setdefault("atten_db", LPF_ATTEN_DB)
     p, s, a = (float(spec[k]) for k in ("pass_hz", "stop_hz", "atten_db"))
@@ -380,10 +385,10 @@ def upconvert(x, fc_hz, fs, phase_rad=0.0, fold_db=FOLD_DB):
     return (x * np.exp(1j * _carrier_phase(len(x), fc_hz, fs, phase_rad))).real
 
 
-def downconvert(y, fc_hz, fs, lpf, fs_out=None, phase_rad=0.0):
+def downconvert(y, fc_hz, fs, lpf, fs_out_hz=None, phase_rad=0.0):
     """A real passband record -> complex baseband about `fc_hz`:
     ``lowpass{ 2 * y * exp(-j*(2*pi*fc_hz*t + phase_rad)) }``, optionally decimated to
-    `fs_out`.
+    `fs_out_hz`.
 
     The low-pass is the stated one (`lowpass`), applied with its delay removed, so the output
     is time-aligned with the input. It has to reject the mixing image, which sits
@@ -391,7 +396,7 @@ def downconvert(y, fc_hz, fs, lpf, fs_out=None, phase_rad=0.0):
     image's near edge is refused. The first and last half-filter-length of the record see the
     record's edge (the line is taken as quiet outside it) and are not within the stated error.
 
-    `fs_out` keeps every D-th sample, D = fs / fs_out a whole number, and the same filter is
+    `fs_out_hz` keeps every D-th sample, D = fs / fs_out_hz a whole number, and the same filter is
     the anti-alias filter: a stopband starting above the new Nyquist is refused."""
     y = np.asarray(y)
     if np.iscomplexobj(y):
@@ -407,16 +412,16 @@ def downconvert(y, fc_hz, fs, lpf, fs_out=None, phase_rad=0.0):
             f"{image - spec['pass_hz']:g} Hz; lpf stop_hz={spec['stop_hz']:g} starts later "
             f"than that, so the image would come through. Lower stop_hz, or sample faster.")
     step = 1
-    if fs_out is not None:
-        step = int(round(fs / fs_out))
-        if step < 1 or abs(step * fs_out - fs) > 1e-9 * fs:
-            raise ValueError(f"downconvert: fs_out={fs_out:g} is not fs={fs:g} divided by a "
+    if fs_out_hz is not None:
+        step = int(round(fs / fs_out_hz))
+        if step < 1 or abs(step * fs_out_hz - fs) > 1e-9 * fs:
+            raise ValueError(f"downconvert: fs_out_hz={fs_out_hz:g} is not fs={fs:g} divided by a "
                              f"whole number. Decimation keeps every D-th sample; nothing is "
                              f"interpolated.")
-        if spec["stop_hz"] > 0.5 * fs_out:
+        if spec["stop_hz"] > 0.5 * fs_out_hz:
             raise ValueError(f"downconvert: lpf stop_hz={spec['stop_hz']:g} is above the "
-                             f"output Nyquist ({0.5 * fs_out:g} Hz), so decimating to "
-                             f"fs_out={fs_out:g} would alias. Lower stop_hz or raise fs_out.")
+                             f"output Nyquist ({0.5 * fs_out_hz:g} Hz), so decimating to "
+                             f"fs_out_hz={fs_out_hz:g} would alias. Lower stop_hz or raise fs_out_hz.")
     h = lowpass(spec, fs)
     if len(h) > len(y):
         raise ValueError(f"downconvert: the stated low-pass needs {len(h)} taps at fs={fs:g} "

@@ -50,7 +50,7 @@ def transmitter(sat=None):
     s = ws.Signal(seed=1, grid=G).iq("qam16", prbs=15, prbs_phase=100, beta=BETA).upconvert()
     if sat is not None:
         s = s.law("tanh", sat=sat)             # the amplifier: soft compression of the voltage
-    return s.probe(bw_hz=3e9).downconvert(fc_hz=FC, lpf=LPF, fs_out=400e6)
+    return s.probe(bw_hz=3e9).downconvert(fc_hz=FC, lpf=LPF, fs_out_hz=400e6)
 
 
 def main():

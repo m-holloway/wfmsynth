@@ -103,7 +103,7 @@ _INSTEAD = {
         "law": "The laws act on a voltage. dac(bits=) is the quantiser of an envelope, and an "
                "amplifier's law acts on the passband record.",
         "trigger": "A scope triggers on a voltage.",
-        "rx_noise": "Noise on an envelope is awgn(snr_db= | es_n0_db= | ebn0_db=): circular, "
+        "rx_noise": "Noise on an envelope is awgn(snr_db= | es_n0_db= | eb_n0_db=): circular, "
                     "and stated against the signal's power.",
         "digitize": "The converter of an envelope is dac(bits=), which quantises both rails.",
         "store": "The converter of an envelope is dac(bits=), which quantises both rails.",

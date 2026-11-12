@@ -29,6 +29,9 @@ UNIT_SUFFIXES = {
     "_ohm": "ohms", "_rad": "radians", "_ui": "unit intervals", "_km": "kilometres",
     "_nm": "nanometres", "_bd": "baud", "_hz": "hertz", "_ps": "picoseconds",
     "_db": "decibels", "_in": "inches", "_s": "seconds", "_f": "farads", "_v": "volts",
+    # two that 0.46.0's parameters used before the table knew them, so they passed this gate
+    # unlooked-at: an I/Q phase error is quoted in degrees and a headroom in percent
+    "_deg": "degrees", "_pct": "percent",
 }
 
 # Names whose suffix does NOT mean what the table above says, each with the reason. Keep this as
@@ -43,14 +46,14 @@ EXCEPTIONS = {
 KNOWN_UNIT_PARAMS = frozenset({
     'D_ps_nm_km', 'ac_fc_hz', 'atten_db_km', 'band_hi_hz', 'band_lo_hz', 'bw_hz', 'c_bus_f',
     'c_load_f', 'dev_hz', 'dev_rad', 'diode_on_ohm', 'drift_hz_per_s', 'drift_ppm_per_s',
-    'ebn0_db', 'echo_db', 'es_n0_db',
+    'eb_n0_db', 'echo_db', 'es_n0_db',
     'echo_f_hp_hz', 'echo_td_ps', 'edge_frac', 'er_db', 'f0_frac', 'f0_ghz', 'f0_hz', 'f1_hz',
     'f2_hz', 'f_hp_frac', 'f_hp_hz', 'f_hz', 'f_ripple_hz', 'fc_frac', 'fc_hz', 'fext_db',
     'fold_db',
-    'fp1_ghz', 'fp2_ghz', 'frac_ui', 'fs_hz', 'fz_ghz', 'gain_db', 'gamma_per_w_km',
-    'gamma_s', 'hold_frac', 'holdoff_s', 'isolation_db', 'jitter_s', 'length_in', 'length_km', 'linewidth_hz',
+    'fp1_ghz', 'fp2_ghz', 'frac_ui', 'fs_hz', 'fs_out_hz', 'fz_ghz', 'gain_db', 'gamma_per_w_km',
+    'gamma_s', 'headroom_pct', 'hold_frac', 'holdoff_s', 'isolation_db', 'jitter_s', 'length_in', 'length_km', 'linewidth_hz',
     'loss_at_ghz', 'loss_db', 'n_ui', 'next_db', 'next_td_ps', 'nf_db', 'overload_tau_s',
-    'phase0_s', 'phase1_rad', 'phase2_rad', 'phase_rad', 'phase_s', 'pink_frac', 'plateau_ui', 'post_s', 'pre_s',
+    'phase0_s', 'phase1_rad', 'phase2_rad', 'phase_deg', 'phase_rad', 'phase_s', 'pink_frac', 'plateau_ui', 'post_s', 'pre_s',
     'psij_ps', 'r_load_ohm', 'r_pullup_ohm', 'r_sink_b_ohm', 'r_sink_ohm', 'r_term_ohm',
     'rate_hz', 'rds_on_ohm', 'rin_db_per_hz', 'ripple_db', 'rj_ps', 'rms_ps', 'skew_ps',
     'snr_db', 'stop_db',

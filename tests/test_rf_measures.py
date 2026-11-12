@@ -323,7 +323,7 @@ def test_evm_through_a_passband_round_trip(clean):
     holds, and the grid that describes the record is the stored one."""
     g = Grid(fs=8e9, baud=BAUD, n=1 << 18, domain="iq", fc_hz=1e9)
     s = (Signal(seed=1, grid=g).iq("qam16", prbs=15, prbs_phase=100).upconvert()
-         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out=250e6))
+         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out_hz=250e6))
     x = s.waveform()
     sent, _ = s.transmitted()
     r = rf.evm(x, s.stored_grid(x), sent, skip=SKIP)

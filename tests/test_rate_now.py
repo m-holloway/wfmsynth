@@ -59,7 +59,7 @@ def test_gate_time_and_sub_chain_after_acquire_are_on_the_stored_clock():
 def test_matched_filter_after_a_decimating_downconvert():
     g = ws.Grid(fs=8e9, baud=25e6, n=1 << 17, domain="iq", fc_hz=1e9)
     s = (Signal(seed=1, grid=g).iq("qam16", prbs=15).upconvert()
-         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out=200e6)
+         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out_hz=200e6)
          .filter("rrc", beta=0.35))
     x = s.waveform()
     sent, ts = s.transmitted()

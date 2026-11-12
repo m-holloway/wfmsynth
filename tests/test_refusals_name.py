@@ -70,8 +70,11 @@ def test_what_iq_reads_still_moves_the_record():
     (lambda: data().law("comparator", level=0.2), ("threshold=",)),
     (lambda: data().combine(Signal().carrier("sine", f_hz=1e9), kind="product"), ("how=",)),
     (lambda: data().delay(delay_s=1e-12), ("by=",)),
-    (lambda: env().upconvert().downconvert(lpf=20e6, fs_out_hz=100e6), ("fs_out=",)),
-    (lambda: env().upconvert().downconvert(lpf_hz=20e6), ("lpf=",)),
+    (lambda: env().upconvert().downconvert(lpf=dict(pass_hz=20e6), fs_out=100e6),
+     ("fs_out_hz=",)),
+    (lambda: env().upconvert().downconvert(lpf_hz=20e6), ("lpf=dict(pass_hz=",)),
+    (lambda: env().upconvert().downconvert(lpf=20e6), ("bare number", "lpf=dict(pass_hz=2e+07)")),
+    (lambda: env().awgn(ebn0_db=8.0, bits_per_symbol=4), ("eb_n0_db=",)),
     (lambda: Signal(seed=1, grid=G).sequence([{"chain": Signal().carrier("dc"), "t_s": 1e-9}]),
      ("duration_s", "instant")),
 ])

@@ -515,7 +515,7 @@ def _op_downconvert(x, p, streams, grid, idx):
     from . import iq as IQ
     if "fc_hz" not in p:
         raise ValueError("downconvert needs fc_hz=, the frequency the I/Q is centred on")
-    return IQ.downconvert(x, p["fc_hz"], grid.fs, p.get("lpf"), fs_out=p.get("fs_out"),
+    return IQ.downconvert(x, p["fc_hz"], grid.fs, p.get("lpf"), fs_out_hz=p.get("fs_out_hz"),
                           phase_rad=p.get("phase_rad", 0.0))
 
 
@@ -1867,7 +1867,7 @@ _LEAD_REJECT = {
                  "moves -- the delivered window would open on a different carrier phase under "
                  "the same recipe",
     "downconvert": "the local oscillator's phase is counted from the record's start, which a "
-                   "lead-in moves, and fs_out changes the record length so the window cannot "
+                   "lead-in moves, and fs_out_hz changes the record length so the window cannot "
                    "be sliced back out",
     "sequence": "its segments are placed at absolute times in the record, which a lead-in "
                 "moves; give the guard to a segment's own record and embed it with "
@@ -2098,9 +2098,9 @@ def _stored_rate(ops, fs, n, peak_ok=False):
             fs, n = fs * n_out / n, n_out
         elif name == "sample_clock" and op.get("n_out"):
             n = int(op["n_out"])                      # a TRUNCATION, not a resample
-        elif name == "downconvert" and op.get("fs_out"):
-            step = int(round(fs / float(op["fs_out"])))   # keeps every step-th sample
-            fs, n = float(op["fs_out"]), len(range(0, n, step))
+        elif name == "downconvert" and op.get("fs_out_hz"):
+            step = int(round(fs / float(op["fs_out_hz"])))   # keeps every step-th sample
+            fs, n = float(op["fs_out_hz"]), len(range(0, n, step))
         elif name == "trigger":
             n = TRIG.record_length(op, fs)                # the window(s), at the rate it is on
     return fs, n
@@ -2239,7 +2239,7 @@ class Signal:
 
     def _rate_at(self, i):
         """The sample rate the record is at when op `i` runs: the grid's, unless an op before
-        it stored or decimated the record (`acquire`, `downconvert(fs_out=)`)."""
+        it stored or decimated the record (`acquire`, `downconvert(fs_out_hz=)`)."""
         return _stored_rate(self.ops[:i], self.grid.fs, int(self.grid.n))[0]
 
     def unit(self, seed):
@@ -2495,13 +2495,13 @@ class Signal:
         """A real passband record -> COMPLEX BASEBAND about `fc_hz`: mix down, then a STATED
         low-pass. The receiver, or the analysis an instrument does on what it captured.
 
-            .downconvert(fc_hz=2.4e9, lpf=20e6)                                # passband edge
+            .downconvert(fc_hz=2.4e9, lpf=dict(pass_hz=20e6))                  # passband edge
             .downconvert(fc_hz=2.4e9, lpf=dict(pass_hz=20e6, stop_hz=45e6, atten_db=70),
-                         fs_out=250e6)
+                         fs_out_hz=250e6)
 
-        `lpf` is required: a passband edge in Hz (stopband from twice that, 80 dB down), or a
-        dict of `pass_hz`, `stop_hz`, `atten_db`. `wfmsynth.iq.lowpass_error(lpf, fs)` returns
-        the passband error and stopband those numbers actually deliver. `fs_out` decimates by
+        `lpf` is required: a dict of `pass_hz` and, where twice that and 80 dB are not what
+        is meant, `stop_hz` and `atten_db`. `wfmsynth.iq.lowpass_error(lpf, fs)` returns the
+        passband error and stopband those numbers actually deliver. `fs_out_hz` decimates by
         a whole number (the same filter is the anti-alias filter); `phase_rad` is the local
         oscillator's phase at t = 0. A filter that would pass the mixing image, or alias on
         decimation, is refused -- see `wfmsynth.iq.downconvert`. It reads the rate the record
@@ -2584,13 +2584,13 @@ class Signal:
         """White Gaussian noise on both rails, at ONE stated ratio to the signal:
 
             .awgn(es_n0_db=20)                    # per symbol, against the grid's baud
-            .awgn(ebn0_db=8)                      # per bit; bits/symbol from the iq source
+            .awgn(eb_n0_db=8)                      # per bit; bits/symbol from the iq source
             .awgn(snr_db=25, bw_hz=30e6)          # in a stated bandwidth -- bw_hz is required
 
         The signal power is the record's mean |x|**2 where the op sits, or `ref_power=` to
         state it (a burst's idle time, or noise already added, would otherwise count). Role
         `awgn/<op index>`. `rf_report()` gives the reference power and noise density used."""
-        if params.get("ebn0_db") is not None and "bits_per_symbol" not in params:
+        if params.get("eb_n0_db") is not None and "bits_per_symbol" not in params:
             from . import iq as IQ
             cons = _constellations(self.ops, self.grid)
             if len(cons) == 1:                     # several (a QPSK preamble, a QAM payload)

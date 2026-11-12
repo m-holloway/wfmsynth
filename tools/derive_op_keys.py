@@ -162,10 +162,12 @@ SAID_AS = {
                        "gate / delay",
     ("delay", "delay_s"): "by= (seconds: a number, or a sub-chain)",
     ("delay", "t_s"): "by= (seconds: a number, or a sub-chain)",
-    ("downconvert", "lpf_hz"): "lpf= (a passband edge in Hz, or a dict of pass_hz, stop_hz, "
-                               "atten_db)",
-    ("downconvert", "fs_out_hz"): "fs_out= (the decimated rate, in Sa/s)",
-    ("downconvert", "fs_hz"): "fs_out= (the decimated rate, in Sa/s)",
+    ("downconvert", "lpf_hz"): "lpf=dict(pass_hz=..., stop_hz=..., atten_db=...): the filter "
+                               "is a spec, and each number in it carries its unit",
+    ("downconvert", "fs_out"): "fs_out_hz= (the decimated rate, in Sa/s)",
+    ("downconvert", "fs_hz"): "fs_out_hz= (the decimated rate, in Sa/s)",
+    ("awgn", "ebn0_db"): "eb_n0_db= (spelled as es_n0_db= is)",
+    ("awgn", "esn0_db"): "es_n0_db=",
 }
 
 

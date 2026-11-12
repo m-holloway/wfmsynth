@@ -2911,7 +2911,7 @@ _qgr = Grid(fs=16e9, baud=_qbd, n=1 << 18, domain="iq", fc_hz=_qfc)
 _qrf = (Signal(seed=1, grid=_qgr).iq("qam16", prbs=15, prbs_phase=100).upconvert()
         .acquire(_QProfile(sample_rate_hz=4e9, record_length=1 << 16,
                            input_bandwidth_hz=3e9, bits=8))
-        .downconvert(fc_hz=_qfc, lpf=_qlpf, fs_out=250e6))
+        .downconvert(fc_hz=_qfc, lpf=_qlpf, fs_out_hz=250e6))
 _qy = _qrf.waveform()
 _qsg = _qrf.stored_grid(_qy)
 _qrs, _ = _qrf.transmitted()
@@ -3910,7 +3910,7 @@ check("  ... and a record 0.23 symbol late is found late by that much",
       f"{_wtim['removed']['timing_s'] * 1e9:.4f} ns of {_wtau * 1e9:.4f} ns (bound 1e-3 symbol)")
 _wpg = Grid(fs=8e9, baud=25e6, n=1 << 18, domain="iq", fc_hz=1e9)
 _wps = (Signal(seed=1, grid=_wpg).iq("qam16", prbs=15, prbs_phase=100).upconvert()
-        .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out=250e6))
+        .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out_hz=250e6))
 _wpx = _wps.waveform()
 _wpe = _RF.evm(_wpx, _wps.stored_grid(_wpx), _wps.transmitted()[0], skip=8)
 check("the same EVM on a real passband record, through downconvert at a decimated rate",

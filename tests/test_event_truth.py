@@ -92,11 +92,11 @@ RATE_CHANGES = {
                                     .digitize(bits=12, n_out=1 << 13)),
     "sample_clock(n_out=)": lambda ev: (_acquired().events("glitch", count=40, amp=2.0, **ev)
                                         .sample_clock(n_out=1 << 13)),
-    "downconvert(fs_out=)": lambda ev: (
+    "downconvert(fs_out_hz=)": lambda ev: (
         Signal(seed=1, grid=IQ).iq("qam16", prbs=15).upconvert()
         .events("glitch", count=6, amp=1.0, **ev)
         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=40e6, stop_hz=120e6, atten_db=80),
-                     fs_out=400e6)),
+                     fs_out_hz=400e6)),
 }
 
 

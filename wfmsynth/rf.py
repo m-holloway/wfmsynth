@@ -50,7 +50,7 @@ THE CONVENTIONS, none of which is guessable:
                      snr_db    P_ref / (N0 * bw_hz)    -- `bw_hz` is required: an SNR without
                                                           a bandwidth is not a number
                      es_n0_db  (P_ref / baud) / N0
-                     ebn0_db   (P_ref / baud / bits_per_symbol) / N0
+                     eb_n0_db   (P_ref / baud / bits_per_symbol) / N0
                  P_ref is `ref_power=` if stated, else the mean of |x|**2 over the record as
                  it reaches this op. The total noise power added is N0*fs, split equally
                  between the rails.
@@ -139,7 +139,7 @@ OPS = ("iq_imbalance", "iq_offset", "freq_offset", "phase_noise", "awgn", "spur"
 # the ops that read the record's sample rate, which after a decimating `downconvert` is not
 # the synthesis grid's
 RATE_AWARE = ("freq_offset", "phase_noise", "awgn", "spur")
-AWGN_KEYS = ("snr_db", "es_n0_db", "ebn0_db", "bw_hz", "bits_per_symbol", "ref_power")
+AWGN_KEYS = ("snr_db", "es_n0_db", "eb_n0_db", "bw_hz", "bits_per_symbol", "ref_power")
 DAC_KEYS = ("bits", "headroom_pct", "full_scale", "clip")
 
 
@@ -347,15 +347,15 @@ def _ref_power(x, ref_power, who):
     return p
 
 
-def awgn_levels(x, fs, baud=None, snr_db=None, es_n0_db=None, ebn0_db=None, bw_hz=None,
+def awgn_levels(x, fs, baud=None, snr_db=None, es_n0_db=None, eb_n0_db=None, bw_hz=None,
                 bits_per_symbol=None, ref_power=None):
     """``(ref_power, n0)``: the reference power an `awgn` request is relative to and the noise
     density it resolves to, in power per Hz. The noise added is ``n0 * fs`` in total."""
-    asked = {"snr_db": snr_db, "es_n0_db": es_n0_db, "ebn0_db": ebn0_db}
+    asked = {"snr_db": snr_db, "es_n0_db": es_n0_db, "eb_n0_db": eb_n0_db}
     given = [k for k, v in asked.items() if v is not None]
     if len(given) != 1:
         raise ValueError(
-            f"awgn takes exactly one of snr_db= (with bw_hz=), es_n0_db= or ebn0_db= (with "
+            f"awgn takes exactly one of snr_db= (with bw_hz=), es_n0_db= or eb_n0_db= (with "
             f"bits_per_symbol=), got {given or 'none'}. They are three statements of one "
             f"noise density, and two of them would have to agree.")
     kind = given[0]
@@ -380,10 +380,10 @@ def awgn_levels(x, fs, baud=None, snr_db=None, es_n0_db=None, ebn0_db=None, bw_h
             raise ValueError(f"awgn({kind}=...) needs the symbol rate: Grid(baud=...). Without "
                              f"one, state the noise as snr_db= with bw_hz=.")
         band = float(baud)
-    if kind == "ebn0_db":
+    if kind == "eb_n0_db":
         if bits_per_symbol is None:
             raise ValueError(
-                "awgn(ebn0_db=...) needs bits_per_symbol= (1 bpsk, 2 qpsk, 4 qam16, 6 qam64; "
+                "awgn(eb_n0_db=...) needs bits_per_symbol= (1 bpsk, 2 qpsk, 4 qam16, 6 qam64; "
                 "times the code rate if the bits are coded). Signal.awgn fills it in from an "
                 "`iq` source's constellation; a recipe or a symbols= source has to state it.")
         k = _number(bits_per_symbol, "awgn", "bits_per_symbol")
@@ -391,7 +391,7 @@ def awgn_levels(x, fs, baud=None, snr_db=None, es_n0_db=None, ebn0_db=None, bw_h
             raise ValueError(f"awgn: bits_per_symbol must be positive, got {bits_per_symbol!r}")
         band *= k
     elif bits_per_symbol is not None:
-        raise ValueError(f"awgn: bits_per_symbol= goes with ebn0_db=; {kind} does not use it.")
+        raise ValueError(f"awgn: bits_per_symbol= goes with eb_n0_db=; {kind} does not use it.")
     p = _ref_power(x, ref_power, "awgn")
     return p, p / (band * ratio)
 

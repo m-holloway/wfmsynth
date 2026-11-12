@@ -116,7 +116,7 @@ def test_decimating_downconvert_keeps_every_dth_sample_of_the_same_filter():
     g = Grid(fs=FS, n=len(x), domain="iq", fc_hz=FC)
     full = Signal(seed=0, grid=g).capture(values=x).upconvert().downconvert(fc_hz=FC, lpf=LPF)
     dec = Signal(seed=0, grid=g).capture(values=x).upconvert().downconvert(
-        fc_hz=FC, lpf=LPF, fs_out=FS / 32)
+        fc_hz=FC, lpf=LPF, fs_out_hz=FS / 32)
     y = dec.waveform()
     assert np.array_equal(y, full.waveform()[::32])
     sg = dec.stored_grid(y)
@@ -235,7 +235,8 @@ def test_every_source_knob_moves_the_record_and_its_address(knob, alt):
     (lambda **k: _src().upconvert(**k), "phase_rad", 0.5),
     (lambda **k: _src().upconvert().downconvert(**{"fc_hz": FC, "lpf": LPF, **k}), "fc_hz", FC + 1e6),
     (lambda **k: _src().upconvert().downconvert(**{"fc_hz": FC, "lpf": LPF, **k}), "phase_rad", 0.5),
-    (lambda **k: _src().upconvert().downconvert(**{"fc_hz": FC, "lpf": LPF, **k}), "lpf", 5e6),
+    (lambda **k: _src().upconvert().downconvert(**{"fc_hz": FC, "lpf": LPF, **k}), "lpf",
+     dict(pass_hz=5e6)),
 ])
 def test_every_mixer_knob_moves_the_record_and_its_address(build, knob, alt):
     a, b = build(), build(**{knob: alt})
@@ -253,7 +254,7 @@ def test_a_scope_sampling_rf_then_downconverting_returns_the_symbols():
     prof = AcquisitionProfile(sample_rate_hz=4e9, record_length=1 << 16,
                               input_bandwidth_hz=3e9, bits=8)
     s = (Signal(seed=1, grid=g).iq("qam16", prbs=15, prbs_phase=100).upconvert().acquire(prof)
-         .downconvert(fc_hz=FC, lpf=LPF, fs_out=250e6))
+         .downconvert(fc_hz=FC, lpf=LPF, fs_out_hz=250e6))
     y = s.waveform()
     sg = s.stored_grid(y)
     assert (sg.fs, sg.n, sg.domain, sg.fc_hz) == (250e6, 4096, "iq", FC)
@@ -443,9 +444,9 @@ def test_downconvert_refuses_a_filter_it_cannot_honour():
     with pytest.raises(ValueError, match="image.*would come through"):
         up().downconvert(fc_hz=FC, lpf=dict(pass_hz=20e6, stop_hz=1.99e9)).waveform()
     with pytest.raises(ValueError, match="not fs=.*divided by a whole number"):
-        up().downconvert(fc_hz=FC, lpf=LPF, fs_out=3e9).waveform()
+        up().downconvert(fc_hz=FC, lpf=LPF, fs_out_hz=3e9).waveform()
     with pytest.raises(ValueError, match="above the output Nyquist.*would alias"):
-        up().downconvert(fc_hz=FC, lpf=LPF, fs_out=100e6).waveform()
+        up().downconvert(fc_hz=FC, lpf=LPF, fs_out_hz=100e6).waveform()
     with pytest.raises(ValueError, match="taps.*and the record has"):
         up().downconvert(fc_hz=FC, lpf=dict(pass_hz=20e6, stop_hz=20.2e6)).waveform()
     with pytest.raises(ValueError, match="does not take .*'cutoff_hz'"):

@@ -132,7 +132,7 @@ def test_ops_stated_in_hz_read_the_rate_the_record_is_at():
     g = Grid(fs=8e9, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
 
     def chain():
-        return tone(k=41, grid=g).upconvert().downconvert(fc_hz=1e9, lpf=20e6, fs_out=250e6)
+        return tone(k=41, grid=g).upconvert().downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6), fs_out_hz=250e6)
 
     x = chain().waveform()
     s = chain().freq_offset(f_hz=1e6)
@@ -263,7 +263,7 @@ def test_snr_in_a_stated_bandwidth_is_what_the_spectrum_shows():
 
 
 @pytest.mark.parametrize("request_,want_db", [(dict(es_n0_db=15), 15.0),
-                                              (dict(ebn0_db=12), 12 + 10 * np.log10(2)),
+                                              (dict(eb_n0_db=12), 12 + 10 * np.log10(2)),
                                               (dict(snr_db=15, bw_hz=BAUD), 15.0)])
 def test_es_n0_is_what_the_matched_filter_sees(request_, want_db):
     """Es/N0 read off the record by a receiver: matched-filter, sample, and the error vector
@@ -280,12 +280,12 @@ def test_es_n0_is_what_the_matched_filter_sees(request_, want_db):
 
 
 def test_ebn0_takes_its_bits_per_symbol_from_the_source_and_records_it():
-    s = qpsk().awgn(ebn0_db=12)
-    assert s.ops[-1] == {"op": "awgn", "ebn0_db": 12, "bits_per_symbol": 2}
+    s = qpsk().awgn(eb_n0_db=12)
+    assert s.ops[-1] == {"op": "awgn", "eb_n0_db": 12, "bits_per_symbol": 2}
     same = qpsk().awgn(es_n0_db=12 + 10 * np.log10(2))
     assert np.abs(s.waveform() - same.waveform()).max() < 1e-12
     g = Grid(fs=16 * BAUD, baud=BAUD, n=1 << 12, domain="iq")
-    by_hand = Signal(seed=1, grid=g).iq(symbols=[1, 1j, -1, -1j] * 8).awgn(ebn0_db=12)
+    by_hand = Signal(seed=1, grid=g).iq(symbols=[1, 1j, -1, -1j] * 8).awgn(eb_n0_db=12)
     with pytest.raises(ValueError, match="needs bits_per_symbol="):
         by_hand.waveform()
 
@@ -462,8 +462,8 @@ REFUSALS = [
     (lambda: tone().awgn(snr_db=10), "ambiguous without bw_hz="),
     (lambda: tone().awgn(snr_db=10, bw_hz=2 * FS), "no wider than the\\s+record's band"),
     (lambda: tone().awgn(es_n0_db=10, bw_hz=1e6), "bw_hz= goes with snr_db="),
-    (lambda: tone().awgn(es_n0_db=10, bits_per_symbol=2), "goes with ebn0_db="),
-    (lambda: tone().awgn(ebn0_db=10), "needs bits_per_symbol="),
+    (lambda: tone().awgn(es_n0_db=10, bits_per_symbol=2), "goes with eb_n0_db="),
+    (lambda: tone().awgn(eb_n0_db=10), "needs bits_per_symbol="),
     (lambda: tone().awgn(es_n0_db=10, ref_power=-1.0), "must be\\s+positive"),
     (lambda: tone(grid=Grid(fs=FS, n=N, domain="iq")).awgn(es_n0_db=10), "needs the symbol rate"),
     (lambda: Signal(grid=G).capture(values=np.zeros(N, complex)).awgn(es_n0_db=10),
@@ -486,8 +486,8 @@ def test_what_cannot_be_done_honestly_is_refused_by_name(build, match):
 
 
 def test_a_misspelled_parameter_is_caught_where_it_is_written():
-    with pytest.raises(TypeError, match="eb_n0_db.*did you mean 'ebn0_db'"):
-        tone().awgn(eb_n0_db=10)
+    with pytest.raises(TypeError, match="ebn0_db.*eb_n0_db="):       # 0.46.0's first spelling
+        tone().awgn(ebn0_db=10)
     with pytest.raises(TypeError, match="rejection_db"):
         tone().iq_imbalance(rejection_db=30)
     with pytest.raises(ValueError, match="no freq_offset or phase_noise"):
@@ -504,7 +504,7 @@ def test_a_stated_fold_lets_an_offset_follow_the_noise():
 def test_lo_phase_refuses_to_add_phases_on_two_timebases():
     g = Grid(fs=8e9, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
     s = (tone(k=41, grid=g).freq_offset(f_hz=1e5).upconvert()
-         .downconvert(fc_hz=1e9, lpf=20e6, fs_out=250e6).freq_offset(f_hz=1e5))
+         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6), fs_out_hz=250e6).freq_offset(f_hz=1e5))
     with pytest.raises(ValueError, match="not on one timebase"):
         s.lo_phase()
 

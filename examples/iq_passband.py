@@ -14,7 +14,7 @@ move between it and an ordinary real voltage:
          .iq("qam16", prbs=15)                     # complex symbols, root-raised-cosine
          .upconvert()                              # -> a real 1 GHz passband voltage
          .acquire(scope)                           # ...which a scope can look at
-         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out=250e6))
+         .downconvert(fc_hz=1e9, lpf=dict(pass_hz=20e6, stop_hz=60e6), fs_out_hz=250e6))
 
 Between `upconvert` and `downconvert` the record is a voltage like any other, so the probe,
 front end, sampler and converter this library already has model an instrument looking at RF.
@@ -69,7 +69,7 @@ def main():
     # 2. the same signal through an instrument at RF
     scope = ws.AcquisitionProfile(sample_rate_hz=4e9, record_length=1 << 16,
                                   input_bandwidth_hz=3e9, bits=8)
-    rf = source().upconvert().acquire(scope).downconvert(fc_hz=FC, lpf=LPF, fs_out=250e6)
+    rf = source().upconvert().acquire(scope).downconvert(fc_hz=FC, lpf=LPF, fs_out_hz=250e6)
     y = rf.waveform()
     stored = rf.stored_grid(y)             # NOT G: the scope stored at its own rate
     print(f"\nchain: {rf.stage_kinds(domains=True)}")

@@ -144,7 +144,7 @@ None of these moves a rendered sample.
   `{name: (n, L)}`; `unit_dataset` takes one too. `op_params(recipe, op, chain=)` reads a
   several-channel recipe.
 - **Labels follow the samples through a rate change and a delay.** After `acquire`,
-  `digitize(n_out=)`, `sample_clock(n_out=)` or `downconvert(fs_out=)` an upstream event's
+  `digitize(n_out=)`, `sample_clock(n_out=)` or `downconvert(fs_out_hz=)` an upstream event's
   `sample` and `width` are on the stored record (they used to stay on the synthesis grid and
   point past its end: 36 of 40 labels on a 4:1 acquisition), and one past a shortened record
   is dropped. `delay` moves upstream events by the delay where they land. Samples are
