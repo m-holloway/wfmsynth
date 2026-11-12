@@ -13,7 +13,7 @@ Modules / public API:
                 am_modulate/fm_modulate/pm_modulate, am, fm, psk, qam, chirp, ...
   iq            complex baseband: a constellation source with known symbols (map_bits, shape),
                 upconvert / downconvert between I/Q and a real passband record, the stated
-                low-pass (lowpass, lowpass_error), and demodulate / evm
+                low-pass (lowpass, lowpass_error), and the receiver (demodulate)
   domain        which domain ('real' | 'iq') each op accepts -- ACCEPTS is where an op opts in
   rf            what a transmitter, an oscillator and a channel do to an I/Q record, one op
                 per effect: iq_imbalance, iq_offset, freq_offset, phase_noise, awgn, spur, dac

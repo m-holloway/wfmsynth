@@ -242,11 +242,17 @@ def complex_gain(received, sent):
 
 
 def evm(received, sent, fit=False):
-    """RMS error-vector magnitude, as a fraction of the sent symbols' RMS.
+    """RMS error between two sets of SYMBOLS you already hold, as a FRACTION of the sent
+    symbols' RMS: the arithmetic `rf.evm` ends in.
 
-    By default nothing is fitted, so this is the error of the record as it stands -- a gain
-    or a carrier-phase rotation counts in full. `fit=True` divides out `complex_gain` first,
-    which is what a receiver's carrier recovery does; timing is never fitted."""
+    THE EVM OF A RECORD IS `wfmsynth.rf.evm(x, grid, sent)`: it runs the receiver, reports
+    percent and dB beside the fraction, and names every correction it makes. Use this one
+    where there is no receiver to run -- symbols from your own demodulator, or a record that
+    was already matched-filtered.
+
+    By default nothing is fitted, so a gain or a carrier-phase rotation counts in full.
+    `fit=True` divides out `complex_gain` first (what `rf.evm(correct=("gain", "phase"))`
+    removes, as one complex least-squares gain); timing is never fitted."""
     r, s = np.asarray(received, complex), np.asarray(sent, complex)
     if fit:
         r = r / complex_gain(r, s)

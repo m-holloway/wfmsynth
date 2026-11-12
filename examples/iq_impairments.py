@@ -46,7 +46,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wfmsynth as ws
-from wfmsynth import iq, rf
+from wfmsynth import rf
 
 BAUD = 25e6
 G = ws.Grid(fs=16 * BAUD, baud=BAUD, n=1 << 16, domain="iq", fc_hz=2.4e9)
@@ -74,8 +74,7 @@ def evm_of(sig, derotate=None):
     if derotate is not None:
         x = x * np.exp(-1j * derotate)
     sent, _ = sig.transmitted()
-    got = iq.demodulate(x, sig.grid)
-    return iq.evm(got[EDGE:-EDGE], sent[EDGE:-EDGE], fit=True)
+    return rf.evm(x, sig.grid, sent, skip=EDGE, correct=("gain", "phase"))["evm"]
 
 
 def predicted(name, r):
@@ -106,12 +105,10 @@ def main():
 
     # ---- the frequency offset: a slope, not an EVM
     cfo = source().freq_offset(f_hz=2e3)
-    sent, t_s = cfo.transmitted()
-    got = iq.demodulate(cfo.waveform(), G)
-    slope = np.polyfit(t_s[EDGE:-EDGE],
-                       np.unwrap(np.angle(got * np.conj(sent)))[EDGE:-EDGE], 1)[0]
+    sent, _ = cfo.transmitted()
+    took = rf.evm(cfo.waveform(), G, sent, skip=EDGE, correct=("frequency",))["removed"]
     print(f"\n  freq_offset  f_hz = 2000       read back from the symbols' phase: "
-          f"{slope / (2 * np.pi):.1f} Hz")
+          f"{took['frequency_hz']:.1f} Hz")
 
     # ---- everything at once
     s = source()

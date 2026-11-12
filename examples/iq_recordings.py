@@ -92,6 +92,8 @@ recipe = keep.recipe()
 for name in os.listdir(work):
     os.remove(os.path.join(work, name))
 os.rmdir(work)
+# the record is ALREADY matched-filtered, so its symbols are its samples at the centres and
+# `iq.evm` is the arithmetic on symbols in hand (a fraction); `rf.evm` is the measure of a record
 k = np.rint(t_s * g.fs).astype(int)[10:-10]
 evm = ws.iq.evm(ws.Signal.from_recipe(recipe).waveform()[k], sent[10:-10])
 print(f"\nembedded     replayed from the recipe alone, matched-filtered: EVM {100 * evm:.2f} % "
