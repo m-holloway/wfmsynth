@@ -458,7 +458,7 @@ def roles(sig):
 
 def render_at(sig, path, streams=None):
     """The sub-chain at namespace `path`, rendered exactly as it is inside `sig`'s record."""
-    st = streams if streams is not None else Streams(sig.seed)
+    st = streams if streams is not None else sig._streams()
     for _i, at, _label, spec in walk(sig.ops):
         if path == at or path.startswith(at + "/"):
             with warnings.catch_warnings():
@@ -504,7 +504,13 @@ def _held(v):
         for e in v))
 
 
-def _tree(sig, pre, indent):
+def _tree(sig, pre, indent, parts=None):
+    # `parts`: where each toleranced value sits -> its role, for this chain and those inside
+    # it (a nested part is recorded on the outer op that holds the sub-chain)
+    parts = dict(parts or {})
+    for i, o in enumerate(sig.ops):
+        for name, e in o.get("_unit", {}).items():
+            parts[TOL.located(i, name, o, pre)] = TOL._role(i, name, e, pre, o)
     subs = {}
     for i, at, label, spec in walk(sig.ops):
         subs.setdefault(i, []).append((at, label, spec))
@@ -512,7 +518,7 @@ def _tree(sig, pre, indent):
     wo = max((len(str(o.get("op"))) for o in sig.ops), default=0)
     lines = []
     for i, o in enumerate(sig.ops):
-        part = {k: TOL._role(i, k, e, pre) for k, e in o.get("_unit", {}).items()}
+        part = {k: parts[f"{pre}unit/{i}/{k}"] for k in o if f"{pre}unit/{i}/{k}" in parts}
         shown = ", ".join(f"{k}={_short(v)}" + (f" ({part[k]})" if k in part else "")
                           for k, v in o.items()
                           if k != "op" and not k.startswith("_") and not _held(v))
@@ -528,7 +534,7 @@ def _tree(sig, pre, indent):
                 f", {_grid_words(sub.grid)}" if sub.grid is not None else "")
                    if "from" in spec else "")
             lines.append(f"{indent}{'':>{wi}}    {label}  [{pre}{at}]{own}")
-            lines += _tree(sub, f"{pre}{at}/", indent + " " * (wi + 6))
+            lines += _tree(sub, f"{pre}{at}/", indent + " " * (wi + 6), parts)
     return lines
 
 

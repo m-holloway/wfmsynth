@@ -475,12 +475,12 @@ def test_a_signal_used_inside_another_record_hands_its_tolerances_to_that_record
         elements=[{"id": "c", "kind": "c", "a": "bus", "b": "gnd", "farad": 1e-12}],
         drivers=[{"id": "d", "node": "bus", "ohm": 20.0, "state": "on",
                   "source": {"ops": inner, "volts": True}}])
-    assert net.roles()[-1] == "unit/0/drivers.0.source.ops.0.tr_s"
+    assert net.roles()[-1] == "net/0/d/unit/0/tr_s"
     assert "_unit" not in net.ops[0]["drivers"][0]["source"]["ops"][0]
 
     victim = Signal(seed=1, grid=G).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=10e6, tr_s=1e-10)
     s = victim.crosstalk(aggressor=inner, coupling=0.1)
-    role = "unit/1/aggressor.ops.0.tr_s"
+    role = "crosstalk/1/aggressor/unit/0/tr_s"
     assert s.roles() == [role]
     tr = s.ops[1]["aggressor"]["ops"][0]["tr_s"]
     assert tr == TOL.quantile(ws.tol(1e-10, 10), TOL._u(1, role))[0]      # the outer seed and role
@@ -547,7 +547,7 @@ def test_a_tolerance_inside_a_drivers_own_chain_belongs_to_the_outer_record():
                            "tr_s": 1e-9, "v_hi": {"nom": 3.3, "tol_pct": 10}}]}}])
 
     s = build(6)
-    role = "unit/0/drivers.0.source.ops.0.v_hi"
+    role = "net/0/d/unit/0/v_hi"
     assert s.roles() == [role]
     v_hi = s.ops[0]["drivers"][0]["source"]["ops"][0]["v_hi"]
     y = s.waveform()

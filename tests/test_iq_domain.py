@@ -485,7 +485,7 @@ def test_the_source_refuses_what_it_cannot_render_honestly():
 
 def test_transmitted_is_refused_where_there_is_nothing_to_report():
     s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096)).carrier("nrz")
-    with pytest.raises(ValueError, match="no `iq` source.*carrier_symbols"):
+    with pytest.raises(ValueError, match="starts with `carrier`.*carrier_symbols"):
         s.transmitted()
 
 

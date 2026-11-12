@@ -964,6 +964,11 @@ X, recipes = ws.unit_dataset(lambda rng: board(int(rng.integers(1 << 30))), 6, 4
 units = np.array([ws.unit_of(r) for r in recipes])     # 24 records, 6 units: split on THIS
 ```
 
+`ws.unit_dataset` takes a builder that returns a `ws.Channels` as well: `X` is then
+`{name: (n, L)}`, one stack per channel, and `ws.op_params(recipe, "lossy", chain="clk")` reads a
+label from one chain of the record's recipe. A part inside a sub-chain is named like everything
+else inside it: `crosstalk/1/aggressor/unit/1/loss_db`, beside `crosstalk/1/aggressor/rx_noise/2`.
+
 Split train and test on `ws.unit_of(recipe)`, never at random: captures of one unit on both
 sides is leakage ([`examples/unit_variation.py`](../examples/unit_variation.py) measures it,
 1.7 ohm error on a random split against 31.3 ohm on held-out units). A whole-number parameter
@@ -1014,6 +1019,8 @@ the general stage is for the shape that has no name.
 | `timing` | `delay` by a named jitter source | jitter about zero, which may advance | a path length that moves; causal, with a stated error |
 | `scope`, `probe`, `ctle`, `tx_ffe`, `rx_ffe`, `dfe`, `ac_couple` | `filter` | it is that instrument or equaliser | a Butterworth, Chebyshev or elliptic design, an integrator, your own taps |
 | `nonlinearity`, `digitize`, `store`, `pass_fet` | `law` | it is a transmitter, a converter, a switch | a comparator, rectifier, dead zone, limiter, diode |
+| `agc` | `gain(by=)` | the gain is a loop that sets itself from the signal's level | the gain is a stated signal: a supply, a fade, an envelope's level control |
+| `supply_coupling` | `gain(by=)` and `timing` from one ripple | one rail gives both the amplitude ripple and the supply-induced jitter | the ripple is a chain of its own (`gain(by=)`), or simply adds (`combine`) |
 | `Scene` | `Channels` | you hold arrays already | the channels are chains and must replay from one recipe |
 
 `gain(by=chain)` and a product `combine` are the same samples, as are `offset(by=chain)` and a
@@ -1201,13 +1208,24 @@ xf, ev = frame.realize()
 [(e.kind, e.sample) for e in ev.on_record()]            # -> [('segment', 4096)]
 spec = rf.spectrum(xf, gi, rbw_hz=1e6)
 10 * np.log10(rf.band_power(spec, 23e6, 57e6) / rf.band_power(spec, -17e6, 17e6))   # -> -20.1 dB
+sent, t_s = frame.transmitted()                         # preamble then payload, on the record's clock
+rf.evm(xf, gi, sent, skip=8)["evm_pct"]                 # -> 3.53 %: the 5 % supply ripple, as an rms
 
 two = ws.Channels(
     {"a": Signal().iq("qpsk", prbs=9).use("lo"), "b": Signal().iq("qam16", prbs=15).use("lo")},
     shared={"lo": Signal().phase_noise(profile=[(1e4, -75), (1e5, -95), (1e6, -115)])},
     seed=2, grid=gi)
 two.roles()                                             # -> ['lo/phase_noise/0']
+a = two.signal("a")                                     # channel a, exactly as it is in the record
+a.transmitted()                                         # the symbols a sent
+a.lo_phase()                                            # the shared oscillator's phase: one label for a and b
+a.rf_report()                                           # -> [{'op': 0, 'name': 'phase_noise', 'chain': 'lo', ...}]
 ```
+
+`transmitted()` follows a `sequence`: each segment's symbols at the times they sit in the record.
+`rec.signal(name)` is one channel as a `Signal` that renders as it does in the record, so
+everything a Signal reports about itself (`transmitted`, `rf_report`, `lo_phase`, `subchain`,
+`realize`, `filter_delays`) is available per channel; its recipe is the record's.
 
 A sub-chain written as `Signal()` with no grid starts in the domain its own ops need, so a real
 supply or enable sits inside an I/Q record without ceremony.

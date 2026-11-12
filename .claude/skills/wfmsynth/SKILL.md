@@ -72,6 +72,8 @@ has each one worked.
   sources made of chains.
 - **`ws.Channels({name: chain}, shared={name: chain}, seed=, grid=)`** is several channels from
   one recipe; `.use(name)` applies a shared stage or stands for a shared signal.
+  `rec.signal(name)` is one channel as a `Signal`, rendering exactly as it does in the record,
+  for everything a Signal reports about itself (`transmitted()`, `rf_report()`, `subchain()`).
 - **`law(kind, ...)` / `filter(kind, ...)`** are a comparator, rectifier, Butterworth, your own
   taps: the shape with no named op. The named ops (`scope`, `ctle`, `digitize`, ...) stay
   canonical for what they name, and asking `filter` for one of them is refused with its name.

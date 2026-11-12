@@ -248,6 +248,31 @@ class Channels:
                              f"whichever chain uses it -- so it has no waveform of its own.")
         return _Render(self, streams).signal(name)[0]
 
+    def signal(self, name):
+        """Channel (or shared signal chain) `name` as a `Signal` that renders EXACTLY as it
+        does in this record -- the record's seed, the chain's own role names, its `use`s
+        resolved here -- so everything a Signal can say about itself is available for one
+        channel of several:
+
+            two.signal("a").transmitted()         # the symbols channel a sent
+            two.signal("a").rf_report()           # what each impairment came to, shared ones too
+            two.signal("a").lo_phase()            # the shared oscillator's phase: a label
+            rec.signal("data").subchain("crosstalk/2/aggressor")
+
+        also `realize()`, `summary()`, `stored_grid(x)`, `filter_delays()`, `delay_errors()`.
+        It is a view, not a record of its own: `recipe()`, `contrast()` and `unit()` are the
+        record's, and are refused here saying so."""
+        if name not in self.chains:
+            raise ValueError(f"Channels: no chain {name!r}. This record has: "
+                             f"{list(self.chains)}")
+        if not self.is_signal(name):
+            raise ValueError(f"Channels: {name!r} is a stage -- it starts with "
+                             f"`{self.chains[name][0]['op']}` and acts on the waveform of "
+                             f"whichever chain uses it -- so it is not a signal by itself.")
+        s = self._signal(name)
+        s.ops, s.within = list(s.ops), (self, name)
+        return s
+
     def realize(self, streams=None):
         """One pass -> ``(waveforms, events)``, both ``{name: ...}``: each channel's samples
         and its `EventList`. An event placed inside a chain this channel uses carries that
@@ -297,7 +322,7 @@ class Channels:
         however many channels use it. Toleranced parts follow: `<chain name>/unit/...`, or
         `unit/<group>` for a part several chains share (see `unit`)."""
         return [f"{name}/{r}" for name in self.chains for r in self._signal(name).roles()
-                if not r.startswith("unit/")] + self._unit_roles()
+                if not TOL.is_role(r)] + self._unit_roles()
 
     def contrast(self, *factors, seed=None):
         """Sibling waveforms with ONLY the named roles re-rolled -> ``{name: samples}``.

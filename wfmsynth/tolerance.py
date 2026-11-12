@@ -59,7 +59,8 @@ tolerances already resolved; `unit()` or a `unit/...` re-roll on a record that h
 INSIDE A SUB-CHAIN. A chain nested in an op (`crosstalk(aggressor=...)`, a `net` driver's
 source; see `wfmsynth.subchain`) is part of the unit, so its tolerances belong to the OUTER
 record: one written in a nested op's dict, or carried in by a `Signal` used as the sub-chain, is
-drawn under the outer seed with the role `unit/<op index>/<param>.ops.<k>.<parameter>`, and
+drawn under the outer seed with the role `<the sub-chain's namespace>/unit/<k>/<parameter>`
+(`crosstalk/1/aggressor/unit/1/loss_db`, beside that sub-chain's `.../rx_noise/2`), and
 `unit()` moves it with everything else. `{"from": recipe}` is another record pinned as rendered,
 and so is its unit.
 
@@ -237,12 +238,37 @@ def quantile(spec, u):
     return nom + (half / NORMAL_SIGMAS) * z, None
 
 
-def _role(i, path, spec, pre=""):
-    """`pre` is the chain's name in a several-channel record (`clk/`): an ungrouped part
-    belongs to its chain, a GROUP to the whole record -- that is how two channels say they
-    share a part."""
+def located(i, name, op=None, pre=""):
+    """Where a toleranced parameter sits, written the way every other role is. In the chain
+    itself: `unit/<op index>/<parameter>`. Inside a sub-chain: that sub-chain's namespace,
+    then the same -- `crosstalk/1/aggressor/unit/1/loss_db` beside
+    `crosstalk/1/aggressor/rx_noise/2`. `pre` is the chain's name in a several-channel
+    record (`clk/`)."""
+    path = _split(name)
+    if op is None or "ops" not in path:
+        return f"{pre}unit/{i}/{name}"
+    ns, k = [], 0
+    while "ops" in path[k:]:
+        j = path.index("ops", k)
+        held = path[k:j]
+        if op.get("op") == "net" and held[:1] == ("drivers",):     # as `subchain.walk` names it
+            ns.append(f"net/{i}/{op['drivers'][held[1]].get('id')}")
+        else:
+            ns.append(f"{op.get('op')}/{i}/" + "/".join(map(str, held)))
+        op, i, k = _get(op, path[k:j + 2]), path[j + 1], j + 2
+    return f"{pre}{'/'.join(ns)}/unit/{i}/" + ".".join(map(str, path[k:]))
+
+
+def is_role(name):
+    """True for the role of a toleranced part, wherever it sits."""
+    return name.startswith("unit/") or "/unit/" in name
+
+
+def _role(i, path, spec, pre="", op=None):
+    """An ungrouped part's role is where it sits (`located`); a GROUP belongs to the whole
+    record -- that is how two channels say they share a part."""
     g = spec.get("group")
-    return f"unit/{g}" if g is not None else f"{pre}unit/{i}/{path}"
+    return f"unit/{g}" if g is not None else located(i, path, op, pre)
 
 
 def _draw(spec, seed, role):
@@ -326,7 +352,7 @@ def resolve(i, params, seed, pre=""):
                 f"op {i}, parameter {name!r}: {path[-1]} is a whole number, and a tolerance "
                 f"draws a fraction of one, which would be recorded and then truncated. Name "
                 f"the values it can take: ws.corners({{'lo': ..., 'hi': ...}}).")
-        value, unit[name] = _draw(spec, seed, _role(i, name, spec, pre))
+        value, unit[name] = _draw(spec, seed, _role(i, name, spec, pre, params))
         params = _set(params, path, value)
     return {**params, "_unit": unit}
 
@@ -359,7 +385,7 @@ def resolve_ops(ops, seed):
 def _entries(ops, pre=""):
     for i, op in enumerate(ops):
         for name, entry in op.get("_unit", {}).items():
-            yield i, name, entry, _role(i, name, entry, pre)
+            yield i, name, entry, _role(i, name, entry, pre, op)
 
 
 def roles(ops, pre=""):
@@ -461,7 +487,7 @@ def redrawn(sig, streams):
     # which has no overrides of its own: its tolerances were resolved, and are re-rolled, as
     # parameters of the outer op it sits in
     overrides = getattr(streams, "_overrides", {})
-    seed_of = {k: v for k, v in overrides.items() if k.startswith("unit/")}
+    seed_of = {k: v for k, v in overrides.items() if is_role(k)}
     if not seed_of:
         return sig
     same = sorted({r for _i, _n, e, r in _entries(sig.ops)
@@ -493,7 +519,8 @@ def unit_dataset(build, n_units, n_captures, seed=0):
     sides and the test score then measures memory of the unit.
 
     `build(rng)` must return the same design each call and vary something per capture (a
-    `Signal(seed=)`, a pattern seed). Captures of one unit that come out identical are refused:
+    `Signal(seed=)`, a pattern seed). It may return a `ws.Channels`: `X` is then
+    ``{name: (n, L)}`` as from `dataset`, and `unit_of` reads the same key off its recipe. Captures of one unit that come out identical are refused:
     they would be one record counted `n_captures` times."""
     from .compose import dataset
     n_units, n_captures = int(n_units), int(n_captures)
@@ -509,7 +536,7 @@ def unit_dataset(build, n_units, n_captures, seed=0):
 
     def one(rng):
         j = next(k)
-        s = as_unit(build(rng), int(useeds[j // n_captures]))
+        s = build(rng).unit(int(useeds[j // n_captures]))        # a Signal or a Channels
         h = s.sha256()
         if h in seen:
             raise ValueError(

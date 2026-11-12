@@ -257,7 +257,7 @@ def test_roles_reach_inside_and_contrast_rerolls_one_segment_only():
 def test_a_tolerance_inside_a_segment_is_this_records_unit():
     part = Signal(grid=G).carrier("dc", level=ws.tol(1.0, 10))
     s = Signal(seed=4, grid=G).sequence([{"chain": dc(0.0), "duration_s": T_A}, {"chain": part}])
-    assert s.roles() == ["unit/0/segments.1.chain.ops.0.level"]
+    assert s.roles() == ["sequence/0/segments/1/chain/unit/0/level"]
     level = s.ops[0]["segments"][1]["chain"]["ops"][0]["level"]
     assert 0.9 <= level <= 1.1 and level != 1.0
     assert np.all(s.waveform()[N_A:] == level)

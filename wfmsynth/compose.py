@@ -314,6 +314,49 @@ def _iq_symbols(p, grid):
     return IQ.map_bits(con, _coded_bits(q))
 
 
+def _constellations(ops, grid):
+    """The named constellations a chain's source transmits on, through a `sequence`."""
+    src = ops[0] if ops else {}
+    if src.get("op") == "iq":
+        return {src["constellation"]} if src.get("constellation") else set()
+    if src.get("op") == "sequence":
+        return set().union(*(_constellations(SUB.child(seg["chain"], grid).ops, grid)
+                             for seg in src["segments"]))
+    return set()
+
+
+def _sent(ops, grid, who):
+    """``(symbols, t_s)`` of the chain `ops` on `grid`: what `Signal.transmitted()` returns."""
+    from . import iq as IQ
+    from . import sequence as SEQ
+    src = ops[0] if ops else {"op": None}
+    if src["op"] == "iq":
+        a = _iq_symbols(src, grid)
+        return a, IQ.symbol_times(len(a), grid)
+    if src["op"] == "sequence":
+        sym, t_s = [], []
+        for s, seg in zip(SEQ.layout(src["segments"], grid), src["segments"]):
+            sub = SUB.child(seg["chain"], grid)
+            a, t = _sent(sub.ops, sub.grid if sub.grid is not None else grid,
+                         f"{who}: segment {s['segment']} of the sequence")
+            if s["state"] != "continue":             # a restart counts from its own start
+                t = t + s["t_start_s"]
+            keep = (t >= s["t_start_s"]) & (t < s["t_stop_s"])
+            sym.append(a[keep]), t_s.append(t[keep])
+        return np.concatenate(sym), np.concatenate(t_s)
+    more = {
+        "switch": " A `switch` chooses among its inputs sample by sample, so no one symbol "
+                  "stream was sent; each input's own is sig.subchains()[<namespace>]"
+                  ".transmitted().",
+        "use": " Inside a several-channel record, ask the record: "
+               "rec.signal(<channel>).transmitted().",
+        "carrier": " A carrier's symbols are physics.carrier_symbols(kind, n_ui, seed, pattern).",
+    }.get(src["op"], "")
+    raise ValueError(f"{who}: the chain starts with `{src['op']}`, and transmitted symbols "
+                     f"come from an `iq` source, or a `sequence` of chains that start with "
+                     f"one.{more}")
+
+
 def _op_iq(x, p, streams, grid, idx):
     from . import iq as IQ
     return IQ.shape(_iq_symbols(p, grid), grid, n=_grid_n(grid, p), pulse=p.get("pulse", "rrc"),
@@ -1993,6 +2036,24 @@ class Signal:
     # stages that are still circular wrap the record's tail onto its head, so both ends need guard.
     lead_in: object = None
     lead_out: object = None
+    # ``(record, chain name)`` for a chain handed out by `Channels.signal(name)`: it renders
+    # as that channel does inside its record -- the record's seed and the chain's namespace --
+    # and its recipe is the record's.
+    within: object = field(default=None, repr=False, compare=False)
+
+    def _streams(self, collect=False):
+        """The streams this chain draws from when none are handed in."""
+        if self.within is None:
+            return Streams(self.seed)
+        rec, name = self.within
+        return CH._Render(rec, None, collect).view(name)
+
+    def _alone(self, what, instead):
+        if self.within is not None:
+            rec, name = self.within
+            raise ValueError(
+                f"{what}: this Signal is channel {name!r} of a several-channel record, and "
+                f"renders under that record's seed and names. {instead}")
 
     def _add(self, op, /, **params):
         """Append one op, rejecting a parameter this op does not read.
@@ -2009,9 +2070,8 @@ class Signal:
             raise TypeError(f"op {op!r} does not take 'op': that key is the op's own name in "
                             f"the recipe, and the builder writes it.")
         params = SUB.flatten(op, params, self)                   # a sub-chain -> data
-        params = TOL.resolve(len(self.ops), params, self.seed)   # a toleranced value -> its number
-        OPKEYS.check(op, params)
-        new = {"op": op, **params}
+        new = TOL.resolve(len(self.ops), {"op": op, **params}, self.seed)   # a tolerance -> its number
+        OPKEYS.check(op, new)
         DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
         TRIG.check_chain(self.ops + [new])
         self.ops.append(new); return self
@@ -2030,6 +2090,7 @@ class Signal:
         """The same design as ANOTHER UNIT: every toleranced parameter (`ws.tol`, `ws.corners`)
         drawn again under `seed`, everything else -- ops, seed, noise -- the same. Returns a
         Signal, so the new unit's values are in its recipe. See `wfmsynth.tolerance`."""
+        self._alone("unit()", "Another unit is another record: rec.unit(seed).signal(<name>).")
         return TOL.as_unit(self, seed)
 
     def use(self, name):
@@ -2287,20 +2348,21 @@ class Signal:
         return self._add("downconvert", **params)
 
     def transmitted(self):
-        """``(symbols, t_s)`` -- the complex symbols an `iq` source sent and the time of each
-        one's centre, in seconds from sample 0. The ground truth for a demodulator, an EVM or
-        a bit-error count, resolved by the same code that renders the record.
+        """``(symbols, t_s)`` -- the complex symbols this chain's source sent and the time of
+        each one's centre, in seconds from sample 0. The ground truth for a demodulator, an
+        EVM or a bit-error count, resolved by the same code that renders the record.
+
+        The source is an `iq` op, or a `sequence` of chains that each start with one (a
+        preamble, then a payload): then every segment's symbols whose centres fall inside it,
+        in time order, on the record's clock. `wfmsynth.sequence.layout` gives each segment's
+        `t_start_s` / `t_stop_s`, so `t_s` says which segment a symbol belongs to.
 
         Times are the transmitter's: anything downstream with group delay (a channel, a
         front end) moves the record against them, and nothing here estimates that."""
-        from . import iq as IQ
-        src = next((o for o in self.ops if o["op"] == "iq"), None)
-        if src is None:
-            raise ValueError("transmitted(): this chain has no `iq` source. A carrier's symbols "
-                             "are physics.carrier_symbols(kind, n_ui, seed, pattern); a "
-                             "capture has no transmitted symbols to report.")
-        a = _iq_symbols(src, self.grid)
-        return a, IQ.symbol_times(len(a), self.grid)
+        ops = self.ops
+        if self.within is not None:                  # a channel: its `use`s stand for chains
+            ops = self.within[0].expand(self.within[1])[1]
+        return _sent(ops, self.grid, "transmitted()")
 
     # ---- I/Q impairments: one op per effect, conventions in `wfmsynth/rf.py` ----
     def iq_imbalance(self, **params):
@@ -2359,9 +2421,9 @@ class Signal:
         `awgn/<op index>`. `rf_report()` gives the reference power and noise density used."""
         if params.get("ebn0_db") is not None and "bits_per_symbol" not in params:
             from . import iq as IQ
-            con = next((o.get("constellation") for o in self.ops if o["op"] == "iq"), None)
-            if con is not None:
-                params["bits_per_symbol"] = IQ.bits_per_symbol(con)
+            cons = _constellations(self.ops, self.grid)
+            if len(cons) == 1:                     # several (a QPSK preamble, a QAM payload)
+                params["bits_per_symbol"] = IQ.bits_per_symbol(cons.pop())   # have no one Eb
         return self._add("awgn", **params)
 
     def spur(self, **params):
@@ -2401,7 +2463,9 @@ class Signal:
                           power), backoff_db, clipped_fraction, sqnr_db (signal over the
                           uniform-step noise of both rails)
 
-        Powers are measured on the record as it reaches the op."""
+        Powers are measured on the record as it reaches the op. For a channel of a
+        several-channel record (`rec.signal(name)`) the impairments of the chains it `use`s
+        are listed too, each with ``"chain": <that chain's name>``."""
         return RF.report(self)
 
     def lo_phase(self, streams=None):
@@ -3336,7 +3400,7 @@ class Signal:
         from .events import EventList
         if streams is not None and _plan is None:
             self = TOL.redrawn(self, streams)     # a re-rolled unit/* role is a sibling record
-        st = streams if streams is not None else Streams(self.seed)
+        st = streams if streams is not None else self._streams(collect_events)
         plan = _plan if _plan is not None else self.lead_plan()
         ops = self.ops if plan is None else plan.ops
         grid = self.grid if plan is None else plan.grid
@@ -3524,6 +3588,7 @@ class Signal:
 
         A name that matches no randomness in this record is refused: re-rolling it would
         return the record unchanged, which reads as "this factor does not matter"."""
+        self._alone("contrast()", "Re-roll through the record: rec.contrast('<chain>/<role>').")
         st = Streams(self.seed).reroll(*factors, seed=seed)
         x = self.waveform(streams=st)
         idle = st.idle(self.roles())
@@ -3554,6 +3619,7 @@ class Signal:
         """A JSON-serializable dict: engine version, seed, grid, and the ordered ops
         with their exact knob values. This IS the ground truth for the waveform."""
         from wfmsynth import __version__
+        self._alone("recipe()", "The recipe that reproduces it is the record's: rec.recipe().")
         r = {"wfmsynth_version": __version__, "seed": int(self.seed),
              "ops": [dict(o) for o in self.ops]}
         # only when a lead-in is actually set, so an existing recipe's JSON -- and therefore its
@@ -3727,19 +3793,39 @@ def _warn_on_numeric_drift(recipe_version, ops):
                 RuntimeWarning, stacklevel=3)
 
 
-def op_params(recipe, op, which=None):
+def op_params(recipe, op, which=None, chain=None):
     """The parameters of one op in a recipe -- the labelling route for `dataset()`.
 
         y = np.array([op_params(r, "lossy")["loss_db"] for r in recipes])
+        op_params(rec.recipe(), "lossy", chain="data")      # a several-channel recipe
 
     This is a one-liner by hand (`[o for o in r["ops"] if o["op"] == "lossy"][0]`) and it is
     worth a function for one reason: that `[0]` silently takes the FIRST match. A chain with two
     `lossy` stages -- a package and a board, which is an ordinary thing to model -- would label
     every record from whichever happened to come first, and the labels would look fine. Here
-    that is an error naming the count, and `which=` resolves it deliberately.
+    that is an error naming the count, and `which=` resolves it deliberately. A `Channels`
+    recipe has several chains: `chain=` names the one, and may be left off when only one of
+    them holds the op.
 
     Raises `KeyError` when the op is absent, rather than returning None for a caller to index
     into: a missing label should stop a dataset build, not become a null in a training set."""
+    if "channels" in recipe and "ops" not in recipe:
+        named = {**recipe["channels"], **recipe.get("shared", {})}
+        holds = [n for n, c in named.items() if any(o.get("op") == op for o in c["ops"])]
+        if chain is None and len(holds) > 1:
+            raise ValueError(
+                f"this recipe has several chains and {holds} each hold a {op!r} op. Pass "
+                f"chain=<name> to say which.")
+        if chain is not None and chain not in named:
+            raise KeyError(f"no chain {chain!r} in this recipe; it has: {list(named)}")
+        if chain is None and not holds:
+            raise KeyError(f"no {op!r} op in any chain of this recipe; its chains are: "
+                           + ", ".join(f"{n} ({sorted({o.get('op') for o in c['ops']})})"
+                                       for n, c in named.items()))
+        recipe = named[chain if chain is not None else holds[0]]
+    elif chain is not None:
+        raise ValueError(f"chain={chain!r} names a chain of a several-channel recipe, and "
+                         f"this recipe is one Signal's.")
     ops = [o for o in recipe.get("ops", []) if o.get("op") == op]
     if not ops:
         present = sorted({o.get("op") for o in recipe.get("ops", [])})
@@ -3757,7 +3843,9 @@ def dataset(build, n, seed=0):
     """Ground-truth dataset builder. `build(rng)` returns a Signal (sample its knobs from
     `rng` however you like — the SAMPLED values are baked into the Signal's ops, hence
     recorded). Returns (X, recipes): X is (n, L) stacked waveforms, recipes is a list of n
-    per-sample recipes. Each waveform is exactly reproducible from its recipe.
+    per-sample recipes. Each waveform is exactly reproducible from its recipe. An I/Q record
+    is stacked as complex64; a builder that returns a `ws.Channels` gives ``{name: (n, L)}``,
+    one stack per channel, and one recipe per record.
 
     WHERE `y` COMES FROM: the recipe, not a list you keep alongside. There is deliberately no
     label argument, because the sampled knob values are already baked into the ops — so the
@@ -3800,10 +3888,14 @@ def dataset(build, n, seed=0):
     # it costs is released with it. See the comment above `_RESPONSE_CACHE`.
     with P.response_cache():
         for i, s in enumerate(sigs):
-            w = s.waveform()
+            several = isinstance(s, CH.Channels)
+            got = s.waveforms() if several else {None: s.waveform()}
             if X is None:
-                L = len(w)
-                X = np.empty((n, L), np.float32)
-            X[i] = w[:L] if len(w) >= L else np.pad(w, (0, L - len(w)))
-            del w
+                X = {k: np.empty((n, len(w)), np.complex64 if np.iscomplexobj(w) else np.float32)
+                     for k, w in got.items()}
+            for k, w in got.items():
+                L = X[k].shape[1]
+                X[k][i] = w[:L] if len(w) >= L else np.pad(w, (0, L - len(w)))
+            del got
+    X = X if several else X[None]
     return X, [s.recipe() for s in sigs]

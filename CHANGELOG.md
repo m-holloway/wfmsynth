@@ -52,7 +52,9 @@ The rule that decided what became an op and what did not is in
   shared signal is referred to. Each chain draws under its own name, so channels through one
   shared PLL see one realisation and `contrast("pll/timing/0")` moves exactly those channels.
   One `recipe()`, one `sha256()`, `Channels.from_recipe`, `write_hdf5` (channel names and the
-  recipe travel in the file; `hdf5.read_recipe`, `hdf5.channel_names`).
+  recipe travel in the file; `hdf5.read_recipe`, `hdf5.channel_names`). `rec.signal(name)` is
+  one channel as a `Signal` that renders exactly as it does in the record, so `transmitted()`,
+  `rf_report()`, `lo_phase()`, `subchain()` and `realize()` work per channel.
 - **Two general stages, `law` and `filter`** (#80). Eight named transfer laws (`tanh`, `poly`,
   `limiter`, `deadzone`, `rectify`, `quantize`, `comparator`, `diode`) and ten named linear
   filters (`butter`, `bessel`, `cheby1`, `elliptic`, `rrc`, `fir`, `sos`, `zpk`, `integrate`,
@@ -110,6 +112,10 @@ None of these moves a rendered sample.
 - **Three parameter shapes are now reserved in a recipe**: a dict with a list under `ops` or a
   dict under `from` is a sub-chain, and a dict holding `nom`, `tol_pct`, `tol_abs` or `corners`
   is a toleranced value. No existing op parameter used them.
+- **`dataset()` stacks an I/Q record as complex64** (it was cast to float32, dropping the
+  imaginary part under a numpy warning), and a builder that returns a `Channels` gives
+  `{name: (n, L)}`; `unit_dataset` takes one too. `op_params(recipe, op, chain=)` reads a
+  several-channel recipe.
 - **Labels follow the samples through a rate change and a delay.** After `acquire`,
   `digitize(n_out=)`, `sample_clock(n_out=)` or `downconvert(fs_out=)` an upstream event's
   `sample` and `width` are on the stored record (they used to stay on the synthesis grid and

@@ -514,32 +514,63 @@ def _describe(op, x, grid, rng):
             "sqnr_db": _db(mean / (2.0 * lsb ** 2 / 12.0))}
 
 
+def _acting(sig):
+    """Every op that acts on `sig`'s record, in order: ``(chain, i, op, upstream, before, st)``.
+
+    For a lone Signal that is its own ops. For a channel of a several-channel record
+    (`Channels.signal`) it also enters the chains its `use` ops stand for -- a shared
+    oscillator is an impairment of every channel that uses it -- and `chain` is then that
+    chain's name (None for the channel's own ops), `i` the op's index in it. `upstream` is
+    every op before it, `before()` the record as it reaches the op, and `st` the streams the
+    op draws from: its own chain's, so the numbers are the ones in the record."""
+    flat = sig.ops if sig.within is None else sig.within[0].expand(sig.within[1])[1]
+    k = [0]
+
+    def walk(s, x_in, chain):
+        for i, op in enumerate(s.ops):
+            def before(i=i):
+                return dataclasses.replace(s, ops=s.ops[:i])._run(_x=x_in)
+            if op["op"] == "use" and s.within is not None:
+                rec, name = s.within[0], op["name"]
+                if rec.is_signal(name):
+                    yield from walk(rec.signal(name), None, name)
+                else:
+                    x = before()
+                    stage = rec._signal(name, like=x)
+                    stage.within = (rec, name)
+                    yield from walk(stage, x, name)
+                continue
+            yield chain, i, op, flat[:k[0]], before, s._streams()
+            k[0] += 1
+
+    yield from walk(sig, None, None)
+
+
 def report(sig):
     """What `Signal.rf_report()` returns -- see there."""
     from . import compose as C
     out = []
-    for i, op in enumerate(sig.ops):
+    for chain, i, op, upstream, before, st in _acting(sig):
         if op["op"] in OPS:
-            x = dataclasses.replace(sig, ops=sig.ops[:i]).waveform()
-            grid = C._grid_now(sig.ops[:i], sig.grid, x, 
-                                *C.DOMAIN.trace(sig.ops[:i], sig.grid)[-1])
-            rng = Streams(sig.seed).role(f"phase_noise/{i}")
-            out.append({"op": i, "name": op["op"], **_describe(op, x, grid, rng)})
+            x = before()
+            grid = C._grid_now(upstream, sig.grid, x, *C.DOMAIN.trace(upstream, sig.grid)[-1])
+            out.append({"op": i, "name": op["op"], **({} if chain is None else {"chain": chain}),
+                        **_describe(op, x, grid, st.role(f"phase_noise/{i}"))})
     return out
 
 
 def lo_phase(sig, streams=None):
     """What `Signal.lo_phase()` returns -- see there."""
     from . import compose as C
-    hits = [i for i, op in enumerate(sig.ops) if op["op"] in ("freq_offset", "phase_noise")]
+    hits = [h for h in _acting(sig) if h[2]["op"] in ("freq_offset", "phase_noise")]
     if not hits:
         raise ValueError("lo_phase(): this chain has no freq_offset or phase_noise op, so no "
                          "oscillator phase was added to it.")
-    st = streams if streams is not None else Streams(sig.seed)
     total, at = None, None
-    for i in hits:
-        op = sig.ops[i]
-        fs, n = C._stored_rate(sig.ops[:i], float(sig.grid.fs), int(sig.grid.n))
+    for chain, i, op, upstream, _before, st in hits:
+        if streams is not None:
+            st = streams
+        fs, n = C._stored_rate(upstream, float(sig.grid.fs), int(sig.grid.n))
         if at is not None and (fs, n) != at:
             raise ValueError(
                 f"lo_phase(): op {i} ({op['op']}) acts on {n} samples at fs={fs:g} and an "

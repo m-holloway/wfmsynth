@@ -3058,7 +3058,7 @@ _jmeas = float((_jcross(0.33) - _jcross(2.97)) / _jgr.fs)     # 90 % to 10 % of 
 _jother = _jrec.unit(9)
 check("a tolerance inside a sub-chain is drawn by the record it joins: the aggressor's edge is "
       "the recipe's number, and unit() moves it",
-      _jrec.roles() == ["unit/1/aggressor.ops.0.tr_s"] and abs(_jmeas / _jtr - 1) < 0.02
+      _jrec.roles() == ["crosstalk/1/aggressor/unit/0/tr_s"] and abs(_jmeas / _jtr - 1) < 0.02
       and _jother.ops[1]["aggressor"]["ops"][0]["tr_s"] != _jtr
       and np.array_equal(_jrec.contrast("unit/*", seed=9), _jother.waveform()),
       f"recipe tr_s {_jtr * 1e12:.1f} ps, measured 10-90 % {_jmeas * 1e12:.1f} ps (bound 2 %); "
