@@ -3997,6 +3997,55 @@ check("a toleranced part in a several-channel record: the drawn resistor is the 
       f"(c and d share group 'pack'), the other "
       f"{', '.join(f'{_sur2[k]:.0f}' for k in 'abcd')} ohm")
 
+# ---- `square` / `cmos`: every edge at its own time, to a fraction of a sample (0.46.0)
+# The instrument: a degree-7 polynomial through the 8 samples about each crossing, which shares
+# nothing with how the edge was generated. It is calibrated on the known answer first -- the
+# train as it was built before 0.46.0, `where(phase < duty)` on the samples, which must read one
+# whole sample peak to peak.
+_efs, _ef, _en = 64e9, 0.997e9, 1 << 15
+_espp = _efs / _ef
+
+
+def _etie(x, level):
+    s = np.asarray(x, float) - level
+    i = np.flatnonzero((s[:-1] < 0) != (s[1:] < 0))
+    i = i[(i > 0.1 * s.size) & (i < 0.9 * s.size)]
+    w = np.arange(-3, 5)
+    pp = []
+    for sign in (1, -1):
+        t = []
+        for k in i[np.sign(s[i + 1] - s[i]) == sign]:
+            r = np.polynomial.Polynomial.fit(w, s[k + w], 7).convert().roots()
+            r = r[np.abs(r.imag) < 1e-9].real
+            t.append(k + r[(r >= -1e-6) & (r <= 1 + 1e-6)][0])
+        t = np.asarray(t)
+        e = t - np.round((t - t[0]) / _espp) * _espp
+        pp.append(np.ptp(e) / _efs * 1e12)
+    return max(pp)
+
+
+_eg = Grid(fs=_efs, n=_en)
+_eold = np.where((_ef * np.arange(_en) / _efs) % 1.0 < 0.5, 1.0, -1.0)
+_ek = 0.15 * _espp
+_ebefore = _etie(P._shape_edges(_eold, _ek), 0.0)
+_esq = _etie(Signal(seed=1, grid=_eg).carrier("square", f_hz=_ef, tr_frac=0.15).waveform(), 0.0)
+_ecm = _etie(Signal(seed=1, grid=_eg).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=_ef,
+                                              tr_s=_ek / _efs).waveform(), 1.65)
+_eduty = P.square(f_hz=1e9, duty=0.3, phase_rad=1.5 * np.pi, tr_frac=0.05, n=8192, fs=256e9)
+_eon = P.square(f_hz=10e6, n=4096, fs=10e9)
+_eon_old = P._shape_edges(np.where((10e6 * np.arange(4096) / 10e9) % 1.0 < 0.5, 1.0, -1.0),
+                          0.05 * 1000)
+check("a square and a CMOS clock that do not fit the grid carry no jitter of the grid's: each "
+      "edge is at its own time between samples, the duty is the one asked for, and a clock "
+      "whose edges are on samples is the record it was",
+      14.0 < _ebefore < 16.5 and _esq < 1e-3 and _ecm < 1e-3
+      and abs(_eduty.mean() + 0.4) < 1e-9 and np.array_equal(_eon, _eon_old),
+      f"0.997 GHz at 64 GSa/s, edge-time error peak to peak by polynomial crossing: "
+      f"{_ebefore:.2f} ps as built before 0.46.0 (one sample is 15.63), square {_esq:.1e} ps, "
+      f"cmos {_ecm:.1e} ps (bound 1e-3); duty 0.3 over 32 periods reads "
+      f"{(_eduty.mean() + 1) / 2:.12f}; 10 MHz at 10 GSa/s is bit-identical to the old "
+      f"construction")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

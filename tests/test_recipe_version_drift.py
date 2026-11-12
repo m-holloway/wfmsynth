@@ -96,5 +96,33 @@ def test_the_table_is_well_formed():
     assert C.NUMERIC_CHANGES, "the table is empty; #53 should be its first entry"
     for changed_in, op, what in C.NUMERIC_CHANGES:
         assert C._version_tuple(changed_in) is not None, changed_in
-        assert op in C._EXEC, f"{op!r} is not an executable op"
+        # `carrier/<kind>` names one kind of carrier, wherever in the recipe it sits
+        assert op.split("/")[0] in C._EXEC, f"{op!r} is not an executable op"
+        if "/" in op:
+            assert op.startswith("carrier/"), op
         assert len(what) > 40 and what.strip().endswith("."), f"{op}: explain what changed"
+
+
+def _square_recipe(version):
+    g = Grid(fs=64e9, n=4096)
+    r = Signal(seed=1, grid=g).carrier("sine", f_hz=1e9).pass_fet(
+        gate=dict(f_hz=3e8), vth=0.0).recipe()
+    r["wfmsynth_version"] = version
+    return r
+
+
+def test_a_change_to_one_kind_of_carrier_warns_only_recipes_holding_that_kind():
+    """0.46.0 moved `square` and `cmos` edges. Every recipe has a carrier, so an entry keyed on
+    the op would warn all of them; it is keyed on the kind, found wherever it sits -- here as
+    the default kind of a `pass_fet` gate, two levels down and unnamed."""
+    got = _replay(_square_recipe("0.45.0"))
+    assert len(got) == 1 and "carrier/square" in got[0] and "0.46.0" in got[0]
+    assert _replay(_square_recipe("0.46.0")) == []
+    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("nrz", n_ui=64).recipe()
+    r["wfmsynth_version"] = "0.45.0"
+    assert _replay(r) == []
+    r = Signal(seed=1, grid=Grid(fs=10e9, n=4096)).carrier(
+        "cmos", v_lo=0.0, v_hi=3.3, f_hz=10e6, tr_s=2e-9).recipe()
+    r["wfmsynth_version"] = "0.45.0"
+    got = _replay(r)
+    assert len(got) == 1 and "carrier/cmos" in got[0]

@@ -18,7 +18,9 @@ Chains can meet, and a record can be complex baseband. Until now a chain was a l
 source, and signals met only inside a few special ops, each with its own nested format. This
 release adds the small set of primitives that let chains meet (#75–#80, #85, #86, tracked by
 #87), and an I/Q domain with its mixers, impairments, file formats and measures (#81–#84).
-Every existing call, recipe and rendered sample is unchanged; see *How it stays exact*.
+Every existing call and recipe is unchanged, and so is every rendered sample but those of a
+`square` or `cmos` carrier whose edges were not on samples; see **Changed output** and *How it
+stays exact*.
 
 Read [docs/COOKBOOK.md](docs/COOKBOOK.md#composing-a-realistic-capture) for these in order.
 The rule that decided what became an op and what did not is in
@@ -98,6 +100,30 @@ The rule that decided what became an op and what did not is in
   `rf_measures`. `composed_capture.py` uses the composition primitives on one two-channel
   triggered capture and isolates each cause of its jitter by changing one named thing.
 
+### Changed output
+
+- **`carrier("square")` and `carrier("cmos")` place each edge at its own time, to a fraction
+  of a sample.** Both built their ideal train by testing the phase on the samples, which did
+  two things that are the grid and not the signal. An edge between two samples went to the
+  next one, so every edge was late by a different amount: one sample peak to peak of
+  deterministic jitter. And an edge exactly on a sample was decided by the rounding of
+  `f * t % 1.0`: 1 GHz on a 64 GSa/s grid, 64 samples a period, had 35 of its 510 periods
+  rendered as 63 or 65. Edge times are now computed directly, and an edge between samples is
+  the on-sample edge delayed by its fraction (an 8-tap Lagrange fractional delay, applied
+  before the edge shaper). Measured at 0.997 GHz on 64 GSa/s, edge-time error peak to peak
+  by polynomial crossing: **15.58 ps before, 3.0e-5 ps after**, for both kinds; a duty of 0.3
+  of a 256-sample period reads 0.299999999982 where it read 0.30078 (77 samples of 256). The residual is
+  5.7e-6 sample for an edge of 8 samples and 5.6e-3 at the 2-sample floor.
+  A record whose edges were all on samples *and* rightly placed is the same bits
+  (`tests/test_edge_placement.py`); any other moves by up to one sample at each affected
+  edge. Recorded in `compose.NUMERIC_CHANGES` as `carrier/square` and `carrier/cmos`, found
+  wherever such a carrier sits in a recipe (a sub-chain, a `pass_fet` gate, a `net` driver),
+  so replaying an affected pre-0.46.0 recipe says so and one holding only other carriers
+  stays silent. Of the 31 examples, one printed figure moved: `sequence_and_switch.py`'s
+  mean preamble level, `-0.00` to `+0.00`, a 25 MHz clock over whole periods now averaging
+  to zero. `step`, `pulse`, `sawtooth`, and an `nrz`/`pam` carrier whose samples per UI is
+  not a whole number still place edges on samples; see *Known gaps*.
+
 ### Changed
 
 None of these moves a rendered sample.
@@ -160,10 +186,13 @@ None of these moves a rendered sample.
   an 80 -> 20 GSa/s acquisition has its -3 dB point at 0.5 GHz. Put them before the
   acquisition; `filter` after it runs at the stored rate.
 
-- `carrier("square")` and `carrier("cmos")` place each edge on the nearest sample (measured at
-  64 GSa/s: 15.6 ps peak to peak). Fixing it moves existing records and needs a
-  `NUMERIC_CHANGES` entry; until then a clock for timing work is
-  `carrier("nrz", pattern="clock")`.
+- `square` and `cmos` now place edges between samples (*Changed output*). The same grid
+  placement remains, unchanged from `main`, in three other places: an `nrz` / `pam<N>` /
+  `symbols` carrier whose samples per UI is not a whole number (measured: a clock pattern
+  of 1000 UI on 32768 samples, 15.5 ps peak to peak at 64 GSa/s, against under 1e-9 ps at
+  1024 UI); `carrier(jitter=)`, which displaces edges by whole samples (BACKLOG, U-13);
+  and `step` / `pulse` / `sawtooth`, whose single edge or flyback is rounded to a sample.
+  Keep samples per UI whole, and take jitter from `timing`.
 - Not exercised on Python 3.9 (the changed files parse at that grammar; the suite ran on 3.14).
 
 ## 0.45.0 — 2026-11-04

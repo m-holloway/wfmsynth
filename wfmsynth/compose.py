@@ -3753,6 +3753,19 @@ NUMERIC_CHANGES = (
      "put one sample late depending on how the generator accumulated. Affected recipes shift "
      "the odd switching instant by one sample; `net` was never in a tagged release, so this "
      "can only reach a recipe rendered from main between 2026-10-19 and 0.43.0."),
+    ("0.46.0", "carrier/square",
+     "each edge is placed at its own time to a fraction of a sample, instead of on the next "
+     "sample after it. A square whose period or duty is not a whole number of samples had "
+     "every edge late by a different amount, one sample peak to peak, and one whose edges "
+     "are all on samples had the odd edge one sample late through rounding of the phase. "
+     "Affected recipes move by up to one sample at each such edge; a record whose edges were "
+     "all on samples and correctly placed is unchanged bit for bit."),
+    ("0.46.0", "carrier/cmos",
+     "each edge is placed at its own time to a fraction of a sample, instead of on the next "
+     "sample after it, exactly as for `square` in the same release. Affected recipes move by "
+     "up to one sample at each edge that is not on a sample, or that rounding had put one "
+     "sample late; a record whose edges were all on samples and correctly placed is unchanged "
+     "bit for bit."),
 )
 
 
@@ -3777,6 +3790,33 @@ def _version_tuple(v):
     return tuple(parts) if parts else None
 
 
+def _ops_present(ops):
+    """What a `NUMERIC_CHANGES` entry can name: every top-level op, and ``carrier/<kind>`` for
+    every carrier of that kind ANYWHERE in the recipe -- the source, a sub-chain, a bare
+    carrier spec (``gate=dict(kind="square", ...)``), a `net` driver's source. A change to
+    one kind of carrier must not warn every recipe that has a carrier at all."""
+    present = {o.get("op") for o in ops}
+
+    def walk(v):
+        if isinstance(v, dict):
+            kind = v.get("kind")
+            if isinstance(kind, str) and (v.get("op") == "carrier" or "op" not in v):
+                present.add(f"carrier/{kind}")
+            if v.get("op") == "pass_fet":
+                # its gate is a square whether or not the spec says so, or is there at all
+                gate = v.get("gate") or {}
+                if isinstance(gate, dict) and "ops" not in gate and "from" not in gate:
+                    present.add(f"carrier/{gate.get('kind', 'square')}")
+            for w in v.values():
+                walk(w)
+        elif isinstance(v, (list, tuple)):
+            for w in v:
+                walk(w)
+
+    walk(list(ops))
+    return present
+
+
 def _warn_on_numeric_drift(recipe_version, ops):
     """Warn when a recipe predates a change to the numerics of an op it contains.
 
@@ -3787,7 +3827,7 @@ def _warn_on_numeric_drift(recipe_version, ops):
     have = _version_tuple(recipe_version)
     if have is None:
         return
-    present = {o.get("op") for o in ops}
+    present = _ops_present(ops)
     for changed_in, op, what in NUMERIC_CHANGES:
         if op in present and have < _version_tuple(changed_in):
             warnings.warn(
