@@ -32,6 +32,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .domain import REBUILT as _REBUILT
+
 
 def digest(values):
     """sha256 over the sample VALUES, in one canonical dtype and byte order -- so re-saving the
@@ -48,7 +50,7 @@ _COMPLEX_MSG = (
     "domain='real', or it has no Grid. A real record cannot hold them and nothing drops the "
     "imaginary part for you. Give the chain a Grid that does not state a domain (the record "
     "then follows the file) or one that says domain='iq', or pass the part you mean "
-    "(values=x.real).")
+    "(values=x.real). " + _REBUILT)
 
 
 def holds_complex(path):

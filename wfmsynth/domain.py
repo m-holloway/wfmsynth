@@ -135,6 +135,16 @@ _FIX = {
 }
 
 
+# A grid that did not state its domain reads "real", so a dict of its fields -- and the JSON of
+# one -- says "real" exactly as a stated one does, and rebuilding from it STATES it. That
+# cannot be told apart in the JSON without changing what a real record writes, so the
+# refusals that a stated "real" causes say it.
+REBUILT = ("If this Grid was rebuilt from dataclasses.asdict(grid) or from JSON, that is where "
+           "the 'real' came from: a dict of a grid's fields writes the domain out whether or "
+           "not it was stated. Drop the 'domain' key, or pass domain=None, when rebuilding a "
+           "grid that never stated one.")
+
+
 def of(grid):
     """The domain a chain on this grid starts in. No grid is a real record."""
     return getattr(grid, "domain", REAL) if grid is not None else REAL
@@ -159,7 +169,7 @@ def refuse(op, dom, i=None):
         return ValueError(
             f"iq: this chain's grid STATES domain='real', and iq is the source of a "
             f"complex baseband record. Leave domain= off the Grid -- the record's domain then "
-            f"follows its source -- or state Grid(..., domain='iq', fc_hz=...).")
+            f"follows its source -- or state Grid(..., domain='iq', fc_hz=...). {REBUILT}")
     instead = _INSTEAD[dom].get(op)
     return ValueError(
         f"{op}{where}: the record is {_WHAT[dom]} at this point in the chain, and {op} takes "

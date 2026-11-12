@@ -26,7 +26,11 @@ class _Follows(str):
     hashes and serialises as that string), and a chain started on such a grid takes the domain
     of its SOURCE instead -- `iq(...)` or an I/Q capture makes the record complex baseband.
     A plain ``"real"`` is a statement, and a source that contradicts it is refused. Being the
-    field's own value, the difference survives `dataclasses.replace`, a copy and a pickle."""
+    field's own value, the difference survives `dataclasses.replace`, a copy, a pickle and
+    `dataclasses.asdict` -- but NOT JSON, which writes the string: ``Grid(**json.loads(...))``
+    of such a dict states "real". Drop the ``domain`` key (or pass ``domain=None``) when
+    rebuilding a grid that never stated one; the refusals that a stated "real" causes say so.
+    (A recipe's own ``grid`` never carries the key for a real record, and is not affected.)"""
     __slots__ = ()
 
 

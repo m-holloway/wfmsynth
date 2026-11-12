@@ -150,3 +150,25 @@ def test_a_sequence_of_iq_chains_is_an_iq_record():
         [{"chain": Signal().carrier("dc", level=0.0), "duration_s": 20e-6},
          {"chain": Signal().carrier("sine", f_hz=1e6)}])
     assert c.grid.domain == "real" and c.waveform().dtype == np.float64
+
+
+def test_a_grid_rebuilt_through_json_states_real_and_the_refusal_says_that_is_why():
+    """`asdict` keeps "not stated"; JSON cannot (it writes the string), so a grid rebuilt from
+    it states "real" and `.iq()` is refused. The JSON of a real record's grid must not change,
+    so this is not hidden: the refusal names the cause and the fix, and the fix works."""
+    d = dataclasses.asdict(PLAIN)
+    assert not Grid(**d).domain_stated                                    # asdict alone: kept
+    j = json.loads(json.dumps(d))
+    assert j["domain"] == "real" and Grid(**j).domain_stated
+    for build in (lambda g: Signal(seed=1, grid=g).iq("qpsk", prbs=9),
+                  lambda g: Signal(seed=0, grid=g).capture(values=_tones(4096))):
+        with pytest.raises(ValueError, match=r"rebuilt from dataclasses\.asdict\(grid\) or from "
+                                             r"JSON.*Drop the 'domain' key, or pass domain=None"):
+            build(Grid(**j))
+    for fixed in (Grid(**{k: v for k, v in j.items() if k != "domain"}),
+                  Grid(**{**j, "domain": None})):
+        assert not fixed.domain_stated and fixed == PLAIN
+        assert Signal(seed=1, grid=fixed).iq("qpsk", prbs=9).grid.domain == "iq"
+    # a recipe's own grid is not such a dict: a real record's never has the key
+    r = Signal(seed=1, grid=PLAIN).carrier("nrz", n_ui=256).recipe()
+    assert "domain" not in r["grid"] and not Grid(**r["grid"]).domain_stated
