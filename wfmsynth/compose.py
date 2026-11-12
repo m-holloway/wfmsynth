@@ -215,7 +215,16 @@ def _op_capture(x, p, streams, grid, idx):
     if p.get("values") is not None:
         y = CAP.decode(p["values"], dom)
     else:
-        y = CAP.load_values(p["path"], dom)
+        if p.get("format") is not None:                 # an I/Q file format: wfmsynth/iqfile.py
+            from . import iqfile as IQF
+            if dom != DOMAIN.IQ:
+                raise ValueError(CAP._COMPLEX_MSG.format(what=f"{p['path']!r} holds"))
+            y = IQF.read(p["path"], p["format"], dtype=p.get("dtype"),
+                         byteorder=p.get("byteorder"), scale=p.get("scale"),
+                         columns=p.get("columns"), variable=p.get("variable"),
+                         check=p.get("check", True))
+        else:
+            y = CAP.load_values(p["path"], dom)
         got = CAP.digest(y)
         want = p.get("sha256")
         if want is not None and got != want:
@@ -224,6 +233,7 @@ def _op_capture(x, p, streams, grid, idx):
                 f"{want} over the sample values, file now digests to {got}. The file changed "
                 f"since this recipe was made; re-embed it (capture(..., embed=True)) or point "
                 f"the recipe at the file that produced it.")
+    n_file = len(y)
     fs_hz = p.get("fs_hz")
     grid_fs = getattr(grid, "fs", None) if grid is not None else None
     if fs_hz is not None and grid_fs is None:
@@ -250,6 +260,11 @@ def _op_capture(x, p, streams, grid, idx):
                 f"(Grid.n or carrier n=); pass resample=True to resample onto it, or match "
                 f"the Grid's n to the file's own length")
         y = resample_poly(y, n_target, len(y))
+    if p.get("fc_hz") is not None or p.get("annotations"):
+        from . import iqfile as IQF
+        IQF.check_centre(p.get("fc_hz"), grid)
+        # a file's annotations are ground truth it arrived with: they join the event list
+        IQF.emit(p.get("annotations") or (), getattr(streams, "sink", None), n_file, len(y), grid)
     return y
 
 
@@ -1983,7 +1998,8 @@ class Signal:
         is recorded, so the day a default is corrected every record moves with it."""
         return self._add("coded", scheme=scheme, **params)
 
-    def capture(self, path=None, values=None, fs_hz=None, n=None, resample=False, embed=False):
+    def capture(self, path=None, values=None, fs_hz=None, n=None, resample=False, embed=False,
+                format=None, fc_hz=None, **layout):
         """First op: import a REAL capture from disk (or literal samples) as the start of a
         chain, so it can take the same later ops a synthesized carrier takes --
         `lossy`/`probe`/`events`/`scope`, anything downstream of a source.
@@ -2016,9 +2032,37 @@ class Signal:
         I/Q: on a `Grid(domain="iq", fc_hz=...)` the same call starts a COMPLEX BASEBAND chain
         -- `values=<complex array>` (recorded as ``[[re, im], ...]``), a complex ``.npy`` /
         ``.npz``, or a three-column ``.csv`` (time, I, Q). Complex samples offered to a real
-        record are refused by name; nothing takes the real part for you."""
+        record are refused by name; nothing takes the real part for you.
+
+        An I/Q RECORDING in an exchange format is read with `format=`:
+
+            capture(path="rec.iq", format="iq_interleaved", dtype="int16", fs_hz=250e6, fc_hz=1e9)
+            capture(path="rec", format="sigmf")     # rate, centre and annotations from the metadata
+            capture(path="rec.csv", format="csv", columns=("I", "Q"))
+            capture(path="rec.mat", format="mat", variable="x")
+
+        `ws.read_iq(path, format=...)` is the same call on a grid taken from the file, and is
+        the one-line route. The layout parameters (`dtype`, `byteorder`, `scale`, `columns`,
+        `variable`, `check`), the byte-order check and what a SigMF annotation becomes are in
+        `wfmsynth/iqfile.py`. `fc_hz` states the file's centre frequency and must be the
+        grid's. The digest and `embed=True` behave exactly as above; a file's annotations are
+        copied into the recipe and come back from `realize()` as events."""
         from . import capture as CAP
         dom = DOMAIN.of(self.grid)
+        if format is not None or fc_hz is not None or layout:
+            from . import iqfile as IQF
+            if path is None or values is not None or format is None:
+                raise ValueError(
+                    "capture: format=, fc_hz= and the layout parameters "
+                    f"({', '.join(IQF._LAYOUT)}) describe an I/Q FILE: pass path= with "
+                    "format= (one of " + ", ".join(IQF.FORMATS) + "), and not values=.")
+            params = IQF.capture_params(self.grid, path, format, fs_hz=fs_hz, fc_hz=fc_hz,
+                                        embed=embed, **layout)
+            if n is not None:
+                params["n"] = n
+            if resample:
+                params["resample"] = True
+            return self._add("capture", **params)
         if values is not None:
             params = {"values": CAP.encode(values, dom)}
             if fs_hz is not None:

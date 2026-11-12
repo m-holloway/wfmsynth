@@ -17,6 +17,9 @@ Modules / public API:
   domain        which domain ('real' | 'iq') each op accepts -- ACCEPTS is where an op opts in
   capture       Signal.capture()'s file backend — load_values (.npy/.npz/.csv) and digest
                 (a sha256 over sample VALUES, not file bytes)
+  iqfile        I/Q recordings in open formats: read_iq() / capture(format=...) for
+                interleaved binary, SigMF, CSV and MAT; to_sigmf() / to_interleaved() out;
+                SigMF annotations <-> events; the byte-order check
   impairments   apply_impairment(name, x, rng), domain_randomize(x, rng), IMPAIRMENTS
   events        place_events / apply_events — localized needles + per-window labels
                 (runt, glitch, ring, droop, slow_edge, clamped_exp, ...)
@@ -85,7 +88,7 @@ __version__ = _read_version()
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
-               tolerance, subchain, joins, sequence, channels, trigger)
+               tolerance, subchain, joins, sequence, channels, trigger, iqfile)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -111,6 +114,7 @@ from .measure import (eye_height, best_phase, attributes, align_symbols, ground_
                       pattern_period)
 from .tolerance import tol, corners, unit_dataset, unit_of
 from .channels import Channels
+from .iqfile import read_iq, to_sigmf, to_interleaved
 from .sweep import hold_constant, realized_table, solve_monotonic
 from .cdr import (recover_clock, jitter_transfer, tracked_out_fraction, ssc_phase,
                   apply_ssc, timing_source, apply_phase, phase_noise, recover_and_fold)
@@ -159,6 +163,7 @@ __all__ = [
     "capture", "hdf5", "resample", "net", "scenario", "stages", "iq", "domain", "joins",
     "trigger",
     "LAW_KINDS", "FILTER_KINDS",
+    "iqfile", "read_iq", "to_sigmf", "to_interleaved",
     "Hold", "Agent", "merge_holds", "hold_windows",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "combine_drivers", "uart_frame", "uart_decode",

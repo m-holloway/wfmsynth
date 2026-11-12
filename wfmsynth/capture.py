@@ -20,6 +20,10 @@ A COMPLEX capture (I/Q) is a complex ``.npy`` / ``.npz``, or a three-column ``.c
 Q), and it is read only into a chain whose grid says ``domain="iq"``. Complex samples offered
 to a real record are refused by name: casting them to float keeps the real part and discards
 the rest, which numpy does with a warning and no error.
+
+I/Q EXCHANGE formats -- interleaved binary, SigMF, CSV with named columns, MAT -- are read by
+`wfmsynth/iqfile.py` through the same op (`capture(path=..., format=...)`), under the same
+digest rule.
 """
 from __future__ import annotations
 

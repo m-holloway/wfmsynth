@@ -39,6 +39,7 @@ DEMOS = [
     "sequence_and_switch.py",
     "iq_passband.py",
     "joins.py",
+    "iq_recordings.py",
     "multi_driver_bus.py",
     "non_integer_sps.py",
     "provenance.py",

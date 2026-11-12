@@ -3544,6 +3544,111 @@ check("an event of the long render is re-timed into the window that holds it, an
           min(e.sample + e.width, len(_trg_wx)) - e.sample for e in _trg_kept)),
       f"{len(_trg_lev)} glitches in the long render: {len(_trg_kept)} inside the 3 windows, "
       f"{_trg_tr_ev[0].params['dropped']} dropped; the 3 trigger events mark no samples")
+# ============================================================ I/Q recordings (GitHub #82)
+print("\n== I/Q recordings in open formats: interleaved binary and SigMF, in and out ==")
+import hashlib as _iqf_hl, json as _iqf_json, tempfile as _iqf_tmp                # noqa: E402
+import wfmsynth as _iqf_ws                                                        # noqa: E402
+from wfmsynth import iqfile as _IQF                                               # noqa: E402
+_iqf_g = Grid(fs=250e6, baud=25e6, n=1 << 13, domain="iq", fc_hz=1e9)
+_iqf_x = Signal(seed=1, grid=_iqf_g).iq("qam16", prbs=15).waveform()
+_iqf_d = _iqf_tmp.mkdtemp()
+_iqf_fs = dict(fs_hz=250e6, fc_hz=1e9)
+
+
+def _iqf_parts(z):
+    return np.c_[z.real, z.imag].ravel()
+
+
+# float32, against numpy alone in BOTH directions: our writer read by np.fromfile, and a file
+# np.tofile wrote read by our reader
+_iqf_x32 = _iqf_x.astype(np.complex64).astype(complex)
+_IQF.to_interleaved(f"{_iqf_d}/f.iq", _iqf_x32)
+_iqf_a = np.array_equal(np.fromfile(f"{_iqf_d}/f.iq", "<f4"), _iqf_parts(_iqf_x32))
+_iqf_parts(_iqf_x32).astype(">f4").tofile(f"{_iqf_d}/g.iq")
+_iqf_b = np.array_equal(_iqf_ws.read_iq(f"{_iqf_d}/g.iq", format="iq_interleaved",
+                                        dtype="float32", byteorder="big",
+                                        **_iqf_fs).waveform(), _iqf_x32)
+_IQF.to_interleaved(f"{_iqf_d}/h.iq", _iqf_x)
+_iqf_e32 = np.abs(_iqf_parts(_iqf_ws.read_iq(f"{_iqf_d}/h.iq", format="iq_interleaved",
+                                             dtype="float32", **_iqf_fs).waveform()
+                             - _iqf_x)).max() / np.abs(_iqf_x).max()
+check("a float32 I/Q file round-trips exactly, checked against numpy's own reader and writer",
+      _iqf_a and _iqf_b and _iqf_e32 <= 2.0 ** -24,
+      f"float32 samples: 0 error both ways; a float64 record written as float32 moves by "
+      f"{_iqf_e32:.1e} of its peak (bound 2**-24 = {2.0 ** -24:.1e})")
+
+_iqf_s = float(np.abs(_iqf_parts(_iqf_x)).max()) / 32767
+_IQF.to_interleaved(f"{_iqf_d}/i.iq", _iqf_x, dtype="int16", scale=_iqf_s)
+_iqf_cnt = np.fromfile(f"{_iqf_d}/i.iq", "<i2")
+_iqf_back = _iqf_ws.read_iq(f"{_iqf_d}/i.iq", format="iq_interleaved", dtype="int16",
+                            scale=_iqf_s, **_iqf_fs).waveform()
+_iqf_e16 = np.abs(_iqf_parts(_iqf_back - _iqf_x)).max() / _iqf_s
+check("an int16 I/Q file holds the record within one LSB (half a count, by rounding)",
+      np.array_equal(_iqf_cnt, np.rint(_iqf_parts(_iqf_x) / _iqf_s))
+      and _iqf_e16 <= 0.5 + 1e-9 and int(np.abs(_iqf_cnt).max()) == 32767,
+      f"worst error {_iqf_e16:.4f} LSB over {_iqf_cnt.size} values (bound 0.5), "
+      f"peak {int(np.abs(_iqf_cnt).max())} counts")
+
+# SigMF: the metadata is read back with json alone, and the events through the chain
+_iqf_ev = _iqf_ws.EventList([
+    _iqf_ws.Event(sample=100, kind="burst_start", width=1, t_s=100 / 250e6, placement="burst/2"),
+    _iqf_ws.Event(sample=4000, kind="glitch", width=37, severity=0.8, direction=-1.0,
+                  t_s=4000 / 250e6, placement="edges", params={"f0": 1.5e9})], n=len(_iqf_x))
+_iqf_o = _IQF.to_sigmf(f"{_iqf_d}/rec", _iqf_x, _iqf_g, events=_iqf_ev, dtype="int16",
+                       scale=_iqf_s)
+_iqf_m = _iqf_json.load(open(_iqf_o["meta"]))
+_iqf_sig = _iqf_ws.read_iq(f"{_iqf_d}/rec", format="sigmf")
+_iqf_y, _iqf_got = _iqf_sig.realize()
+check("a SigMF recording carries the required fields, and its rate, centre and annotations "
+      "come back as the record's grid and events",
+      _iqf_m["global"]["core:datatype"] == "ci16_le" and _iqf_m["global"]["core:version"] == "1.0.0"
+      and _iqf_m["global"]["core:sha512"] == _iqf_hl.sha512(open(_iqf_o["data"], "rb").read()).hexdigest()
+      and [a["core:sample_start"] for a in _iqf_m["annotations"]] == [100, 4000]
+      and _iqf_m["annotations"][1]["core:sample_count"] == 37
+      and (_iqf_sig.grid.fs, _iqf_sig.grid.fc_hz, _iqf_sig.grid.n) == (250e6, 1e9, len(_iqf_x))
+      and _iqf_got.to_dicts() == _iqf_ev.to_dicts() and np.array_equal(_iqf_y, _iqf_back),
+      f"{len(_iqf_got)} events equal to the {len(_iqf_ev)} written, field for field; samples "
+      f"identical to the interleaved int16 file's")
+
+# the byte-order check, both ways round, at five levels and on two kinds of record
+_iqf_rng = np.random.default_rng(0)
+_iqf_w = 0.2 * (_iqf_rng.standard_normal(1 << 13) + 1j * _iqf_rng.standard_normal(1 << 13))
+_iqf_caught, _iqf_false, _iqf_n = [], 0, 0
+for _iqf_v in (_iqf_x, _iqf_w):                    # QAM-16 at 10 samples/symbol; white noise
+    for _iqf_db in (0, -6, -20, -40, -60):
+        _iqf_c = np.rint(_iqf_parts(_iqf_v) / np.abs(_iqf_parts(_iqf_v)).max()
+                         * 32767 * 10 ** (_iqf_db / 20)).astype("<i2")
+        _iqf_n += 1
+        _iqf_false += _IQF.byte_order_evidence(_iqf_c, _iqf_c.dtype) is not None
+        if _IQF.byte_order_evidence(_iqf_c.byteswap(), _iqf_c.dtype) is not None:
+            _iqf_caught.append(_iqf_db)
+try:
+    _iqf_cnt.byteswap().tofile(f"{_iqf_d}/sw.iq")
+    _iqf_ws.read_iq(f"{_iqf_d}/sw.iq", format="iq_interleaved", dtype="int16", scale=_iqf_s,
+                    **_iqf_fs)
+    _iqf_msg = ""
+except ValueError as _iqf_err:
+    _iqf_msg = str(_iqf_err)
+check("a byte-swapped int16 file is refused with the likely cause, and a correctly read one "
+      "never is", _iqf_false == 0 and "probably big-endian" in _iqf_msg
+      and len(_iqf_caught) == _iqf_n == 10,
+      f"{len(_iqf_caught)} of {_iqf_n} swapped files caught (full scale to -60 dB, a shaped "
+      f"signal and white noise), {_iqf_false} of {_iqf_n} correct files flagged")
+
+# the digest is over the samples: two formats, one sha256; and embed needs no file afterwards
+_IQF.to_interleaved(f"{_iqf_d}/e.iq", _iqf_x, dtype="float64", byteorder="big")
+_IQF.to_sigmf(f"{_iqf_d}/e", _iqf_x, _iqf_g, dtype="float64")
+_iqf_p = _iqf_ws.read_iq(f"{_iqf_d}/e.iq", format="iq_interleaved", dtype="float64",
+                         byteorder="big", embed=True, **_iqf_fs)
+_iqf_q = _iqf_ws.read_iq(f"{_iqf_d}/e", format="sigmf")
+_iqf_r = _iqf_json.loads(_iqf_json.dumps(_iqf_p.recipe()))
+import shutil as _iqf_sh                                                          # noqa: E402
+_iqf_sh.rmtree(_iqf_d)
+check("the capture digest covers the samples, not the file: two formats give one sha256, and "
+      "an embedded recording replays with every file deleted",
+      _iqf_p.ops[0]["sha256"] == _iqf_q.ops[0]["sha256"] == _iqf_ws.capture.digest(_iqf_x)
+      and np.array_equal(Signal.from_recipe(_iqf_r).waveform(), _iqf_x),
+      f"sha256 {_iqf_p.ops[0]['sha256'][:12]}... for big-endian float64 and SigMF cf64_le alike")
 
 print()
 if fails:
