@@ -831,7 +831,10 @@ delivered in 0.46.0 with the test named).
    takes its chains as data, so it has no such trap and no `copy`. `tests/test_signal_copy.py`.
 6. *`rf.evm(reference="decided")` did not pull in.* It acquires the carrier blind first (the
    line in the M-th power of the symbols, pull-in &plusmn;baud/(2M)), checks the lock, and
-   refuses a record it cannot lock to. `tests/test_evm_acquisition.py`.
+   refuses a record it cannot lock to. The result always carries the pull-in range and the
+   alias spacing (baud/M); with `sent`, a lock on the wrong alias is detected and refused;
+   with too few symbols for a line it falls back to the fit from zero offset, kept only if
+   self-consistent. `tests/test_evm_acquisition.py`.
 7. *Naming.* `downconvert(fs_out_hz=)`, `awgn(eb_n0_db=)`, and `downconvert(lpf=dict(pass_hz=))`
    in place of a bare number; the old 0.46.0-only spellings are refused naming the new. This
    supersedes the earlier note that `fs_out` and a numeric `lpf` would stay. `_deg` and `_pct`

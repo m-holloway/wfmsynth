@@ -4114,11 +4114,34 @@ _vrng = np.random.default_rng(0)
 _vnoise = _vrng.standard_normal(1 << 16) + 1j * _vrng.standard_normal(1 << 16)
 _vref = _qrefusal(lambda: _sws.rf.evm(_vnoise, _vg, reference="decided", constellation="qam16",
                                       correct=("frequency",)))
+
+
+
+def _vout(sent_given):
+    s = (Signal(seed=1, grid=_vg).iq("qam16", prbs=15, prbs_phase=100)
+         .freq_offset(f_hz=3.2e6).awgn(es_n0_db=24, ref_power=1.0))
+    return _sws.rf.evm(s.waveform(), _vg, s.transmitted()[0] if sent_given else None, skip=16,
+                       reference="decided", constellation="qam16",
+                       correct=("frequency", "phase"))
+
+
+_valias = _qrefusal(lambda: _vout(True))
+_vblind = _vout(False)
+_vsg = Grid(fs=400e6, baud=25e6, n=1 << 11, fc_hz=2.4e9)
+_vss = Signal(seed=1, grid=_vsg).iq("qam16", prbs=15, prbs_phase=100)
+_vshort = _sws.rf.evm(_vss.waveform(), _vsg, _vss.transmitted()[0], skip=8,
+                      reference="decided", constellation="qam16", correct=("frequency",))
 check("a decided-reference EVM acquires its carrier blind before deciding: a QAM-16 record "
       "2 kHz off reads what the truth-referenced EVM reads, any offset within +/- baud/8 is "
-      "found, and a record with no carrier to find is refused, not measured",
+      "found, one past it is refused when `sent` can show the alias and carries the ambiguity "
+      "when it cannot, and a record with no carrier to find is refused, not measured",
       all(abs(b["evm_pct"] - t["evm_pct"]) < 0.01 and b["decision_errors"] == 0
           for t, b in _vrep)
+      and "WRONG ALIAS" in _valias
+      and _vblind["acquisition"]["alias_spacing_hz"] == 6.25e6
+      and abs(_vblind["removed"]["frequency_hz"] - (3.2e6 - 6.25e6)) < 25.0
+      and abs(_vshort["evm_pct"] - 0.315) < 0.002
+      and _vshort["acquisition"]["method"].startswith("decision-directed")
       and _vworst < 0.02 and _vferr < 25.0 and "did not lock" in _vref
       and "No figure is returned" in _vref,
       f"2 kHz offset, decided against truth: {_vrep[0][1]['evm_pct']:.2f} % / "
@@ -4127,7 +4150,11 @@ check("a decided-reference EVM acquires its carrier blind before deciding: a QAM
       f"{_vrep[1][1]['acquisition']['line']:.1f}, {_sws.rf.LOCK_LINE:g} needed); offsets "
       f"-3 .. +3 MHz at 24 dB: worst EVM difference {_vworst:.3f} points, worst frequency "
       f"error {_vferr:.1f} Hz (pull-in +/-{_vrep[0][1]['acquisition']['pull_in_hz'] / 1e6:.3f}"
-      f" MHz); noise alone: refused")
+      f" MHz); 3.2 MHz off: refused as the wrong alias with `sent`, returned as "
+      f"{_vblind['removed']['frequency_hz'] / 1e6:+.3f} MHz with alias spacing "
+      f"{_vblind['acquisition']['alias_spacing_hz'] / 1e6:.2f} MHz without; 128 clean symbols "
+      f"(line {_vshort['acquisition']['line']:.1f}, no blind lock): {_vshort['evm_pct']:.3f} % "
+      f"by the checked fit from zero offset; noise alone: refused")
 
 # ---- a measure handed the wrong kind of record refuses by name (0.46.0)
 from wfmsynth import measure as _vmeas, eye as _veye

@@ -102,24 +102,87 @@ def test_a_record_with_no_carrier_to_find_is_refused_not_measured():
         rf.evm(z, g, reference="decided", constellation="qam16", correct=("frequency",))
 
 
-def test_too_few_symbols_to_see_the_line_is_refused_with_the_numbers():
-    """128 symbols of QAM-16: 0.3847 * sqrt(112) = 4.1, under the 6 the lock needs. The same
+def _short(f_hz, es_n0_db=None):
+    x, sent, g = _record(f_hz, es_n0_db, n=1 << 11)             # 128 symbols, 112 counted
+    return x, sent, g, dict(skip=8, reference="decided", constellation="qam16",
+                            correct=("frequency",))
+
+
+def test_too_few_symbols_for_a_line_falls_back_to_the_fit_from_zero_and_checks_it():
+    """The line of 128 clean QAM-16 symbols (112 counted) stands 5.96 high in this record,
+    under the 6 a blind lock needs (0.3847 * sqrt(112) = 4.1 is its expectation). Such a record was measured before acquisition existed (0.315 %) and still is:
+    the decision-directed fit from zero offset is kept when it is self-consistent."""
+    x, sent, g, kw = _short(0.0)
+    r = rf.evm(x, g, sent, **kw)
+    assert r["evm_pct"] == pytest.approx(0.315, abs=0.002) and r["decision_errors"] == 0
+    assert r["evm_pct"] == pytest.approx(rf.evm(x, g, sent, skip=8,
+                                                correct=("frequency",))["evm_pct"], abs=0.01)
+    acq = r["acquisition"]
+    assert acq["method"].startswith("decision-directed from zero offset")
+    assert acq["line"] < rf.LOCK_LINE and acq["inside"] < rf.FALLBACK_INSIDE
+    assert acq["settled_turn"] < rf.FALLBACK_SETTLED
+    assert acq["alias_spacing_hz"] == BAUD / 4
+    # the pull-in it states is one it has: an offset AT it is found
+    x, sent, g, kw = _short(acq["pull_in_hz"])
+    r = rf.evm(x, g, sent, **kw)
+    assert abs(r["removed"]["frequency_hz"] - acq["pull_in_hz"]) < 50.0
+    assert r["decision_errors"] == 0
+    # and with moderate noise it is still kept, against the truth
+    x, sent, g, kw = _short(0.0, 18)
+    assert rf.evm(x, g, sent, **kw)["evm_pct"] == pytest.approx(
+        rf.evm(x, g, sent, skip=8, correct=("frequency",))["evm_pct"], abs=0.05)
+
+
+@pytest.mark.parametrize("f_hz,es_n0_db", [(2e4, None), (2e5, None), (0.0, 12)])
+def test_the_fallback_refuses_what_is_not_self_consistent(f_hz, es_n0_db):
+    """Past its small pull-in, or in noise that puts the error near the decision boundaries,
+    neither route can stand behind a figure: refused with the numbers that failed. The same
     record against the truth is measured without complaint."""
-    x, sent, g = _record(2e3, n=1 << 11)
-    assert len(sent) == 128
-    with pytest.raises(ValueError, match=r"height \d\.\d over the incoherent level, 6 needed"
-                                         r".*\(112 counted here\)"):
-        rf.evm(x, g, sent, skip=8, reference="decided", constellation="qam16", correct=BOTH)
-    assert rf.evm(x, g, sent, skip=8, correct=BOTH)["evm"] < 0.005
+    x, sent, g, kw = _short(f_hz, es_n0_db)
+    with pytest.raises(ValueError, match=r"no carrier line to acquire \(height \d\.\d over "
+                                         r"the incoherent level, 6 needed\), and the "
+                                         r"decision-directed fit from zero offset is not "
+                                         r"self-consistent: its rms error is 0\.\d\d of the "
+                                         r"way to a decision boundary \(limit 0\.5\)"):
+        rf.evm(x, g, sent, **kw)
+    assert np.isfinite(rf.evm(x, g, sent, skip=8, correct=("frequency",))["evm"])
 
 
-def test_outside_the_range_the_offset_comes_back_modulo_baud_over_m_as_documented():
-    """3.2 MHz is past baud/8. A quarter-turn per symbol is invisible at the symbol instants,
-    so the estimate is the offset less baud/4 and the EVM is still the truth's -- the matched
-    filter's loss at that offset, not a failure to lock."""
-    truth, blind = _pair(3.2e6, 24)
-    assert abs(blind["removed"]["frequency_hz"] - (3.2e6 - BAUD / 4)) < 25.0
-    assert blind["evm_pct"] == pytest.approx(truth["evm_pct"], abs=0.02)
+@pytest.mark.parametrize("f_hz,es_n0_db", [(3.2e6, 24), (-4e6, 24), (6.25e6, 30), (-9e6, 24)])
+def test_outside_the_range_with_sent_the_wrong_alias_is_refused_naming_the_offset(f_hz, es_n0_db):
+    """Past +/- baud/8 the blind estimate is the offset less a multiple of baud/4: a
+    quarter-turn per symbol is invisible at the symbol instants. With `sent` it is visible
+    -- three decisions in four are wrong as corrected and few are with the constellation
+    turned a step per symbol -- and the call refuses, naming the offset the record has."""
+    x, sent, g = _record(f_hz, es_n0_db)
+    with pytest.raises(ValueError) as e:
+        rf.evm(x, g, sent, skip=SKIP, reference="decided", constellation="qam16", correct=BOTH)
+    msg = str(e.value)
+    assert "WRONG ALIAS" in msg and "reference='truth'" in msg and "coarse estimate" in msg
+    assert "+/-3.125e+06 Hz" in msg and "repeats every 6.25e+06 Hz" in msg
+    named = float(msg.split("the offset is ")[1].split(" Hz")[0])
+    assert abs((named - f_hz + BAUD / 2) % BAUD - BAUD / 2) < 2e3      # modulo the baud
+
+
+def test_outside_the_range_without_sent_the_result_carries_the_ambiguity():
+    """Nothing in the symbols can show the alias, so the figure is returned WITH what it is
+    ambiguous by: the frequency is the offset less exactly baud/4, and `acquisition` states
+    the range it is unambiguous in and the spacing it repeats at."""
+    x, sent, g = _record(3.2e6, 24)
+    r = rf.evm(x, g, skip=SKIP, reference="decided", constellation="qam16", correct=BOTH)
+    acq = r["acquisition"]
+    assert acq["pull_in_hz"] == BAUD / 8 and acq["alias_spacing_hz"] == BAUD / 4
+    assert abs(r["removed"]["frequency_hz"] - (3.2e6 - acq["alias_spacing_hz"])) < 25.0
+    assert abs(r["removed"]["frequency_hz"]) <= acq["pull_in_hz"]
+    assert "decision_errors" not in r
+
+
+def test_inside_the_range_sent_never_trips_the_alias_check_even_when_decisions_fail():
+    """At Es/N0 6 dB nearly half of QAM-16's decisions are wrong; that is noise, not an alias,
+    and the figure is returned with the count."""
+    for f_hz, es_n0_db in ((1.234e6, 10), (-2.9e6, 6), (0.0, 6)):
+        _, blind = _pair(f_hz, es_n0_db)
+        assert blind["decision_errors"] > 500 and abs(blind["removed"]["frequency_hz"] - f_hz) < 100
 
 
 def test_phase_is_found_at_any_angle_modulo_the_symmetry_and_errors_are_counted_there():

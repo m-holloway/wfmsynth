@@ -99,7 +99,18 @@ The rule that decided what became an op and what did not is in
   an offset within &plusmn;baud/(2M) at any phase) and the lock is checked; a record it
   cannot lock to is refused, not measured. Measured against the truth-referenced figure on
   QAM-16 2 kHz off: 0.32 % / 0.32 % clean and 6.29 % / 6.29 % at Es/N0 24 dB, where a
-  decision-directed fit alone returned 24.5 % and 24.9 %.
+  decision-directed fit alone returned 24.5 % and 24.9 %. The estimate repeats every
+  baud/M, and the result says so: `["acquisition"]` always carries `pull_in_hz` and
+  `alias_spacing_hz`. Past the range (3.2 MHz on QAM-16 at 25 MBd) a call without `sent`
+  returns the alias, -3.05 MHz, with those two numbers; a call with `sent` sees three
+  decisions in four wrong as corrected and none with the constellation turned a step per
+  symbol, and is refused as the wrong alias, naming the offset. Where there are too few
+  symbols for a line (128 of clean QAM-16) the decision-directed fit from zero offset is
+  used and kept only if self-consistent (rms error under half the distance to a decision
+  boundary, one more pass moving the frequency under 0.01 turn): 0.315 %, the truth's
+  figure. At zero offset the figure is that of the fit alone to four decimals of a percent
+  from Es/N0 14 dB up, and differs by up to 0.010 points at 10 dB and 0.028 at 6 dB
+  (QAM-16, where a quarter to a half of the decisions are wrong either way).
 - **`Signal.copy()`** branches a chain. A builder method appends to its Signal and returns
   it, so reusing a base builds one chain holding every variant's ops;
   `base.copy().lossy(...)` is an independent Signal with the same recipe, digest and samples.

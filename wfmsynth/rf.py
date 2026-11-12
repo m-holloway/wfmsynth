@@ -596,6 +596,12 @@ DECIDED_PASSES = 3        # decide, fit, correct -- this many times -- for refer
 # `evm` refuses rather than return a figure:
 LOCK_LINE = 6.0           # the line's height over the incoherent level sqrt(sum |s^M|^2)
 LOCK_TURN = 0.25          # turns of s^M left across the counted symbols after correction
+# With no line to acquire the decision-directed fit from zero offset is kept only if it is
+# self-consistent:
+FALLBACK_INSIDE = 0.5     # rms error, as a fraction of the distance to a decision boundary
+FALLBACK_SETTLED = 0.01   # turns of s^M by which one more pass may move the frequency
+FALLBACK_PULL_TURN = 0.15 # turns of s^M across the record it is stated to pull in from
+#                           (measured, 112 clean QAM-16 symbols: locks at 0.18, refused at 0.21)
 
 
 def _record(x, who):
@@ -981,10 +987,20 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
         instants (and by then the matched filter has lost much of the signal);
       * the phase is found modulo ``2*pi / M``, the constellation's own symmetry;
       * with ``"frequency"`` named the lock is CHECKED on the corrected symbols: a carrier
-        line at least `LOCK_LINE` high, turning less than `LOCK_TURN` across the record.
-        A record that fails either is REFUSED, saying which -- too few symbols for the noise,
-        or not this constellation. ``["acquisition"]`` reports the line, the residual and
-        the pull-in range of a record that passed.
+        line at least `LOCK_LINE` high, turning less than `LOCK_TURN` across the record;
+      * where there is NO line to acquire (too few symbols: 128 of clean QAM-16 stand about
+        4 to 6 high) the decision-directed fit is run from zero offset instead, and kept only if it
+        is self-consistent: rms error under `FALLBACK_INSIDE` of the distance to a decision
+        boundary, and one more pass moving the frequency by under `FALLBACK_SETTLED` of a
+        turn. Its pull-in is a small fraction of ``1 / (M * record length)``. A record that
+        passes neither route is REFUSED, saying which numbers failed;
+      * ``["acquisition"]`` always states the route taken, ``pull_in_hz`` and
+        ``alias_spacing_hz`` (``baud / M``): WITHOUT `sent`, an offset outside the pull-in
+        range is returned as its alias and nothing in the symbols can show it, so read the
+        frequency against those two numbers. WITH `sent` the alias is checked -- decisions
+        that agree with the sent symbols far better with the constellation turned a symmetry
+        step per symbol mean the wrong alias -- and such a record is refused, naming the
+        offset it actually has.
 
     A ``reference="decided"`` figure still reads LOW once decisions fail in noise; give
     `sent` to count them.
@@ -1004,9 +1020,11 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
                                          ``2*pi / M`` ahead of the sent ones, whichever
                                          explains them best: a constellation locked a
                                          quarter-turn round has every decision right
-      ``acquisition``                    only for "decided" with ``"frequency"``: ``order``,
-                                         ``pull_in_hz``, ``coarse_frequency_hz``, ``line``,
-                                         ``residual_turn``
+      ``acquisition``                    only for "decided" with ``"frequency"``: ``method``,
+                                         ``order``, ``pull_in_hz``, ``alias_spacing_hz``,
+                                         ``coarse_frequency_hz``, ``line``, and
+                                         ``residual_turn`` (blind) or ``inside`` and
+                                         ``settled_turn`` (decision-directed from zero)
     """
     a = _measured_envelope(x, "evm")
     fs, baud = IQ._rate(grid, "evm")
@@ -1103,19 +1121,17 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
         # that turns a fraction of a symmetry step across its length, its decisions are wrong,
         # the fit follows them, and the figure that comes out is neither the signal's nor a
         # sign that anything failed. So the carrier is found blind first.
-        base, pre, order = raw, {}, None
+        base, pre, order, blind = raw, {}, None, False
+        span = float(t[keep][-1] - t[keep][0])
         if "frequency" in correct:
-            f0, _, line, order = carrier_line(raw[keep], t[keep], pts)
-            if line < LOCK_LINE:
-                raise _refuse_unlocked(
-                    f"the symbols' {order}th power has no carrier line to acquire (height "
-                    f"{line:.1f} over the incoherent level, {LOCK_LINE:g} needed)", baud, order,
-                    n_sym - 2 * skip)
-            pre["frequency_hz"] = f0
-            base = base * np.exp(-2j * np.pi * f0 * (t - t[keep][0]))
-        if "phase" in correct:
-            pre["phase_rad"] = carrier_line(base[keep], t[keep], pts)[1] \
-                if "frequency" in correct else _upright(base[keep], pts)
+            f0, _, line0, order = carrier_line(raw[keep], t[keep], pts)
+            blind = line0 >= LOCK_LINE
+            if blind:
+                pre["frequency_hz"] = f0
+                base = base * np.exp(-2j * np.pi * f0 * (t - t[keep][0]))
+        if "phase" in correct and (blind or "frequency" not in correct):
+            pre["phase_rad"] = (carrier_line(base[keep], t[keep], pts)[1] if blind
+                                else _upright(base[keep], pts))
             base = base * np.exp(-1j * pre["phase_rad"])
         y = base
         if "gain" in correct:            # a level to decide at; the fit below states the gain
@@ -1124,13 +1140,9 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
         for _ in range(DECIDED_PASSES if correct else 0):
             y, fitted = corrected(decide(y, pts), base)
         ref = decide(y, pts)
-        for k, v in pre.items():
-            fitted[k] = fitted.get(k, 0.0) + v
-        if "phase_rad" in fitted:
-            fitted["phase_rad"] = float((fitted["phase_rad"] + np.pi) % (2 * np.pi) - np.pi)
-        if "frequency" in correct:       # ... and CHECK it held, on the symbols as corrected
+        if "frequency" in correct and blind:     # CHECK it held, on the symbols as corrected
             f1, _, line, _ = carrier_line(y[keep], t[keep], pts)
-            turn = abs(f1) * order * float(t[keep][-1] - t[keep][0])
+            turn = abs(f1) * order * span
             if line < LOCK_LINE or turn > LOCK_TURN:
                 raise _refuse_unlocked(
                     f"after correction the symbols' {order}th power still turns {turn:.2f} of "
@@ -1138,8 +1150,40 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
                     f"(needs {LOCK_LINE:g})", baud, order, n_sym - 2 * skip)
             acquisition = {"method": f"line in the {order}th power of the symbols",
                            "order": order, "pull_in_hz": baud / (2 * order),
+                           "alias_spacing_hz": baud / order,
                            "coarse_frequency_hz": pre["frequency_hz"], "line": line,
                            "residual_turn": turn}
+        elif "frequency" in correct:
+            # NO LINE TO ACQUIRE: too few symbols for the constellation (128 of clean QAM-16
+            # stand about 4 to 6 high). What is left is the decision-directed fit started from
+            # zero offset, which is right when the record's decisions were mostly right to begin
+            # with and garbage otherwise -- so it is accepted only if it is self-consistent:
+            # the error vector sits well inside the decision regions the fit rested on, and
+            # one more pass leaves the frequency where it was.
+            apart = np.abs(pts[:, None] - pts[None, :])[~np.eye(pts.size, dtype=bool)]
+            half = 0.5 * float(apart.min())
+            level = float(np.sqrt(np.mean(np.abs(ref[keep]) ** 2) / np.mean(np.abs(pts) ** 2)))
+            inside = float(np.sqrt(np.mean(np.abs(y[keep] - ref[keep]) ** 2))) / (half * level)
+            again = corrected(ref, base)[1]["frequency_hz"]
+            moved = abs(again - fitted["frequency_hz"]) * order * span
+            if inside > FALLBACK_INSIDE or moved > FALLBACK_SETTLED:
+                raise _refuse_unlocked(
+                    f"the symbols' {order}th power has no carrier line to acquire (height "
+                    f"{line0:.1f} over the incoherent level, {LOCK_LINE:g} needed), and the "
+                    f"decision-directed fit from zero offset is not self-consistent: its rms "
+                    f"error is {inside:.2f} of the way to a decision boundary (limit "
+                    f"{FALLBACK_INSIDE:g}) and one more pass moves the frequency by "
+                    f"{moved:.3f} of a turn across the record (limit {FALLBACK_SETTLED:g})",
+                    baud, order, n_sym - 2 * skip)
+            acquisition = {"method": "decision-directed from zero offset (no carrier line: "
+                                     f"height {line0:.1f}, {LOCK_LINE:g} needed)",
+                           "order": order, "pull_in_hz": FALLBACK_PULL_TURN / (order * span),
+                           "alias_spacing_hz": baud / order, "coarse_frequency_hz": 0.0,
+                           "line": line0, "inside": inside, "settled_turn": moved}
+        for k, v in pre.items():
+            fitted[k] = fitted.get(k, 0.0) + v
+        if "phase_rad" in fitted:
+            fitted["phase_rad"] = float((fitted["phase_rad"] + np.pi) % (2 * np.pi) - np.pi)
     removed.update(fitted)
     err = y[keep] - ref[keep]
     scale = float(np.sqrt(np.mean(np.abs(ref[keep]) ** 2)))
@@ -1163,6 +1207,34 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
                 for k in range(steps)]
         out["decision_errors"] = min(errs)
         out["symmetry_steps"] = int(np.argmin(errs))
+        if "frequency" in correct and steps > 1:
+            # THE AMBIGUITY, checked where it can be: a carrier one alias off turns the
+            # constellation a whole symmetry step per symbol, which the symbols alone cannot
+            # show and the sent ones can. If the decisions agree with what was sent far
+            # better under such a turn, the lock is on the wrong alias and the frequency
+            # reported would be wrong by a multiple of baud / M.
+            k_sym = np.arange(n_sym)[keep]
+            alias = {a: min(int(np.sum(~np.isclose(
+                ref[keep] * np.exp(-2j * np.pi * (a * k_sym + c) / steps), truth[keep])))
+                for c in range(steps)) for a in range(1, steps)}
+            a_best = min(alias, key=alias.get)
+            counted = n_sym - 2 * skip
+            # "far better": by more than chance moves a count of this many decisions
+            if min(errs) - alias[a_best] > max(0.05 * counted, 4.0 * np.sqrt(counted)):
+                step_hz = baud / steps
+                turns = a_best if a_best <= steps // 2 else a_best - steps
+                raise ValueError(
+                    f"evm: reference='decided' locked onto the WRONG ALIAS of the carrier. "
+                    f"Against sent=, {min(errs)} of {n_sym - 2 * skip} decisions are wrong as "
+                    f"corrected and {alias[a_best]} if the constellation turns {turns:+d} "
+                    f"symmetry step(s) per symbol: the offset is "
+                    f"{removed['frequency_hz'] + turns * step_hz:.6g}"
+                    f" Hz (or that plus a multiple of {steps * step_hz:.6g}), not the "
+                    f"{removed['frequency_hz']:.6g} Hz "
+                    f"found. A blind estimate is unambiguous only within "
+                    f"+/-{baud / (2 * steps):.6g} Hz and repeats every {step_hz:.6g} Hz. Use "
+                    f"reference='truth', or take a coarse estimate of the offset out of the "
+                    f"record first (sig.lo_phase(), or x * exp(-2j*pi*f*t)).")
     if reference == "decided" and "frequency" in correct:
         out["acquisition"] = acquisition
     return out
