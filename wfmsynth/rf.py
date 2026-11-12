@@ -399,20 +399,24 @@ def awgn_levels(x, fs, baud=None, snr_db=None, es_n0_db=None, eb_n0_db=None, bw_
     return p, p / (band * ratio)
 
 
-def silence(n, ref_power):
-    """The record an `awgn` that STARTS a chain adds its noise to: `n` zeros. Noise with no
-    signal under it is a complex Gaussian source -- the scatter a fading process is made of
-    (`wfmsynth.recipes.fading`) -- and has nothing to be relative to, so `ref_power` is
+def silence(n, ref_power, who="awgn"):
+    """The record an `awgn` or a `spur` that STARTS a chain adds itself to: `n` zeros. Noise
+    with no signal under it is a complex Gaussian source -- the scatter a fading process is
+    made of (`wfmsynth.recipes.fading`) -- and a tone with none is an unmodulated carrier
+    (`wfmsynth.recipes.multitone`). Neither has anything to be relative to, so `ref_power` is
     required."""
     if ref_power is None:
+        form = {"awgn": "awgn(snr_db=0, bw_hz=<band>, ref_power=1.0) is noise with unit power "
+                        "in that band",
+                "spur": "spur(f_hz=<offset>, dbc=0, ref_power=1.0) is a tone of unit "
+                        "power"}[who]
         raise ValueError(
-            "awgn: this op starts the chain, so there is no signal for its level to be "
-            "relative to. State ref_power=<a power> with the ratio: "
-            "awgn(snr_db=0, bw_hz=<band>, ref_power=1.0) is noise with unit power in that "
-            "band. (To add noise TO a signal, start the chain with iq(...) or capture(...).)")
+            f"{who}: this op starts the chain, so there is no signal for its level to be "
+            f"relative to. State ref_power=<a power> with the ratio: {form}. (To add it TO a "
+            f"signal, start the chain with iq(...) or capture(...).)")
     if n is None:
-        raise ValueError("awgn: a chain that starts with noise needs a record length -- "
-                         "Signal(grid=Grid(fs=..., n=...)).")
+        raise ValueError(f"{who}: a chain that starts with it needs a record length -- "
+                         f"Signal(grid=Grid(fs=..., n=...)).")
     return np.zeros(int(n), complex)
 
 
@@ -572,8 +576,8 @@ def report(sig):
     out = []
     for chain, i, op, upstream, before, st in _acting(sig):
         if op["op"] in OPS:
-            if op["op"] == "awgn" and not upstream:     # noise that starts the chain
-                x, grid = silence(sig.grid.n, op.get("ref_power")), sig.grid
+            if op["op"] in ("awgn", "spur") and not upstream:   # it starts the chain
+                x, grid = silence(sig.grid.n, op.get("ref_power"), op["op"]), sig.grid
             else:
                 x = before()
                 grid = C._grid_now(upstream, sig.grid, x,

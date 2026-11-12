@@ -4873,6 +4873,269 @@ check("an OFDM frame through recipes.multipath: the per-subcarrier equaliser ret
       f"(bound 1e-3, the fractional delay's interpolator); against the same echo without the "
       f"carrier's turn {_ofmno:.3f}; equalised EVM {_ofmeq['evm']:.1e}")
 
+# ---- recipes: compositions worth shipping (GitHub #91)
+# Each is a function that returns a chain, so each is checked twice: against that chain written
+# out by hand (same recipe, same samples), and for the property it states, against a closed
+# form: Fourier terms, the logistic, Bessel functions, sqrt(2 n), the textbook buck ripple.
+print("\n== recipes: hum, ripple, pickup, contacts, an oscillator starting, a multitone and a "
+      "buck converter, each a chain of existing ops (GitHub #91) ==")
+import time as _rtime
+from scipy import special as _rsp
+_rR = _sws.recipes
+
+
+def _rrec(sub, grid):
+    return Signal(seed=1, grid=grid).carrier("dc", level=0.0).combine(sub)
+
+
+def _rsame(a, b):
+    return (_json.dumps(a.recipe(), sort_keys=True) == _json.dumps(b.recipe(), sort_keys=True)
+            and np.array_equal(a.waveform(), b.waveform()))
+
+
+def _rline(x, fs, f_hz):
+    c = np.mean(x * np.exp(-2j * np.pi * f_hz * np.arange(len(x)) / fs))
+    return c if np.iscomplexobj(x) else 2.0 * c
+
+
+def _rfreq(x, fs, lo, hi):
+    f = np.fft.rfftfreq(len(x), 1.0 / fs)
+    y = np.fft.irfft(np.where((f > lo) & (f < hi), np.fft.rfft(x), 0.0), len(x))
+    return np.gradient(np.unwrap(np.angle(sp.hilbert(y)))) * fs / (2 * np.pi)
+
+
+_rhg = Grid(fs=16384.0, n=1 << 16)
+_rha = 0.5 / (2 * np.pi * 1.0 * 50.0)
+_rhum = _rrec(_rR.hum(50.0, amp=0.02, harmonics={3: 0.3}, f_drift_hz=0.5, f_wander_hz=1.0), _rhg)
+_rhhand = _rrec(Signal().carrier("sine", f_hz=50.0, amp=0.02, phase_rad=0.0)
+                .combine([Signal().carrier("sine", f_hz=150.0, amp=0.006, phase_rad=0.0)])
+                .delay(by=Signal().carrier("sine", f_hz=1.0, amp=_rha, offset=_rha,
+                                           phase_rad=-0.5 * np.pi)), _rhg)
+_rhx = _rhum.waveform()
+_rht = np.arange(_rhg.n) / _rhg.fs
+_rhk = slice(_rhg.n // 8, -_rhg.n // 8)
+_rherr = {k: float(np.abs(_rfreq(_rhx, _rhg.fs, 50.0 * k - 20, 50.0 * k + 20)[_rhk]
+                          - k * (50.0 - 0.5 * np.sin(2 * np.pi * _rht))[_rhk]).max())
+          for k in (1, 3)}
+_rhs = _rrec(_rR.hum(50.0, amp=0.02, harmonics={2: 0.5, 3: 0.3}), _rhg).waveform()
+_rhl = [abs(_rline(_rhs, _rhg.fs, 50.0 * k)) for k in (1, 2, 3, 4)]
+check("recipes.hum is the chain it says (sines, one combine, one delay), its lines are the "
+      "stated amplitudes to 1e-12, and a wandering line frequency moves the fundamental and "
+      "the third harmonic by the same fraction: each follows k*(f - f_drift*sin) to 1e-4 Hz",
+      _rsame(_rhum, _rhhand) and np.allclose(_rhl[:3], [0.02, 0.01, 0.006], rtol=1e-12)
+      and _rhl[3] < 1e-15 and _rherr[1] < 1e-4 and _rherr[3] < 3e-4 and _rhum.roles() == [],
+      f"lines {_rhl[0]:.6f} / {_rhl[1]:.6f} / {_rhl[2]:.6f}, 4th {_rhl[3]:.0e}; 0.5 Hz drift "
+      f"at 1 Hz: frequency error {_rherr[1]:.1e} Hz on 50 Hz, {_rherr[3]:.1e} Hz on 150 Hz")
+
+_rpg = Grid(fs=1e9, n=1 << 18)
+_rpf, _rpd, _rpq, _rpper = _rpg.fs / _rpg.n * 128, 0.3, 4.0, 32
+_rpring = _rpg.fs / _rpper
+_rpx = _rrec(_rR.ripple(_rpf, amp=0.01, duty=_rpd), _rpg).waveform()
+_rpfund = abs(_rline(_rpx, _rpg.fs, _rpf))
+_rpwant = 2 * 0.01 * np.sin(np.pi * _rpd) / (np.pi ** 2 * _rpd * (1 - _rpd))
+_rpy = _rrec(_rR.ripple(_rpf, amp=0.01, duty=_rpd, spike=0.05, f_ring_hz=_rpring, q=_rpq),
+             _rpg).waveform() - _rpx
+_rpfit = []
+for _rpe in (3.0, 3.0 + _rpd):
+    _rpi = int(np.ceil(_rpe / _rpf * _rpg.fs))
+    _rptt = np.arange(_rpi, _rpi + int(2.5 * _rpq * _rpper)) / _rpg.fs - _rpe / _rpf
+    _rpb = np.exp((-np.pi * _rpring / _rpq
+                   + 2j * np.pi * _rpring * np.sqrt(1 - 1 / (4 * _rpq ** 2))) * _rptt)
+    _rpA = np.column_stack([_rpb.imag, _rpb.real])
+    _rpc = np.linalg.lstsq(_rpA, _rpy[_rpi:_rpi + len(_rptt)], rcond=None)[0]
+    _rpfit.append((float(np.hypot(*_rpc)) / 0.05, float(np.sign(_rpc[0])),
+                   float(np.abs(_rpy[_rpi:_rpi + len(_rptt)] - _rpA @ _rpc)[_rpper:].max()) / 0.05))
+_rsg = Grid(fs=250e6, n=1 << 20)
+_rsf = 2048 * _rsg.fs / _rsg.n
+_rsx = _rrec(_rR.ripple(_rsf, amp=0.01, spread_pct=6.0, f_spread_hz=4 * _rsg.fs / _rsg.n),
+             _rsg).waveform()
+_rsr = _rfreq(_rsx, _rsg.fs, 0.8 * _rsf, 1.2 * _rsf)[_rsg.n // 16:-_rsg.n // 16] / _rsf
+check("recipes.ripple: the triangle's fundamental is its Fourier term to 1e-6; each "
+      "switching edge starts a ring of the stated frequency and decay (under 1 % of spike "
+      "left after fitting amplitude and phase), up at the trough and down at the peak, 3 to "
+      "7 % under `spike`; and a 6 % spread clock sweeps 0.94 .. 1.06 of f_sw",
+      abs(_rpfund / _rpwant - 1) < 1e-6 and abs((_rpx.max() - _rpx.min()) / 0.02 - 1) < 1e-3
+      and all(0.92 < a < 0.98 and left < 0.01 for a, _, left in _rpfit)
+      and [s for _, s, _ in _rpfit] == [1.0, -1.0]
+      and abs(_rsr.min() - 0.94) < 1e-3 and abs(_rsr.max() - 1.06) < 1e-3,
+      f"fundamental {_rpfund:.8f} against {_rpwant:.8f}; ring at 32 samples a period, q=4: "
+      f"{_rpfit[0][0]:.4f} of spike rising, {_rpfit[1][0]:.4f} falling, residual "
+      f"{_rpfit[0][2]:.4f} / {_rpfit[1][2]:.4f} of spike; swept {_rsr.min():.4f} .. "
+      f"{_rsr.max():.4f}")
+
+_rkg = Grid(fs=1e7, n=1 << 16)
+_rkc, _rkm = 4096 * _rkg.fs / _rkg.n, 64 * _rkg.fs / _rkg.n
+_rkam = _rrec(_rR.pickup(_rkc, amp=0.01, depth=0.4, message=Signal().carrier("sine", f_hz=_rkm)),
+              _rkg).waveform()
+_rkfm = _rrec(_rR.pickup(_rkc, amp=0.01, dev_hz=2 * _rkm,
+                         message=Signal().carrier("sine", f_hz=_rkm, phase_rad=0.5 * np.pi)),
+              _rkg).waveform()
+_rkl = [abs(_rline(_rkam, _rkg.fs, f)) for f in (_rkc - _rkm, _rkc, _rkc + _rkm)]
+_rkb = np.array([abs(_rline(_rkfm, _rkg.fs, _rkc + k * _rkm)) / 0.01 for k in range(5)])
+_rkberr = float(np.abs(_rkb - np.abs(_rsp.jv(np.arange(5), 2.0))).max())
+check("recipes.pickup: AM puts depth/2 of the carrier either side of it, and FM at index 2 "
+      "has lines of |J_k(2)| to 1e-4",
+      np.allclose(_rkl, [0.002, 0.01, 0.002], rtol=1e-12) and _rkberr < 1e-4,
+      f"AM depth 0.4 on 10 mV: {1e3 * _rkl[0]:.6f} / {1e3 * _rkl[1]:.6f} / "
+      f"{1e3 * _rkl[2]:.6f} mV; FM lines against Bessel: largest error {_rkberr:.1e}")
+
+_rbg = Grid(fs=1e6, n=1 << 13)
+_rbs = Signal(seed=1, grid=_rbg).carrier("dc", level=1.0).gate(
+    by=_rR.bounce(t_s=2e-3, gap_s=400e-6, n=3, ratio=0.5))
+_rbx, _rbev = _rbs.realize()
+_rbd = np.diff(_rbx)
+_rbup, _rbdn = (np.flatnonzero(_rbd > 0.5) + 1) / _rbg.fs, (np.flatnonzero(_rbd < -0.5) + 1) / _rbg.fs
+_rbc, _rbo = _rR.bounce_times(2e-3, 400e-6, n=3, ratio=0.5)
+_rbtr = [e for e in _rbev if e.kind == "transition"]
+_rig = Grid(fs=1e6, n=1 << 21)
+_ris = Signal(seed=4, grid=_rig).carrier("dc", level=1.0).gate(
+    by=_rR.intermittent(closed_s=5e-3, open_s=50e-6))
+_rix, _riev = _ris.realize()
+_rid = {s: np.array([r["t_stop_s"] - r["t_start_s"]
+                     for r in _hS.intervals(_riev, at="gate/1/by")
+                     if r["state"] == s and r["complete"]]) for s in (0, 1)}
+check("recipes.bounce closes n + 1 times at the stated instants with each gap `ratio` of "
+      "the one before, read off the samples and off the gate's own transition events; "
+      "recipes.intermittent opens with the stated mean dwells (within 4 standard errors) "
+      "under one role",
+      len(_rbup) == 4 and len(_rbdn) == 3 and len(_rbtr) == 7
+      and np.abs(_rbup - _rbc).max() < 1e-12 and np.abs(_rbdn - _rbo).max() < 1e-12
+      and np.allclose(_rbup[1:] - _rbdn, [400e-6, 200e-6, 100e-6], atol=1e-12)
+      and _ris.roles() == ["gate/1/by/states/0"]
+      and all(abs(_rid[s].mean() / m - 1) < 4 / np.sqrt(len(_rid[s]))
+              for s, m in ((0, 5e-3), (1, 50e-6))),
+      f"bounce: closes at {np.round(_rbup * 1e3, 3)} ms, gaps "
+      f"{np.round((_rbup[1:] - _rbdn) * 1e6, 3)} us; intermittent: {len(_rid[1])} opens of "
+      f"mean {1e6 * _rid[1].mean():.2f} us (50), closed {1e3 * _rid[0].mean():.3f} ms (5)")
+
+_rog = Grid(fs=160e6, n=1 << 17)
+_ros = _rR.oscillator_startup(10e6, startup_s=200e-6, ppm=300.0, settle_s=100e-6,
+                              sig=Signal(seed=1, grid=_rog))
+_roe = _ros.subchain("gain/1/by")
+_rot = np.arange(_rog.n) / _rog.fs
+_rotau = 100e-6 / (2 * np.log(9.0))
+_roerr = float(np.abs(_roe - 1 / (1 + np.exp(-(_rot - 150e-6) / _rotau))).max())
+
+
+def _rocross(level):
+    i = int(np.argmax(_roe >= level))
+    return _rot[i - 1] + (level - _roe[i - 1]) / (_roe[i] - _roe[i - 1]) / _rog.fs
+
+
+_roph = np.unwrap(np.angle(sp.hilbert(_ros.waveform() / _roe))) - 2 * np.pi * 10e6 * _rot
+_row = int(10e-6 * _rog.fs)
+_rotc = np.arange(20e-6, 500e-6, 10e-6)
+_rofe = np.array([(_roph[int(c * _rog.fs) + _row] - _roph[int(c * _rog.fs) - _row])
+                  / (2 * np.pi * 2 * _row / _rog.fs) for c in _rotc])
+_roslope, _roat0 = np.polyfit(_rotc, np.log(_rofe), 1)
+_roend = float((_roph[-3000] - _roph[-19000]) / (2 * np.pi * 16000 / _rog.fs))
+check("recipes.oscillator_startup: the amplitude is the logistic to 1e-12, at 90 % at "
+      "startup_s with a 10-90 % time of rise_s; the frequency starts ppm high, decays with "
+      "settle_s (both to 0.5 %) and ends within 0.3 ppm",
+      _roerr < 1e-12 and abs(_rocross(0.9) - 200e-6) < 1e-10
+      and abs(_rocross(0.9) - _rocross(0.1) - 100e-6) < 1e-10
+      and abs(np.exp(_roat0) / 3000.0 - 1) < 5e-3 and abs(-1 / _roslope / 100e-6 - 1) < 5e-3
+      and abs(_roend) < 3.0 and _ros.roles() == [],
+      f"envelope error {_roerr:.1e}; 90 % at {1e6 * _rocross(0.9):.4f} us, 10-90 % "
+      f"{1e6 * (_rocross(0.9) - _rocross(0.1)):.4f} us; starts {np.exp(_roat0) / 10:.2f} ppm "
+      f"high (300), time constant {-1e6 / _roslope:.3f} us (100), ends {_roend:.2f} Hz high")
+
+_rmg = Grid(fs=64e6, n=1 << 16)
+_rmi = Grid(fs=64e6, n=1 << 16, fc_hz=1e9)
+_rmd = _rmg.fs / _rmg.n
+
+
+def _rmt(n, grid=_rmg, **kw):
+    if kw.get("domain") == "iq":
+        return _rR.multitone(-32 * (n - 1) * _rmd, 32 * (n - 1) * _rmd, n,
+                             sig=Signal(seed=1, grid=_rmi), **kw)
+    return _rR.multitone(1024 * _rmd, (1024 + 64 * (n - 1)) * _rmd, n,
+                         sig=Signal(seed=1, grid=grid), **kw)
+
+
+def _rcrest(x):
+    return float(np.abs(x).max() / np.sqrt(np.mean(np.abs(x) ** 2)))
+
+
+_rmc = {(n, p, d): _rcrest(_rmt(n, phase=p, domain=d, seed=3 if p == "random" else None).waveform())
+        for n in (9, 33, 129) for p in _rR.PHASES for d in ("real", "iq")}
+_rmf, _rmph, _rmkept = _rR.multitone_plan(
+    1024 * _rmd, (1024 + 64 * 32) * _rmd, 33, notch=((1024 + 64 * 14) * _rmd, (1024 + 64 * 18) * _rmd))
+_rmn = _rmt(33, notch=((1024 + 64 * 14) * _rmd, (1024 + 64 * 18) * _rmd))
+_rml = np.array([_rline(_rmn.waveform(), _rmg.fs, f) for f in _rmf])
+_rmlerr = float(np.abs(_rml[_rmkept] - np.sqrt(2 / 33) * np.exp(1j * _rmph[_rmkept])).max())
+_rmo = np.array([abs(_rline(_rmn.copy().law("tanh", gain=1.0, sat=3.0).waveform(), _rmg.fs, f))
+                 for f in _rmf])
+_rmnpr = float(20 * np.log10(_rmo[_rmkept].mean() / np.sqrt(np.mean(_rmo[~_rmkept] ** 2))))
+_rmcost = {}
+for _rmdom in ("real", "iq"):
+    _rms = _rmt(1024, domain=_rmdom) if _rmdom == "iq" else _rR.multitone(
+        64 * _rmd, (64 + 16 * 1023) * _rmd, 1024, sig=Signal(seed=1, grid=_rmg))
+    _rmt0 = _rtime.perf_counter()
+    _rms.waveform()
+    _rmcost[_rmdom] = (_rtime.perf_counter() - _rmt0, len(_rms.to_json()))
+check("recipes.multitone: every kept line has the stated level and phase to 1e-12 and the "
+      "notch is empty; in-phase tones have a crest factor of sqrt(2 n) on a voltage and "
+      "sqrt(n) on an envelope, Newman and Schroeder stay under 2.0 and 1.42 from 9 to 129 "
+      "tones, random phases sit between; and a compressing amplifier fills the notch",
+      _rmlerr < 1e-12 and np.abs(_rml[~_rmkept]).max() < 1e-13
+      and all(abs(_rmc[n, "zero", "real"] / np.sqrt(2 * n) - 1) < 1e-3
+              and abs(_rmc[n, "zero", "iq"] / np.sqrt(n) - 1) < 1e-9
+              and all(1.75 < _rmc[n, p, "real"] < 2.0 and 1.3 < _rmc[n, p, "iq"] < 1.42
+                      for p in ("newman", "schroeder"))
+              and all(_rmc[n, "newman", d] < _rmc[n, "random", d] < _rmc[n, "zero", d]
+                      for d in ("real", "iq")) for n in (9, 33, 129))
+      and 25 < _rmnpr < 45,
+      "crest, voltage / envelope -- "
+      + "; ".join(f"{n} tones: " + ", ".join(
+          f"{p} {_rmc[n, p, 'real']:.3f} / {_rmc[n, p, 'iq']:.3f}" for p in _rR.PHASES)
+          for n in (9, 33, 129))
+      + f". Notch: {np.abs(_rml[~_rmkept]).max():.1e} left, {_rmnpr:.1f} dB noise power "
+        f"ratio after tanh with rails at 3 rms. Cost of 1024 tones on 65536 samples: "
+        f"{_rmcost['real'][0]:.2f} s and {_rmcost['real'][1] // 1000} kB of recipe on a "
+        f"voltage, {_rmcost['iq'][0]:.2f} s and {_rmcost['iq'][1] // 1000} kB on an envelope")
+
+_rtg = Grid(fs=1e6, n=1 << 12, fc_hz=1e9)
+_rtf = 64 * _rtg.fs / _rtg.n
+_rts_ = Signal(seed=1, grid=_rtg).spur(f_hz=_rtf, dbc=-6.0, ref_power=4.0, phase_rad=0.3)
+_rtx = _rts_.waveform()
+_rtc = _rline(_rtx, _rtg.fs, _rtf)
+_rtno = _qrefusal(lambda: Signal(seed=1, grid=_rtg).spur(f_hz=_rtf, dbc=0.0).waveform())
+check("a spur may start a chain: it is then an unmodulated carrier of power "
+      "ref_power * 10^(dbc/10) at f_hz, with nothing else in the record, and without "
+      "ref_power it is refused by name",
+      abs(abs(_rtc) - np.sqrt(4.0 * 10 ** -0.6)) < 1e-12 and abs(np.angle(_rtc) - 0.3) < 1e-12
+      and abs(np.mean(np.abs(_rtx) ** 2) - 4.0 * 10 ** -0.6) < 1e-12
+      and "spur: this op starts the chain" in _rtno,
+      f"amplitude {abs(_rtc):.9f} against {np.sqrt(4.0 * 10 ** -0.6):.9f}, phase "
+      f"{np.angle(_rtc):.6f} rad (0.3)")
+
+_rug = Grid(fs=400e6, n=1 << 19)
+_rures = []
+with warnings.catch_warnings(record=True) as _ruw:
+    warnings.simplefilter("always")
+    for _ruc in (dict(v_in=12.0, duty=0.275, f_sw_hz=500e3, l_h=10e-6, c_f=22e-6, r_load_ohm=0.5),
+                 dict(v_in=12.0, duty=0.5, f_sw_hz=500e3, l_h=10e-6, c_f=22e-6, r_load_ohm=0.5),
+                 dict(v_in=5.0, duty=0.66, f_sw_hz=500e3, l_h=4.7e-6, c_f=10e-6, r_load_ohm=1.0)):
+        _rux = _rR.buck(sig=Signal(seed=1, grid=_rug), **_ruc).waveform()
+        _rub = _rR.buck_ripple(**_ruc)
+        _rut = _rux[-int(20 * _rug.fs / _ruc["f_sw_hz"]):]
+        _ruf = float(np.fft.rfftfreq(len(_rut), 1 / _rug.fs)[
+            np.argmax(np.abs(np.fft.rfft(_rut - _rut.mean())))])
+        _rures.append((_ruc, float(_rut.mean()) / _rub["v_out_v"],
+                       float(_rut.max() - _rut.min()) / _rub["v_ripple_pp_v"], _ruf,
+                       _rub["v_ripple_pp_v"], float(abs(_rux[0])), _rub["f0_hz"]))
+check("recipes.buck, a synchronous buck as ONE net (a PWM driver, an inductor, a capacitor, "
+      "a load): the settled mean is duty*v_in*R/(R + r_on) to 1e-5, the ripple is at f_sw "
+      "and its peak-to-peak is the textbook v_in*D*(1-D)/(8*L*C*f_sw^2) to 0.5 % on three "
+      "converters, it starts at rest, and `net` warns of nothing",
+      all(abs(m - 1) < 1e-5 and abs(r - 1) < 5e-3 and abs(f / c["f_sw_hz"] - 1) < 1e-9
+          and x0 < 1e-9 for c, m, r, f, _, x0, _ in _rures)
+      and not [w for w in _ruw if str(w.message).startswith("net:")],
+      "; ".join(f"{c['v_in']:g} V at duty {c['duty']}: {1e3 * pp * r:.4f} mV against "
+                f"{1e3 * pp:.4f} mV ({100 * (r - 1):+.3f} %), f_sw/f0 {c['f_sw_hz'] / f0:.1f}"
+                for c, _, r, _, pp, _, f0 in _rures))
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

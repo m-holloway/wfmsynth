@@ -11,7 +11,7 @@ A record is in one of three domains:
                See "THE OPTICAL FIELD" below.
 
 The domain a chain STARTS in is its SOURCE's when the grid does not state one: `iq(...)`,
-`ofdm(...)`, a first `awgn` (complex noise), an I/Q capture, or a `sequence` / `switch` of I/Q
+`ofdm(...)`, a first `awgn` (complex noise) or `spur` (a tone), an I/Q capture, or a `sequence` / `switch` of I/Q
 chains is an envelope, `carrier` / `symbols` / `coded` / a real capture a voltage (`follow`). A grid may state it -- `Grid(domain="iq")`,
 `Grid(domain="real")`, or `fc_hz=`, which only an envelope has -- and a source that
 contradicts a stated domain is refused by name. Four ops move between the domains --

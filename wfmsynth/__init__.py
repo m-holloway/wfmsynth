@@ -62,8 +62,10 @@ Modules / public API:
                 from a stated distribution and jumps to the next -- burst noise, or an
                 activity schedule for gate(by=) / switch(select=); intervals(), occupancy()
   recipes       useful ARRANGEMENTS as plain functions returning a chain: fading(),
-                multipath() on an envelope; flicker() (1/f noise from superposed two-state
-                processes) and its spectrum flicker_psd()
+                multipath() on an envelope; what a capture carries that is not the signal --
+                flicker() (1/f noise from superposed two-state processes), hum(), ripple(),
+                pickup(); a contact as an enable, bounce() and intermittent(); and sources,
+                oscillator_startup(), multitone() and buck() (a converter as one `net`)
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 
 A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM

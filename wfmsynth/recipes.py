@@ -7,14 +7,42 @@ the recipe, `roles()` and `contrast()` show the ops it is made of, and a caller 
 chain and change one of them. A function here adds no mechanism and no parameter to any op.
 Each states what it claims and over what range, and `wfmsynth.validate` measures it.
 
+A CHANNEL, for an I/Q record
+
     fading        a moving, scattering path's complex gain (Rayleigh, or Rician with a line
-                  of sight): complex noise through `filter("doppler")`. For `gain(by=)` on an
-                  I/Q record.
+                  of sight): complex noise through `filter("doppler")`. For `gain(by=)`.
     multipath     delayed, scaled (and optionally fading) copies of one transmitted envelope,
                   joined by `combine`.
+
+WHAT A CAPTURE CARRIES THAT IS NOT THE SIGNAL, each for `combine`
+
     flicker       noise with a 1/f spectrum between two stated frequencies: two-state
                   `carrier("states")` processes superposed, their corners spaced evenly in
                   log frequency. `flicker_psd` is the spectrum the arrangement has.
+    hum           mains pickup: a sine and its harmonics, and a slow wander of the line
+                  frequency that moves every harmonic together (`delay`).
+    ripple        a converter's output ripple: a triangle at the switching frequency, a ring
+                  at each switching edge (a square through a resonant `filter`), and a
+                  spread-spectrum clock (`ssc`).
+    pickup        a carrier that is not yours, coupled in at a stated level, plain or
+                  modulated.
+
+A CONTACT, each an enable for `gate(by=)` or `gain(by=)`
+
+    bounce        a contact closing: it touches, flies open and touches again, each flight
+                  shorter than the last (a `sequence` of levels). `bounce_times` is when.
+    intermittent  a contact that opens briefly at random (`carrier("states")`).
+
+A SOURCE
+
+    oscillator_startup   an oscillator coming up: amplitude growing exponentially into its
+                  limit, frequency settling from an initial error (`modulate` and `gain`).
+    multitone     evenly spaced equal tones with a stated phase policy and an optional notch:
+                  a noise power ratio stimulus, on a voltage or on I/Q. `multitone_plan` is
+                  its frequencies and phases.
+    buck          a synchronous buck converter as a CIRCUIT: a PWM switch node into an
+                  inductor, a capacitor and a load, solved by `net`. In volts.
+                  `buck_ripple` is the textbook figures it is checked against.
 
     import wfmsynth as ws
     tx = ws.Signal(seed=1, grid=g).iq("qpsk", prbs=11)
@@ -26,6 +54,28 @@ Each states what it claims and over what range, and `wfmsynth.validate` measures
 
     noise = ws.recipes.flicker(f_lo_hz=1e3, f_hi_hz=1e6, rms=0.02)
     ws.Signal(seed=1, grid=g).carrier("sine", f_hz=1e5).combine(noise)
+
+    clutter = [ws.recipes.hum(50.0, amp=0.02, harmonics={3: 0.3}),
+               ws.recipes.ripple(250e3, amp=0.01, spike=0.03, f_ring_hz=20e6)]
+    ws.Signal(seed=1, grid=g).carrier("sine", f_hz=1e3).combine(clutter)
+
+    ws.recipes.multitone(1e6, 9e6, 33, notch=(4.6e6, 5.4e6), sig=ws.Signal(seed=1, grid=g))
+
+A SOURCE takes `sig=`, the Signal to build on. Left out it is `Signal()`, a sub-chain for
+another op; given `ws.Signal(seed=1, grid=g)`, the result is the record.
+
+WHAT IS NOT HERE, because it is not a chain of what exists (GitHub #91):
+
+    a contact that opens fast and recovers slowly    needs one draw used twice: the enable
+                  and a filtered copy of it, joined by `combine(how="min")`. A sub-chain
+                  written twice is drawn twice, so this is a `Channels` record with the
+                  enable as a shared chain, not a function that returns one chain.
+    an oscillator as a loop                          a resonator, a gain and a limiter in
+                  FEEDBACK. A chain has no feedback; `oscillator_startup` is the closed-form
+                  solution of that loop's amplitude equation, and says so.
+    a capacitor's series resistance in `buck`        `net` solves node voltages and every
+                  node needs capacitance, so the node between a capacitor and its series
+                  resistance is refused. `ripple` is the ESR-dominated shape, as a waveform.
 """
 from __future__ import annotations
 
@@ -165,3 +215,490 @@ def flicker_psd(f_hz, f_lo_hz, f_hi_hz, rms=1.0, per_decade=2):
     a2 = float(rms) ** 2 / fc.size
     f = np.asarray(f_hz, float)[..., None]
     return np.sum((2.0 * a2 / (np.pi * fc)) / (1.0 + (f / fc) ** 2), axis=-1)
+
+
+def _positive(who, **values):
+    for name, v in values.items():
+        if isinstance(v, (bool, str)) or not np.isscalar(v) or not np.isfinite(v) or not v > 0:
+            raise ValueError(f"{who}: {name} must be a positive number, got {v!r}.")
+
+
+def _both(who, what, **pair):
+    """Two arguments that only mean something together: both given, or neither."""
+    given = [v is not None for v in pair.values()]
+    if any(given) and not all(given):
+        a, b = pair
+        raise ValueError(f"{who}: {what} needs both {a}= and {b}=; give both or neither.")
+    return all(given)
+
+
+def _onto(who, sig):
+    """The Signal a source builds on: `Signal()` unless one is given, which must be empty."""
+    if sig is None:
+        return Signal()
+    if not isinstance(sig, Signal) or sig.ops:
+        raise ValueError(f"{who}: sig is the EMPTY Signal to build on -- "
+                         f"ws.Signal(seed=1, grid=g) for a record -- because this is a "
+                         f"source, a chain's first op. To add it to a chain that already has "
+                         f"one, leave sig out and hand the result to combine().")
+    return sig
+
+
+# ------------------------------------------------------------------ clutter, for `combine`
+def hum(f_hz, amp, harmonics=None, phase_rad=0.0, f_drift_hz=None, f_wander_hz=None):
+    """MAINS HUM: a sine at the line frequency and its harmonics, as a sub-chain to `combine`.
+
+        sig.combine(ws.recipes.hum(50.0, amp=0.02))
+        sig.combine(ws.recipes.hum(60.0, amp=0.02, harmonics={2: 0.5, 3: 0.3},
+                                   f_drift_hz=0.05, f_wander_hz=0.2))
+
+    `amp` is the fundamental's amplitude. `harmonics` maps a harmonic NUMBER to its amplitude
+    relative to the fundamental: `{3: 0.3, 5: 0.1}` is the odd series of a saturating
+    transformer. `phase_rad` is the fundamental's phase at t = 0 and harmonic k gets k times
+    it, so changing it slides the whole waveform in time without changing its shape.
+
+    The line frequency is not constant. `f_drift_hz` is the furthest the FUNDAMENTAL moves
+    from `f_hz`, and `f_wander_hz` how often it goes there and back. It is one `delay` on the
+    summed hum, by a slow sine that starts at zero,
+
+        by = A * (1 - cos(2 pi f_wander_hz t)),     A = f_drift_hz / (2 pi f_wander_hz f_hz)
+
+    which puts harmonic k at ``k * (f_hz - f_drift_hz * sin(2 pi f_wander_hz t))``: every
+    harmonic moves by the same FRACTION, as on a real line. The wander is stated, not drawn
+    (no role); a random one is a noise sub-chain in that `delay`.
+
+    Ops: `carrier("sine")` [`combine` of one sine per harmonic] [`delay`]."""
+    _positive("hum", f_hz=f_hz, amp=amp)
+    harmonics = dict(harmonics or {})
+    for k, r in harmonics.items():
+        if isinstance(k, (bool, str)) or int(k) != k or k < 2:
+            raise ValueError(f"hum: harmonics maps a harmonic number (2, 3, ...) to its "
+                             f"amplitude relative to the fundamental; got the key {k!r}. The "
+                             f"fundamental's own amplitude is amp=.")
+        _positive("hum", **{f"harmonics[{k}]": r})
+    s = Signal().carrier("sine", f_hz=float(f_hz), amp=float(amp), phase_rad=float(phase_rad))
+    if harmonics:
+        s = s.combine([Signal().carrier("sine", f_hz=float(k * f_hz), amp=float(amp * r),
+                                        phase_rad=float(k * phase_rad))
+                       for k, r in sorted(harmonics.items())])
+    if _both("hum", "a wandering line frequency", f_drift_hz=f_drift_hz,
+             f_wander_hz=f_wander_hz):
+        _positive("hum", f_drift_hz=f_drift_hz, f_wander_hz=f_wander_hz)
+        a = float(f_drift_hz) / (2.0 * np.pi * float(f_wander_hz) * float(f_hz))
+        s = s.delay(by=Signal().carrier("sine", f_hz=float(f_wander_hz), amp=a, offset=a,
+                                        phase_rad=-0.5 * np.pi))
+    return s
+
+
+def ripple(f_sw_hz, amp, duty=0.5, spike=None, f_ring_hz=None, q=4.0, spread_pct=None,
+           f_spread_hz=None):
+    """A switching converter's OUTPUT RIPPLE as a waveform, a sub-chain to `combine`.
+
+        sig.combine(ws.recipes.ripple(500e3, amp=0.01))
+        sig.combine(ws.recipes.ripple(500e3, amp=0.01, duty=0.3, spike=0.04, f_ring_hz=60e6,
+                                      spread_pct=6.0, f_spread_hz=9e3))
+
+    The ripple is a triangle at `f_sw_hz` of amplitude `amp` (2 * amp peak to peak), rising
+    for `duty` of the period: the inductor's ripple current in the output capacitor's series
+    resistance, which dominates with an electrolytic or a small ceramic. (An ideal
+    capacitor's ripple is the integral of that, and comes from the circuit: `buck`.)
+
+    `spike` and `f_ring_hz` add the ring at each switching edge: the switch node's step
+    exciting the loop's parasitic inductance and capacitance. It is a square on the same clock
+    through a second-order resonance at `f_ring_hz` of quality factor `q`, so each edge starts
+
+        +/- spike * exp(-pi f_ring_hz t / q) * sin(2 pi f_d t),   f_d = f_ring_hz * sqrt(1 - 1/(4 q**2))
+
+    up at the trough, down at the peak. `spike` is what an ideal step would start; the
+    square's own edge is an eighth of a ring period (two samples at least), which takes 3 to
+    7 % off it (measured for q from 2 to 8, on grids with 16 to 64 samples per ring period,
+    the fewest it should be given).
+
+    `spread_pct` and `f_spread_hz` are a spread-spectrum clock: the waveform's time base is
+    swept by a triangle (`ssc`, profile "center"), so the switching frequency goes between
+    ``f_sw_hz * (1 - spread_pct / 100)`` and ``f_sw_hz * (1 + spread_pct / 100)`` and back
+    `f_spread_hz` times a second, and every line of the ripple becomes a band.
+
+    Nothing is drawn. Ops: `carrier("triangle")` [`combine` of `carrier("square")` ->
+    `filter("butter", btype="bandpass", order=1)`] [`ssc`]."""
+    _positive("ripple", f_sw_hz=f_sw_hz, amp=amp)
+    if not 0.0 < duty < 1.0:
+        raise ValueError(f"ripple: duty is the fraction of the period the switch is on, "
+                         f"strictly between 0 and 1; got {duty!r}.")
+    s = Signal().carrier("triangle", f_hz=float(f_sw_hz), amp=float(amp), symmetry=float(duty))
+    if _both("ripple", "the ring at each switching edge", spike=spike, f_ring_hz=f_ring_hz):
+        _positive("ripple", spike=spike, f_ring_hz=f_ring_hz)
+        if not q > 0.5:
+            raise ValueError(f"ripple: q={q!r} does not ring; a resonance oscillates only "
+                             f"above q = 0.5. A switching loop is typically 2 to 10.")
+        if f_ring_hz < 8.0 * f_sw_hz:
+            raise ValueError(f"ripple: f_ring_hz={f_ring_hz!r} is under 8 times f_sw_hz="
+                             f"{f_sw_hz!r}, so one edge's ring runs into the next and `spike` "
+                             f"is not the amplitude of anything. A loop rings tens to "
+                             f"hundreds of times faster than it switches.")
+        half = 0.5 / float(q)
+        root, damped = float(np.sqrt(1.0 + half * half)), float(np.sqrt(1.0 - half * half))
+        ring = (Signal().carrier("square", f_hz=float(f_sw_hz), duty=float(duty),
+                                 amp=0.5 * float(spike) * float(q) * damped,
+                                 tr_frac=0.125 * float(f_sw_hz) / float(f_ring_hz))
+                .filter("butter", btype="bandpass", order=1,
+                        f_hz=[float(f_ring_hz) * (root - half), float(f_ring_hz) * (root + half)]))
+        s = s.combine(ring)
+    if _both("ripple", "a spread-spectrum clock", spread_pct=spread_pct,
+             f_spread_hz=f_spread_hz):
+        _positive("ripple", spread_pct=spread_pct, f_spread_hz=f_spread_hz)
+        s = s.ssc(f_ssc=float(f_spread_hz), spread=0.01 * float(spread_pct), profile="center")
+    return s
+
+
+def pickup(fc_hz, amp, message=None, depth=0.5, dev_hz=None):
+    """RADIO PICKUP: a carrier that is not yours, coupled in at a stated level; a sub-chain to
+    `combine`.
+
+        sig.combine(ws.recipes.pickup(98.5e6, amp=0.005))                   # a bare carrier
+        sig.combine(ws.recipes.pickup(1.0e6, amp=0.01,
+                                      message=ws.Signal().carrier("sine", f_hz=1e3)))   # AM
+        sig.combine(ws.recipes.pickup(98.5e6, amp=0.005, dev_hz=75e3,
+                                      message=ws.Signal().carrier("noise", rms=0.3)
+                                                         .filter("butter", f_hz=15e3))) # FM
+
+    `amp` is the carrier's amplitude as it arrives on the record: the coupling is in that
+    number, not modelled. `message` is what it is modulated with, a sub-chain or a bare
+    carrier spec, at the level it renders. With `dev_hz` it is FM, the instantaneous frequency
+    ``fc_hz + dev_hz * message``; without, AM, ``amp * (1 + depth * message) * sin(2 pi fc_hz t)``,
+    so a unit sine message puts a line ``depth / 2`` of the carrier either side of it.
+    Without a message it is a plain sine. Any randomness is the message's own, under
+    `.../modulate/<i>/message/...`.
+
+    Ops: `carrier("sine")` [`modulate(kind="am")`], or `modulate(kind="fm")` alone."""
+    _positive("pickup", fc_hz=fc_hz, amp=amp)
+    if message is None:
+        if dev_hz is not None:
+            raise ValueError("pickup: dev_hz= is the frequency deviation per unit of the "
+                             "message, and there is no message=.")
+        return Signal().carrier("sine", f_hz=float(fc_hz), amp=float(amp))
+    if dev_hz is not None:
+        return Signal().modulate(kind="fm", fc_hz=float(fc_hz), dev_hz=float(dev_hz),
+                                 amp=float(amp), message=message)
+    return (Signal().carrier("sine", f_hz=float(fc_hz), amp=float(amp))
+            .modulate(kind="am", depth=float(depth), message=message))
+
+
+# ------------------------------------------------------------------ a contact, as an enable
+def bounce_times(t_s, gap_s, n=3, ratio=0.5, touch_s=None):
+    """When `bounce(...)` closes and opens: ``(closes_s, opens_s)``, `n + 1` and `n` instants
+    in seconds. The ground truth of the arrangement, from its arguments alone."""
+    if isinstance(n, bool) or int(n) != n or n < 1:
+        raise ValueError(f"bounce: n is how many times the contact flies open again, a whole "
+                         f"number of at least 1; got {n!r}. A contact that closes once is a "
+                         f"carrier('step').")
+    if isinstance(t_s, (bool, str)) or not np.isfinite(t_s) or t_s < 0:
+        raise ValueError(f"bounce: t_s is when the contact first touches, in seconds from "
+                         f"the record's start; got {t_s!r}.")
+    touch_s = 0.25 * gap_s if touch_s is None else touch_s
+    _positive("bounce", gap_s=gap_s, ratio=ratio, touch_s=touch_s)
+    closes, opens, t = [], [], float(t_s)
+    for gap in _flights(gap_s, n, ratio):
+        closes.append(t)
+        opens.append(t + float(touch_s))
+        t = opens[-1] + gap
+    return np.array(closes + [t]), np.array(opens)
+
+
+def _flights(gap_s, n, ratio):
+    return [float(gap_s) * float(ratio) ** k for k in range(int(n))]
+
+
+def bounce(t_s, gap_s, n=3, ratio=0.5, touch_s=None):
+    """CONTACT BOUNCE on closing, as an enable: 0 while open, 1 while closed.
+
+        sig.gate(by=ws.recipes.bounce(t_s=2e-3, gap_s=400e-6))
+
+    The contact first touches at `t_s`. It then flies open `n` times: the first flight lasts
+    `gap_s` and each one after it `ratio` times the one before (a bouncing mass keeps the
+    same fraction of its speed at every impact), and before each flight it touches for
+    `touch_s`, by default a quarter of `gap_s`. After the last flight it stays closed: `n + 1`
+    closures and `n` gaps at stated instants (`bounce_times`), the last closure at
+
+        t_s + n * touch_s + gap_s * (1 - ratio**n) / (1 - ratio).
+
+    It is a `sequence` of constant levels with those durations, so every boundary is a
+    `segment` event and the `gate` it drives emits each switching as a `transition`. Each
+    duration has to be a whole number of samples: `sequence` never rounds one, and refuses
+    with the nearest that fit. Nothing is drawn: for a population, vary the arguments.
+
+    Ops: one `sequence` of 2*n + 2 `carrier("dc")` segments (one fewer when t_s is 0)."""
+    bounce_times(t_s, gap_s, n, ratio, touch_s)                      # the refusals
+    touch_s = 0.25 * gap_s if touch_s is None else touch_s
+
+    def level(v, duration_s=None):
+        seg = {"chain": Signal().carrier("dc", level=v)}
+        return seg if duration_s is None else dict(seg, duration_s=float(duration_s))
+
+    segments = [level(0.0, t_s)] if t_s > 0 else []
+    for gap in _flights(gap_s, n, ratio):
+        segments += [level(1.0, touch_s), level(0.0, gap)]
+    return Signal().sequence(segments + [level(1.0)])
+
+
+def intermittent(closed_s, open_s, tr_s=None):
+    """AN INTERMITTENT CONTACT, as an enable: 1 while it holds, 0 while it is open.
+
+        sig.gate(by=ws.recipes.intermittent(closed_s=5e-3, open_s=50e-6))       # hard opens
+        sig.gain(by=ws.recipes.intermittent(5e-3, 50e-6, tr_s=10e-6))           # soft ones
+
+    `closed_s` and `open_s` are the two dwells. A number is the MEAN of an exponential (opens
+    then arrive as a Poisson process); any dwell spec of `carrier("states")` serves, such as a
+    lognormal for opens that are mostly short and now and then long. The record starts
+    closed, with a whole dwell. `tr_s` is the 10-90 % time of each change: it matters under
+    `gain(by=)`, where the enable is the contact's conductance, while `gate` only reads which
+    side of 0.5 it is on.
+
+    One role, `.../states/0`. Each interval is a `state` event (state 0 is closed, 1 open);
+    read them with ``ws.states.intervals(sig.event_list(), at="gate/1/by")``. An open shorter
+    than the edge does not reach 0 (`wfmsynth.states`).
+
+    Ops: `carrier("states", levels=[1.0, 0.0], dwell=[closed_s, open_s], start=0)`."""
+    edge = {} if tr_s is None else {"tr_s": tr_s}
+    return Signal().carrier("states", levels=[1.0, 0.0], dwell=[closed_s, open_s], start=0,
+                            **edge)
+
+
+# ------------------------------------------------------------------ sources
+def oscillator_startup(f_hz, startup_s, rise_s=None, ppm=0.0, settle_s=None, amp=1.0,
+                       sig=None):
+    """AN OSCILLATOR COMING UP: its amplitude grows exponentially and bends over into its
+    limit, and its frequency starts off by `ppm` and settles.
+
+        ws.recipes.oscillator_startup(10e6, startup_s=200e-6, sig=ws.Signal(seed=1, grid=g))
+        ws.recipes.oscillator_startup(10e6, startup_s=200e-6, ppm=300.0, settle_s=100e-6)
+
+    AMPLITUDE. An oscillator is a resonator with gain round it, so a small amplitude grows as
+    ``exp(t / tau)`` until the gain compresses: ``da/dt = (a / tau) * (1 - a / amp)``, whose
+    solution is the logistic
+
+        a(t) = amp / (1 + exp(-(t - t_half) / tau)).
+
+    `startup_s` is when it reaches 90 % of `amp` and `rise_s` its 10-90 % time (default half
+    of `startup_s`): ``tau = rise_s / (2 ln 9)``, ``t_half = startup_s - rise_s / 2``. With
+    the default the record starts 57 dB down. A chain has no feedback, so this is that
+    equation's SOLUTION written as a chain -- a ramp (`dc`, integrated) through `law("tanh")`
+    -- and not the loop.
+
+    FREQUENCY. ``f(t) = f_hz * (1 + ppm * 1e-6 * exp(-t / settle_s))``: off by `ppm` at t = 0
+    (a crystal pulled by its drive level, a supply still rising) and settling with the time
+    constant `settle_s`. It is FM by a decaying exponential. With ppm = 0 the source is a
+    plain `carrier("sine")`.
+
+    Nothing is drawn. Ops: `modulate(kind="fm", message=carrier("exp", decay=True))`, then
+    `gain(by=<carrier("dc") -> filter("integrate") -> offset -> law("tanh") -> offset>)`."""
+    _positive("oscillator_startup", f_hz=f_hz, startup_s=startup_s, amp=amp)
+    rise_s = 0.5 * startup_s if rise_s is None else rise_s
+    _positive("oscillator_startup", rise_s=rise_s)
+    if rise_s >= 2.0 * startup_s:
+        raise ValueError(f"oscillator_startup: rise_s={rise_s!r} is the 10-90 % time and "
+                         f"startup_s={startup_s!r} the time to 90 %, so the amplitude would "
+                         f"be past half its limit before the record starts. Keep rise_s under "
+                         f"2 * startup_s.")
+    _both("oscillator_startup", "a frequency that settles", ppm=ppm or None, settle_s=settle_s)
+    tau = float(rise_s) / (2.0 * np.log(9.0))
+    t_half = float(startup_s) - 0.5 * float(rise_s)
+    grow = (Signal().carrier("dc", level=1.0).filter("integrate", tau_s=tau)   # t / tau
+            .offset(by=-t_half / tau)                                # u = (t - t_half) / tau
+            .law("tanh", gain=0.25, sat=0.5)                         # tanh(u / 2) / 2
+            .offset(by=0.5))                                         # 1 / (1 + exp(-u))
+    s = _onto("oscillator_startup", sig)
+    if ppm:
+        _positive("oscillator_startup", settle_s=settle_s)
+        s = s.modulate(kind="fm", fc_hz=float(f_hz), dev_hz=float(f_hz) * float(ppm) * 1e-6,
+                       amp=float(amp),
+                       message=Signal().carrier("exp", decay=True, tau_s=float(settle_s),
+                                                t_start_s=0.0))
+    else:
+        s = s.carrier("sine", f_hz=float(f_hz), amp=float(amp))
+    return s.gain(by=grow)
+
+
+PHASES = ("newman", "schroeder", "random", "zero")
+
+
+def multitone_plan(f_lo_hz, f_hi_hz, n_tones, phase="newman", notch=None, seed=None):
+    """What `multitone(...)` is made of: ``(f_hz, phase_rad, kept)``, one entry per tone of the
+    FULL comb; `kept` is False inside the notch. The ground truth of the arrangement."""
+    if isinstance(n_tones, bool) or int(n_tones) != n_tones or n_tones < 2:
+        raise ValueError(f"multitone: n_tones is a whole number of at least 2, got "
+                         f"{n_tones!r}.")
+    if not (np.isfinite(f_lo_hz) and np.isfinite(f_hi_hz) and f_lo_hz < f_hi_hz):
+        raise ValueError(f"multitone: the tones run from f_lo_hz to f_hi_hz, both included, "
+                         f"with f_lo_hz < f_hi_hz; got {f_lo_hz!r} and {f_hi_hz!r}.")
+    n = int(n_tones)
+    k = np.arange(n, dtype=float)
+    if phase != "random" and seed is not None:
+        raise ValueError(f"multitone: seed= picks the phases of phase='random'; "
+                         f"phase={phase!r} has none to pick.")
+    if phase == "newman":
+        ph = np.pi * k * k / n
+    elif phase == "schroeder":
+        ph = -np.pi * k * (k + 1.0) / n
+    elif phase == "zero":
+        ph = np.zeros(n)
+    elif phase == "random":
+        if seed is None:
+            raise ValueError("multitone: phase='random' needs seed=, a whole number. The "
+                             "phases are STATED in the recipe, one per tone, so they are "
+                             "picked here and not drawn by the record: another seed is "
+                             "another stimulus, and the record's own seed does not move it.")
+        ph = np.random.default_rng(int(seed)).uniform(0.0, 2.0 * np.pi, n)
+    else:
+        raise ValueError(f"multitone: phase is one of {PHASES}, got {phase!r}.")
+    f = np.linspace(float(f_lo_hz), float(f_hi_hz), n)
+    kept = np.ones(n, bool)
+    if notch is not None:
+        try:
+            lo, hi = (float(v) for v in notch)
+        except (TypeError, ValueError):
+            raise ValueError(f"multitone: notch is (lo_hz, hi_hz), the band whose tones are "
+                             f"left out; got {notch!r}.") from None
+        kept = ~((f >= lo) & (f <= hi))
+        if kept.all() or not kept.any():
+            raise ValueError(f"multitone: notch=({lo!r}, {hi!r}) must hold at least one of "
+                             f"the {n} tones and leave at least one; they are "
+                             f"{f[1] - f[0]:.6g} Hz apart from {f[0]:.6g} Hz.")
+    return f, np.mod(ph, 2.0 * np.pi), kept
+
+
+def multitone(f_lo_hz, f_hi_hz, n_tones, phase="newman", notch=None, rms=1.0, seed=None,
+              domain="real", sig=None):
+    """A MULTITONE: `n_tones` equal tones evenly spaced from `f_lo_hz` to `f_hi_hz`.
+
+        ws.recipes.multitone(1e6, 9e6, 33, sig=ws.Signal(seed=1, grid=g))
+        ws.recipes.multitone(-8e6, 8e6, 65, notch=(-0.6e6, 0.6e6), domain="iq", sig=...)
+
+    Tone k is ``cos(2 pi f_k t + phase_k)`` on a voltage and ``exp(j (2 pi f_k t + phase_k))``
+    on an envelope, and `phase` is what makes the sum usable. Tones in phase (`"zero"`) pile
+    up into one spike per period: a crest factor (peak over rms) of sqrt(2 n) on a voltage,
+    sqrt(n) on an envelope. A quadratic phase spreads them out:
+
+        "newman"      phase_k = pi * k**2 / n               (k = 0 .. n-1)
+        "schroeder"   phase_k = -pi * k * (k + 1) / n
+        "random"      uniform in [0, 2 pi), picked by `seed=` and STATED in the recipe
+
+    Newman and Schroeder hold the crest factor under 2.0 on a voltage (1.4 on an envelope)
+    from 9 tones to 129, where in-phase tones reach 16. Random phases sit between (2.5 to
+    4.5 over twenty seeds at 33 tones) and are what Gaussian noise looks like to an
+    amplifier. A random phase is not a role: the record's seed does not move it, `seed=`
+    does.
+
+    `notch=(lo_hz, hi_hz)` leaves out the tones in that band and changes nothing else, so
+    whatever a device under test puts there is its distortion: the power of a kept tone over
+    the power found at a left-out one is the NOISE POWER RATIO. `rms` is that of the FULL
+    comb, so each tone keeps its level with or without the notch.
+
+    `domain="real"` is a voltage, one `carrier("sine")` per tone joined by one `combine`;
+    `"iq"` an envelope, one `spur` per tone in a row, the frequencies then offsets from the
+    centre (negative is below). For the tones to be lines and the notch to be empty, the
+    spacing and `f_lo_hz` must be whole multiples of ``fs / n``, the record holding whole
+    periods; a sub-chain has no grid, so nothing here can check that.
+
+    COST. One op per tone, and each renders the whole record: measured 0.26 ms a tone on a
+    voltage and 0.73 ms on an envelope at 65536 samples, so 1024 tones are 0.3 s and 0.75 s
+    and a 130 kB recipe. That is practical; it stops being READABLE long before. Past a few
+    hundred tones band-limited noise (`carrier("noise", band_lo_hz=, band_hi_hz=)`, or `awgn`
+    and a `filter`) is the plainer stimulus.
+
+    `multitone_plan` returns the frequencies, the phases and which tones are kept."""
+    _positive("multitone", rms=rms)
+    f, ph, kept = multitone_plan(f_lo_hz, f_hi_hz, n_tones, phase, notch, seed)
+    s = _onto("multitone", sig)
+    if domain == "iq":
+        power = float(rms) ** 2 / f.size
+        for fk, pk in zip(f[kept], ph[kept]):
+            s = s.spur(f_hz=float(fk), dbc=0.0, ref_power=power, phase_rad=float(pk))
+        return s
+    if domain != "real":
+        raise ValueError(f"multitone: domain is 'real' (a voltage) or 'iq' (an envelope, "
+                         f"frequencies about the centre), got {domain!r}.")
+    if f[0] <= 0:
+        raise ValueError(f"multitone: on a voltage the tones are at positive frequencies, "
+                         f"and f_lo_hz={f_lo_hz!r}. Tones either side of a centre are "
+                         f"domain='iq'.")
+    a = float(rms) * float(np.sqrt(2.0 / f.size))
+    tones = [{"f_hz": float(fk), "amp": a, "phase_rad": float(pk + 0.5 * np.pi)}   # a cosine
+             for fk, pk in zip(f[kept], ph[kept])]
+    s = s.carrier("sine", **tones[0])
+    return s.combine([Signal().carrier("sine", **t) for t in tones[1:]]) if tones[1:] else s
+
+
+def buck_ripple(v_in, duty, f_sw_hz, l_h, c_f, r_load_ohm, r_on_ohm=0.05):
+    """The textbook figures of the converter `buck(...)` solves, in continuous conduction:
+
+        v_out_v        duty * v_in * r_load_ohm / (r_load_ohm + r_on_ohm)
+        i_ripple_pp_a  v_in * duty * (1 - duty) / (l_h * f_sw_hz)        the inductor's
+        v_ripple_pp_v  i_ripple_pp_a / (8 * c_f * f_sw_hz)               the capacitor's
+        f0_hz          1 / (2 pi sqrt(l_h * c_f))                        the filter's corner
+        settle_s       the time constant of the slowest start-up mode
+
+    The ripple figures take the inductor current for a triangle and the output for constant
+    across a period, which holds while `f_sw_hz` is well above `f0_hz`: the circuit agrees
+    with them to 0.2 % at 22 times f0 and that grows as (f0 / f_sw)**2."""
+    _positive("buck", v_in=v_in, f_sw_hz=f_sw_hz, l_h=l_h, c_f=c_f, r_load_ohm=r_load_ohm,
+              r_on_ohm=r_on_ohm)
+    if not 0.0 < duty < 1.0:
+        raise ValueError(f"buck: duty is the fraction of the period the high side is on, "
+                         f"strictly between 0 and 1; got {duty!r}.")
+    i_pp = float(v_in) * duty * (1.0 - duty) / (float(l_h) * float(f_sw_hz))
+    # the start-up modes: s**2 + s * (1 / (R C) + r / L) + (1 + r / R) / (L C) = 0
+    poles = np.roots([1.0, 1.0 / (r_load_ohm * c_f) + r_on_ohm / l_h,
+                      (1.0 + r_on_ohm / r_load_ohm) / (l_h * c_f)])
+    return {"v_out_v": float(duty * v_in * r_load_ohm / (r_load_ohm + r_on_ohm)),
+            "i_ripple_pp_a": float(i_pp),
+            "v_ripple_pp_v": float(i_pp / (8.0 * c_f * f_sw_hz)),
+            "f0_hz": float(1.0 / (2.0 * np.pi * np.sqrt(l_h * c_f))),
+            "settle_s": float(1.0 / np.abs(poles.real).min())}
+
+
+def buck(v_in, duty, f_sw_hz, l_h, c_f, r_load_ohm, r_on_ohm=0.05, tr_s=20e-9, sig=None):
+    """A SYNCHRONOUS BUCK CONVERTER as a circuit: its output voltage, in VOLTS.
+
+        g = ws.Grid(fs=400e6, n=1 << 19)                 # 8 samples on the 20 ns edge
+        ws.recipes.buck(v_in=12.0, duty=0.275, f_sw_hz=500e3, l_h=10e-6, c_f=22e-6,
+                        r_load_ohm=0.5, sig=ws.Signal(seed=1, grid=g))
+
+    With both switches driven, the switch node is at `v_in` for `duty` of each period and at
+    0 for the rest, through the on-resistance `r_on_ohm` either way: one driver whose level is
+    a PWM waveform. From there it is an inductor `l_h` to the output, a capacitor `c_f` and
+    the load `r_load_ohm` to ground, and `net` solves it exactly -- no behavioural ripple
+    model, so the ripple, its shape, the start-up overshoot and the response to anything the
+    PWM chain does (change `duty` in a `sequence`, put `timing` on it) are the circuit's.
+
+    Measured against `buck_ripple`: the mean is duty * v_in * r_load / (r_load + r_on) to
+    1e-6 and the peak-to-peak ripple v_in * duty * (1 - duty) / (8 l_h c_f f_sw_hz**2) to
+    0.2 % (three converters, `wfmsynth.validate`).
+
+    WHAT TO KNOW. `net` starts a record settled at its first sample, and the PWM starts
+    half-way through its off time, so the circuit starts at rest -- 0 V, 0 A -- and the
+    record opens with the L-C start-up transient, overshoot included; the figures above hold
+    once that has died (`buck_ripple(...)["settle_s"]` is its time constant). `tr_s` is the 10-90 % time of the
+    driver's edge, and the grid needs 8 samples across it like any other edge. `net` wants a
+    capacitance on every node, so the switch node has one, sized to follow that edge:
+    ``r_on_ohm * C = tr_s / 2.2``. It does not change the output (the filter's corner is
+    four decades below it); it is why the switch node resolves on any grid the edge does. A
+    capacitor's series resistance cannot be put in -- the node between the two would have no
+    capacitance -- so for ESR-dominated ripple use `ripple`. A diode in place of the low
+    switch (discontinuous conduction at light load) is not this circuit either.
+
+    Nothing is drawn. Ops: one `net`, its driver's source `carrier("cmos")`."""
+    buck_ripple(v_in, duty, f_sw_hz, l_h, c_f, r_load_ohm, r_on_ohm)      # the refusals
+    _positive("buck", tr_s=tr_s)
+    pwm = Signal().carrier("cmos", v_lo=0.0, v_hi=float(v_in), duty=float(duty),
+                           f_hz=float(f_sw_hz), tr_s=float(tr_s),
+                           phase_rad=float(np.pi * (1.0 + duty)))    # mid-way through "off"
+    return _onto("buck", sig).net(
+        nodes=["sw", "out"],
+        elements=[{"id": "c_sw", "kind": "c", "a": "sw", "b": "gnd", "farad": float(tr_s) / (2.2 * float(r_on_ohm))},
+                  {"id": "l", "kind": "l", "a": "sw", "b": "out", "henry": float(l_h)},
+                  {"id": "c", "kind": "c", "a": "out", "b": "gnd", "farad": float(c_f)},
+                  {"id": "load", "kind": "r", "a": "out", "b": "gnd", "ohm": float(r_load_ohm)}],
+        drivers=[{"id": "switch", "node": "sw", "ohm": float(r_on_ohm), "state": "driving",
+                  "source": {"ops": pwm, "volts": True}}],
+        probe="out")

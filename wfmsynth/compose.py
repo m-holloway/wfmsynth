@@ -1672,6 +1672,8 @@ def _op_awgn(x, p, streams, grid, idx):
 
 
 def _op_spur(x, p, streams, grid, idx):
+    if x is None:                   # it starts the chain: a tone with no signal under it
+        x = RF.silence(getattr(grid, "n", None), p.get("ref_power"), "spur")
     return RF.spur(x, grid.fs, **{k: p[k] for k in ("f_hz", "dbc", "phase_rad", "ref_power")
                                   if k in p})
 
@@ -2757,7 +2759,11 @@ class Signal:
 
             .spur(f_hz=3.1e6, dbc=-45)
 
-        params: `phase_rad` (at t = 0), `ref_power` (as for `awgn`)."""
+        params: `phase_rad` (at t = 0), `ref_power` (as for `awgn`).
+
+        As the FIRST op it is an unmodulated carrier, with `ref_power` required:
+        `Signal().spur(f_hz=1e6, dbc=0, ref_power=1.0)` is a unit-power tone 1 MHz above the
+        centre, and a row of them is a multitone (`wfmsynth.recipes.multitone`)."""
         return self._add("spur", **params)
 
     def dac(self, bits, **params):
