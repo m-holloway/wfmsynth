@@ -85,6 +85,11 @@ def counts_for(volts, full_scale=None, bits=16):
     is spent on the signal that is actually there. Returns `(codes, y_inc, y_org)` with
     `volts == codes * y_inc + y_org` to within half a code.
     """
+    if np.iscomplexobj(volts):
+        raise ValueError(
+            "this exporter writes one voltage channel, and the record is complex baseband "
+            "(I/Q), which is two. Nothing takes the real part for you: write x.real and x.imag "
+            "as two records, or export the real passband record before downconvert.")
     v = np.asarray(volts, dtype=float).ravel()
     if v.size == 0:
         raise ValueError("no samples to write")

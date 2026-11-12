@@ -31,6 +31,24 @@ class Grid:
     # a single uniform segment (unchanged, bit-identical). Enables dual-rate records (CAN-FD BRS,
     # DDR bursts) whose anchors resolve WITHIN their segment.
     segments: Optional[tuple] = None
+    # What a sample IS. "real" (the default, and every record before complex baseband existed) is
+    # a voltage. "iq" is COMPLEX BASEBAND: each sample is I + jQ, the envelope of a signal centred
+    # on `fc_hz`, and `waveform()` returns complex128. This is the domain the chain STARTS in;
+    # `upconvert` / `downconvert` move between the two mid-chain, and every op states which it
+    # accepts (`wfmsynth.domain`) and refuses the other by name.
+    domain: str = "real"
+    fc_hz: Optional[float] = None      # the centre frequency an "iq" record is the envelope of
+
+    def __post_init__(self):
+        if self.domain not in ("real", "iq"):
+            raise ValueError(f"Grid: unknown domain {self.domain!r} (use 'real' or 'iq')")
+        if self.domain == "real" and self.fc_hz is not None:
+            raise ValueError(
+                "Grid: fc_hz is the centre frequency of a complex baseband record and means "
+                "nothing on a real one -- pass domain='iq' with it, or drop it. (A real "
+                "passband record carries its carrier in its samples.)")
+        if self.fc_hz is not None and not self.fc_hz > 0:
+            raise ValueError(f"Grid: fc_hz must be positive, got {self.fc_hz!r}")
 
     def resolve(self, anchor):
         """Resolve a symbolic time-anchor to an absolute sample index. `anchor` is a dict with one

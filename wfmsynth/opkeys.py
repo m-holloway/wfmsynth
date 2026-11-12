@@ -28,6 +28,7 @@ OP_KEYS = {
     "dfe": frozenset({"causal", "cdr", "levels", "output", "scale", "taps"}),
     "digitize": frozenset({"bits", "enob", "full_scale", "interleave", "n_out", "noise_rms", "snr_db"}),
     "dispersion": frozenset({"strength"}),
+    "downconvert": frozenset({"fc_hz", "fs_out", "lpf", "phase_rad"}),
     "drift": frozenset({"amount", "kind", "shape"}),
     "edfa": frozenset({"gain_db", "nf_db", "p_ase_scale"}),
     "eo": frozenset({"adiabatic", "alpha", "bias", "er_db", "kind", "linewidth_hz", "p_avg", "vpi"}),
@@ -36,6 +37,7 @@ OP_KEYS = {
     "filter": frozenset({"baud", "beta", "btype", "f_hz", "gain", "kind", "order", "poles", "ripple_db", "sos", "span", "stop_db", "taps", "tau_s", "zero_phase", "zeros"}),
     "hybrid_echo": frozenset({"amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "cycles", "decay", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hp_frac", "f_hp_hz", "f_hz", "fn", "isolation_db", "jitter", "kind", "level", "method", "n", "n_ui", "offset", "own", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "rms", "seed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "td_ps", "td_samples", "tr_frac", "tr_s", "v_hi", "v_lo", "width_frac", "width_s"}),
     "intra_pair_skew": frozenset({"gain_imbalance", "skew_ps"}),
+    "iq": frozenset({"amp", "beta", "bits", "constellation", "n", "n_bits", "prbs", "prbs_phase", "prbs_seed", "pulse", "span_ui", "symbols"}),
     "law": frozenset({"bits", "center", "coeffs", "gain", "hi", "hysteresis", "i_sat", "ideality", "initial", "kind", "lo", "mode", "r_load_ohm", "sat", "threshold", "v_hi", "v_lo", "v_thermal", "width"}),
     "lossy": frozenset({"causal", "eps_r", "guard", "length_in", "linear", "loss_at_ghz", "loss_db", "method", "skin_k", "tand", "trend", "trend_floor_db"}),
     "modulate": frozenset({"amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "cycles", "decay", "depth", "dev_hz", "dev_rad", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hz", "fc_hz", "fn", "jitter", "kind", "level", "message", "method", "n", "n_ui", "offset", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "rms", "seed", "suppressed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "tr_frac", "tr_s", "v_hi", "v_lo", "width_frac", "width_s"}),
@@ -63,6 +65,7 @@ OP_KEYS = {
     "timebase": frozenset({"rms_ps"}),
     "timing": frozenset({"phase_noise", "pj", "rj_ps", "ssc", "wander"}),
     "tx_ffe": frozenset({"pre", "spb", "taps"}),
+    "upconvert": frozenset({"fc_hz", "fold_db", "phase_rad"}),
 }
 
 

@@ -43,6 +43,7 @@ from . import physics as P
 from . import opkeys as OPKEYS
 from . import subchain as SUB
 from . import instrument as INST
+from . import domain as DOMAIN
 from .grid import Grid
 from .streams import Streams
 from .stages import LAW_KEYS as _LAW_KEYS, FILTER_KEYS as _FILTER_KEYS
@@ -207,10 +208,11 @@ def _op_symbols(x, p, streams, grid, idx):
 
 def _op_capture(x, p, streams, grid, idx):
     from . import capture as CAP
+    dom = DOMAIN.of(grid)
     if p.get("values") is not None:
-        y = np.asarray(p["values"], float)
+        y = CAP.decode(p["values"], dom)
     else:
-        y = CAP.load_values(p["path"])
+        y = CAP.load_values(p["path"], dom)
         got = CAP.digest(y)
         want = p.get("sha256")
         if want is not None and got != want:
@@ -246,6 +248,51 @@ def _op_capture(x, p, streams, grid, idx):
                 f"the Grid's n to the file's own length")
         y = resample_poly(y, n_target, len(y))
     return y
+
+
+# --------------------------------------------------------------- complex baseband (wfmsynth.iq)
+def _iq_symbols(p, grid):
+    """The complex symbols an `iq` source transmits: a literal list, or bits mapped onto a
+    constellation. This is the ground truth `Signal.transmitted()` hands back, resolved by the
+    same function that renders, so the two cannot disagree."""
+    from . import iq as IQ
+    if p.get("symbols") is not None:
+        return IQ.as_complex(p["symbols"])
+    con = p.get("constellation")
+    k = IQ.bits_per_symbol(con)
+    if p.get("bits") is None and p.get("prbs") is None:
+        raise ValueError("an 'iq' op needs its symbols: prbs=<order> (bits from a PRBS, filling "
+                         "the record), bits=[...], or symbols=[...] (complex, any constellation)")
+    q = p
+    if p.get("bits") is None and "n_bits" not in p:
+        # only what the caller passed is recorded; an unstated count is "fill the record"
+        q = dict(p, n_bits=k * IQ.symbols_in_record(grid, _grid_n(grid, p)))
+    return IQ.map_bits(con, _coded_bits(q))
+
+
+def _op_iq(x, p, streams, grid, idx):
+    from . import iq as IQ
+    return IQ.shape(_iq_symbols(p, grid), grid, n=_grid_n(grid, p), pulse=p.get("pulse", "rrc"),
+                    beta=p.get("beta", IQ.RRC_BETA), span_ui=p.get("span_ui", IQ.RRC_SPAN_UI),
+                    amp=p.get("amp", 1.0))
+
+
+def _op_upconvert(x, p, streams, grid, idx):
+    from . import iq as IQ
+    fc = p.get("fc_hz", getattr(grid, "fc_hz", None))
+    if fc is None:
+        raise ValueError("upconvert needs the carrier: fc_hz=..., or a centre frequency on the "
+                         "record (Grid(domain='iq', fc_hz=...))")
+    return IQ.upconvert(x, fc, grid.fs, phase_rad=p.get("phase_rad", 0.0),
+                        fold_db=p.get("fold_db", IQ.FOLD_DB))
+
+
+def _op_downconvert(x, p, streams, grid, idx):
+    from . import iq as IQ
+    if "fc_hz" not in p:
+        raise ValueError("downconvert needs fc_hz=, the frequency the I/Q is centred on")
+    return IQ.downconvert(x, p["fc_hz"], grid.fs, p.get("lpf"), fs_out=p.get("fs_out"),
+                          phase_rad=p.get("phase_rad", 0.0))
 
 
 def _op_burst(x, p, streams, grid, idx):
@@ -1192,7 +1239,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "events": _op_events,
          "dcd": _op_dcd, "agc": _op_agc, "rx_noise": _op_rx_noise,
          "sample_clock": _op_sample_clock, "burst": _op_burst, "pass_fet": _op_pass_fet,
-         "modulate": _op_modulate, "law": _op_law, "filter": _op_filter}
+         "modulate": _op_modulate, "law": _op_law, "filter": _op_filter,
+         "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1213,6 +1261,7 @@ OP_KIND = {
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
     "dcd": "shape", "open_drain": "shape", "net": "channel", "burst": "shape", "pass_fet": "shape",
     "modulate": "shape",
+    "iq": "source", "upconvert": "shape", "downconvert": "instrument",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
     "cascade": "channel",
@@ -1420,6 +1469,14 @@ _LEAD_REJECT = {
     "capture": "a captured record has no synthesized pattern to extend backward in time -- "
                "unlike `carrier`, which renders more of the SAME periodic sequence for the "
                "guard, a lead-in here would have to invent history the capture never had",
+    "iq": "its pulses are placed from the record's start and a burst has no earlier symbols to "
+          "render; the record's head IS the transmitter turning on",
+    "upconvert": "the carrier's phase is counted from the record's start, which a lead-in "
+                 "moves -- the delivered window would open on a different carrier phase under "
+                 "the same recipe",
+    "downconvert": "the local oscillator's phase is counted from the record's start, which a "
+                   "lead-in moves, and fs_out changes the record length so the window cannot "
+                   "be sliced back out",
     "acquire": "it resamples the record onto a second rate, so the guard's sample count is not the "
                "record's and the window cannot be sliced back out",
     "events": "it places a localized mechanism at an absolute position in the record, and a lead-in "
@@ -1600,6 +1657,45 @@ def _lead_size(spec, ops, grid, seed, n, p_quantum, measured=None, floor=0):
     return L, k, measured
 
 
+def _stored_rate(ops, fs, n):
+    """``(fs, n)`` of the record after `ops`, starting from a grid of `fs` and `n`: the ops
+    that store at their own rate, resample or shorten the record, walked in order."""
+    for op in ops:
+        name = op["op"]
+        if name == "acquire":
+            prof = op.get("profile", {})
+            fs, n = float(prof["sample_rate_hz"]), int(prof["record_length"])
+            dec = prof.get("decimation") or {}
+            if dec.get("depth"):
+                if dec.get("mode", "sample") == "peak_hold":
+                    raise ValueError(
+                        "stored_grid: acquire(decimation=peak_hold) returns a (2, depth) "
+                        "min/max record, not a waveform on a timebase, so there is no grid "
+                        "for it. Measure the two channels yourself.")
+                depth = int(dec["depth"])
+                fs, n = fs * depth / n, depth
+        elif name == "digitize" and op.get("n_out"):
+            n_out = int(op["n_out"])                  # a genuine resample_poly
+            fs, n = fs * n_out / n, n_out
+        elif name == "sample_clock" and op.get("n_out"):
+            n = int(op["n_out"])                      # a TRUNCATION, not a resample
+        elif name == "downconvert" and op.get("fs_out"):
+            step = int(round(fs / float(op["fs_out"])))   # keeps every step-th sample
+            fs, n = float(op["fs_out"]), len(range(0, n, step))
+    return fs, n
+
+
+def _grid_now(ops, grid, x):
+    """The grid describing the record `x` after `ops`: its rate, length, domain and centre
+    frequency as they are at that point, not as the chain started."""
+    if grid is None:
+        raise ValueError("upconvert/downconvert need a sample rate: Signal(grid=Grid(fs=...))")
+    fs, _ = _stored_rate(ops, float(grid.fs), int(grid.n))
+    dom, fc = DOMAIN.trace(ops, grid)[-1] if ops else (DOMAIN.of(grid), grid.fc_hz)
+    import dataclasses
+    return dataclasses.replace(grid, fs=fs, n=len(x), domain=dom, fc_hz=fc)
+
+
 @dataclass
 class LeadPlan:
     """What a lead-in render will do, resolved and reportable BEFORE it is rendered: the guard
@@ -1656,7 +1752,9 @@ class Signal:
         """
         params = SUB.flatten(op, params, self)
         OPKEYS.check(op, params)
-        self.ops.append({"op": op, **params}); return self
+        new = {"op": op, **params}
+        DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
+        self.ops.append(new); return self
 
     def annotate(self, **prov):
         """Attach provenance metadata (e.g. ``stage="channel", node="TP2"``) to the most
@@ -1768,9 +1866,16 @@ class Signal:
         If the loaded length does not match the Grid's `n` (or an explicit `n=`), that is a
         named error unless `resample=True` is passed -- silently truncating or padding a
         captured record is exactly the failure mode `sample_clock`'s `n_out` warning exists to
-        prevent, and a capture gets the same refusal instead."""
+        prevent, and a capture gets the same refusal instead.
+
+        I/Q: on a `Grid(domain="iq", fc_hz=...)` the same call starts a COMPLEX BASEBAND chain
+        -- `values=<complex array>` (recorded as ``[[re, im], ...]``), a complex ``.npy`` /
+        ``.npz``, or a three-column ``.csv`` (time, I, Q). Complex samples offered to a real
+        record are refused by name; nothing takes the real part for you."""
+        from . import capture as CAP
+        dom = DOMAIN.of(self.grid)
         if values is not None:
-            params = {"values": [float(v) for v in values]}
+            params = {"values": CAP.encode(values, dom)}
             if fs_hz is not None:
                 params["fs_hz"] = fs_hz
             if n is not None:
@@ -1781,12 +1886,10 @@ class Signal:
         if path is None:
             raise ValueError("capture needs path=... or values=[...]")
         if embed:
-            from . import capture as CAP
-            y = CAP.load_values(path)
-            params = {"values": [float(v) for v in y], "sha256": CAP.digest(y)}
+            y = CAP.load_values(path, dom)
+            params = {"values": CAP.encode(y, dom), "sha256": CAP.digest(y)}
         else:
-            from . import capture as CAP
-            params = {"path": str(path), "sha256": CAP.digest(CAP.load_values(path))}
+            params = {"path": str(path), "sha256": CAP.digest(CAP.load_values(path, dom))}
         if fs_hz is not None:
             params["fs_hz"] = fs_hz
         if n is not None:
@@ -1794,6 +1897,87 @@ class Signal:
         if resample:
             params["resample"] = True
         return self._add("capture", **params)
+
+    def iq(self, constellation=None, **params):
+        """First op of a COMPLEX BASEBAND chain: symbols on a constellation, pulse-shaped.
+        Needs `Grid(fs=..., baud=..., n=..., domain="iq", fc_hz=...)`.
+
+            Signal(seed=1, grid=g).iq("qpsk", prbs=9)             # PRBS bits, fills the record
+            Signal(seed=1, grid=g).iq("qam16", bits=[...])        # your bits
+            Signal(seed=1, grid=g).iq(symbols=[1+0j, 1j, ...])    # your symbols, any alphabet
+
+        `constellation` is 'bpsk' | 'qpsk' | 'qam16' | 'qam64' -- Gray-mapped, unit average
+        power (`wfmsynth.iq.map_bits` states the mapping). The bits come from `prbs=<order>`
+        (with `prbs_seed=` / `prbs_phase=`, and `n_bits=` if the record should not be filled)
+        or a literal `bits=[...]`, exactly as on `coded`. `symbols=[...]` skips the mapping:
+        complex values, recorded as ``[[re, im], ...]``.
+
+        The pulse is a ROOT-RAISED-COSINE: `beta=` (roll-off, default 0.35), `span_ui=` (its
+        truncated length in symbols, default 16); `amp=` scales the envelope. Symbol k is
+        centred at ``(k + 0.5) / baud`` and samples-per-symbol need not be an integer. A grid
+        too slow for the pulse's bandwidth, and symbols that do not fit the record, are
+        refused.
+
+        GROUND TRUTH is `Signal.transmitted()`: the symbols and their centre times."""
+        from . import iq as IQ
+        if params.get("symbols") is not None:
+            if constellation is not None:
+                raise ValueError("iq: pass a constellation (with bits= or prbs=) or symbols=, "
+                                 "not both -- the symbols would win and the name would be a "
+                                 "label on something it does not describe")
+            return self._add("iq", **dict(params, symbols=IQ.as_pairs(params["symbols"])))
+        if constellation is None:
+            raise ValueError("iq needs a constellation ('bpsk'/'qpsk'/'qam16'/'qam64') with "
+                             "prbs= or bits=, or literal symbols=[...]")
+        IQ.bits_per_symbol(constellation)
+        return self._add("iq", constellation=constellation, **params)
+
+    def upconvert(self, **params):
+        """Complex baseband -> a REAL PASSBAND record: ``Re{x * exp(j*2*pi*fc_hz*t)}``, on the
+        same grid. After this the record is an ordinary voltage, so `probe`, `scope`,
+        `acquire`, `digitize` and every other op model an instrument looking at RF.
+
+            .upconvert()                    # at the grid's own fc_hz
+            .upconvert(fc_hz=2.4e9)         # or state the carrier
+
+        params: `fc_hz` (default: the record's centre frequency), `phase_rad` (carrier phase
+        at t = 0), `fold_db` (default -40). The grid must be fast enough for the carrier and
+        the envelope together; one that is not is REFUSED with the numbers, never resampled
+        -- see `wfmsynth.iq.upconvert`."""
+        return self._add("upconvert", **params)
+
+    def downconvert(self, **params):
+        """A real passband record -> COMPLEX BASEBAND about `fc_hz`: mix down, then a STATED
+        low-pass. The receiver, or the analysis an instrument does on what it captured.
+
+            .downconvert(fc_hz=2.4e9, lpf=20e6)                                # passband edge
+            .downconvert(fc_hz=2.4e9, lpf=dict(pass_hz=20e6, stop_hz=45e6, atten_db=70),
+                         fs_out=250e6)
+
+        `lpf` is required: a passband edge in Hz (stopband from twice that, 80 dB down), or a
+        dict of `pass_hz`, `stop_hz`, `atten_db`. `wfmsynth.iq.lowpass_error(lpf, fs)` returns
+        the passband error and stopband those numbers actually deliver. `fs_out` decimates by
+        a whole number (the same filter is the anti-alias filter); `phase_rad` is the local
+        oscillator's phase at t = 0. A filter that would pass the mixing image, or alias on
+        decimation, is refused -- see `wfmsynth.iq.downconvert`. It reads the rate the record
+        is ACTUALLY at, so it is correct after `acquire`."""
+        return self._add("downconvert", **params)
+
+    def transmitted(self):
+        """``(symbols, t_s)`` -- the complex symbols an `iq` source sent and the time of each
+        one's centre, in seconds from sample 0. The ground truth for a demodulator, an EVM or
+        a bit-error count, resolved by the same code that renders the record.
+
+        Times are the transmitter's: anything downstream with group delay (a channel, a
+        front end) moves the record against them, and nothing here estimates that."""
+        from . import iq as IQ
+        src = next((o for o in self.ops if o["op"] == "iq"), None)
+        if src is None:
+            raise ValueError("transmitted(): this chain has no `iq` source. A carrier's symbols "
+                             "are physics.carrier_symbols(kind, n_ui, seed, pattern); a "
+                             "capture has no transmitted symbols to report.")
+        a = _iq_symbols(src, self.grid)
+        return a, IQ.symbol_times(len(a), self.grid)
 
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
@@ -2531,13 +2715,23 @@ class Signal:
         sink = [] if collect_events else None
         if collect_events:
             st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
+        doms = DOMAIN.trace(ops, grid)
         for i, op in enumerate(ops):
-            if collect_events and op["op"] in ("events", "law"):
+            if op["op"] in DOMAIN.EMITS:
+                # a mixer needs the rate the record is at NOW, which after an `acquire` or a
+                # resample is not the synthesis grid's
+                x = _EXEC[op["op"]](x, op, st, _grid_now(ops[:i], grid, x), i)
+            elif collect_events and op["op"] in ("events", "law"):
                 x = _EXEC[op["op"]](x, op, st, grid, i, sink=sink)
             elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
                 x = _EXEC[op["op"]](x, op, st, grid, i, win=win)   # range the vertical to the window
             else:
                 x = _EXEC[op["op"]](x, op, st, grid, i)
+            if doms[i][0] == DOMAIN.IQ and not np.iscomplexobj(x):
+                raise ValueError(f"{op['op']} (op {i}) returned a real array for a complex "
+                                 f"baseband record: it dropped the imaginary part. An op "
+                                 f"listed in wfmsynth.domain.ACCEPTS for 'iq' must return "
+                                 f"complex samples.")
         if x is None:
             raise ValueError("empty Signal: add a carrier first")
         if win is not None:
@@ -2580,33 +2774,16 @@ class Signal:
         rate is not modelled here must fail loudly, since the whole point is to stop a wrong
         timebase from travelling silently into a measurement."""
         n_have = len(x) if hasattr(x, "__len__") else int(x)
-        fs, n = float(self.grid.fs), int(self.grid.n)
-        for op in self.ops:
-            name = op["op"]
-            if name == "acquire":
-                prof = op.get("profile", {})
-                fs, n = float(prof["sample_rate_hz"]), int(prof["record_length"])
-                dec = prof.get("decimation") or {}
-                if dec.get("depth"):
-                    if dec.get("mode", "sample") == "peak_hold":
-                        raise ValueError(
-                            "stored_grid: acquire(decimation=peak_hold) returns a (2, depth) "
-                            "min/max record, not a waveform on a timebase, so there is no grid "
-                            "for it. Measure the two channels yourself.")
-                    depth = int(dec["depth"])
-                    fs, n = fs * depth / n, depth
-            elif name == "digitize" and op.get("n_out"):
-                n_out = int(op["n_out"])                  # a genuine resample_poly
-                fs, n = fs * n_out / n, n_out
-            elif name == "sample_clock" and op.get("n_out"):
-                n = int(op["n_out"])                      # a TRUNCATION, not a resample
+        fs, n = _stored_rate(self.ops, float(self.grid.fs), int(self.grid.n))
         if n != n_have:
             raise ValueError(
                 f"stored_grid: derived {n} samples from this chain's ops but the record has "
                 f"{n_have}. An op here changes the record length in a way stored_grid does not "
                 f"model, so it cannot state the rate either. Build the grid explicitly: "
                 f"Grid(fs=<stored rate>, baud={self.grid.baud!r}, n={n_have}).")
-        return Grid(fs=fs, baud=self.grid.baud, n=n_have)
+        # the domain and centre frequency the record ENDS in, which a mixer may have changed
+        dom, fc = DOMAIN.trace(self.ops, self.grid)[-1] if self.ops else (DOMAIN.REAL, None)
+        return Grid(fs=fs, baud=self.grid.baud, n=n_have, domain=dom, fc_hz=fc)
 
     def realize(self, streams=None):
         """One-pass ``(waveform, EventList)`` — use this when an external segmenter
@@ -2707,11 +2884,24 @@ class Signal:
         if self.grid is not None:
             g = self.grid
             r["grid"] = {"fs": g.fs, "baud": g.baud, "n": g.n, "v_full": g.v_full}
+            # only for a complex baseband record, so a real record's JSON -- and its sha256 --
+            # is byte-identical to what it was before the domain existed
+            if g.domain != DOMAIN.REAL:
+                r["grid"]["domain"] = g.domain
+                r["grid"]["fc_hz"] = g.fc_hz
         return r
 
-    def stage_kinds(self):
-        """The stage kind of each op, in order (source/shape/supply/channel/instrument)."""
-        return [op_kind(o["op"]) for o in self.ops]
+    def stage_kinds(self, domains=False):
+        """The stage kind of each op, in order (source/shape/supply/channel/instrument).
+
+        `domains=True` returns ``(kind, domain)`` pairs instead, the domain being what the
+        record is AFTER that op -- 'real' or 'iq' -- so a chain's mixers show as the points
+        where it changes: ``[('source', 'iq'), ('shape', 'real'), ..., ('instrument', 'iq')]``.
+        The last pair's domain is what `waveform()` returns."""
+        kinds = [op_kind(o["op"]) for o in self.ops]
+        if not domains:
+            return kinds
+        return [(k, d) for k, (d, _) in zip(kinds, DOMAIN.trace(self.ops, self.grid))]
 
     def canonical(self):
         """A new Signal with the ops homed into canonical stage-kind order (a stable sort). The

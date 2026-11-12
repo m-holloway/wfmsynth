@@ -45,6 +45,7 @@ KNOWN_UNIT_PARAMS = frozenset({
     'c_load_f', 'dev_hz', 'dev_rad', 'diode_on_ohm', 'drift_ppm_per_s', 'echo_db',
     'echo_f_hp_hz', 'echo_td_ps', 'edge_frac', 'er_db', 'f0_frac', 'f0_ghz', 'f0_hz', 'f1_hz',
     'f2_hz', 'f_hp_frac', 'f_hp_hz', 'f_hz', 'f_ripple_hz', 'fc_frac', 'fc_hz', 'fext_db',
+    'fold_db',
     'fp1_ghz', 'fp2_ghz', 'frac_ui', 'fs_hz', 'fz_ghz', 'gain_db', 'gamma_per_w_km',
     'gamma_s', 'hold_frac', 'isolation_db', 'length_in', 'length_km', 'linewidth_hz',
     'loss_at_ghz', 'loss_db', 'n_ui', 'next_db', 'next_td_ps', 'nf_db', 'overload_tau_s',
@@ -52,7 +53,7 @@ KNOWN_UNIT_PARAMS = frozenset({
     'psij_ps', 'r_load_ohm', 'r_pullup_ohm', 'r_sink_b_ohm', 'r_sink_ohm', 'r_term_ohm',
     'rate_hz', 'rds_on_ohm', 'rin_db_per_hz', 'ripple_db', 'rj_ps', 'rms_ps', 'skew_ps',
     'snr_db', 'stop_db',
-    'spacing_ui', 't_off_s', 't_on_s', 't_start_frac', 't_start_s', 't_step_frac', 't_step_s',
+    'spacing_ui', 'span_ui', 't_off_s', 't_on_s', 't_start_frac', 't_start_s', 't_step_frac', 't_step_s',
     'tau_frac', 'tau_s', 'td_frac', 'td_ps', 'tr_frac', 'tr_s', 'trend_floor_db',
     'wavelength_nm', 'width_frac', 'width_s'
 })

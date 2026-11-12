@@ -2833,6 +2833,102 @@ check("zero_phase=True keeps the STATED magnitude (a forward-backward pass would
       f"filtfilt gives -6.02); a step comes out odd-symmetric about its own instant to "
       f"{_zsym:.1e}")
 
+print("== complex baseband: the mixers are the textbook identities, the source has ground "
+      "truth, and nothing drops an imaginary part (#81) ==")
+import json as _qjson                                                # noqa: E402
+from wfmsynth import iq as _IQ                                              # noqa: E402
+from wfmsynth.acquire import AcquisitionProfile as _QProfile                 # noqa: E402
+_qfs, _qbd, _qfc = 8e9, 25e6, 1e9
+_qt = np.arange(1 << 15) / _qfs
+_qtones = ((-19.7e6, 0.30, 0.1), (-7.1e6, 0.20, 1.0), (0.9e6, 0.25, 2.0), (4.3e6, 0.15, -1.0),
+           (18.9e6, 0.10, 0.5))
+_qx = sum(_a * np.exp(1j * (2 * np.pi * _f * _qt + _p)) for _f, _a, _p in _qtones)
+_qg = Grid(fs=_qfs, n=len(_qx), domain="iq", fc_hz=_qfc)
+_qone = 0.7 * np.exp(1j * (2 * np.pi * 3.3e6 * _qt + 0.4))
+_qup = Signal(seed=0, grid=_qg).capture(values=_qone).upconvert().waveform()
+_querr = float(np.abs(_qup - 0.7 * np.cos(2 * np.pi * (_qfc + 3.3e6) * _qt + 0.4)).max())
+check("a complex tone at +f0 up-converts to cos(2 pi (fc + f0) t): one sideband, the upper one "
+      "-- so Q is used, with the right sign",
+      _qup.dtype == np.float64 and _querr < 1e-10,
+      f"max |passband - closed form| = {_querr:.2e} on a 0.7 peak carrier at 1.0033 GHz")
+_qlpf = dict(pass_hz=20e6, stop_hz=60e6)
+_qrt = (Signal(seed=0, grid=_qg).capture(values=_qx).upconvert()
+        .downconvert(fc_hz=_qfc, lpf=_qlpf).waveform())
+_qhalf = len(_IQ.lowpass(_qlpf, _qfs)) // 2
+_qpe, _qsd = _IQ.lowpass_error(_qlpf, _qfs)
+_qbound = (_qpe + 10 ** (_qsd / 20)) * sum(_a for _, _a, _ in _qtones)
+_qrterr = float(np.abs(_qrt - _qx)[_qhalf:-_qhalf].max())
+check("downconvert(upconvert(x)) is x to within the STATED low-pass's own error -- its measured "
+      "passband deviation on the tones plus its measured stopband on their images",
+      _qrt.dtype == np.complex128 and 1e-3 * _qbound < _qrterr < _qbound,
+      f"{_qrterr:.2e} against a bound of {_qbound:.2e} ({2 * _qhalf + 1} taps: passband "
+      f"|H-1| <= {_qpe:.2e}, stopband {_qsd:.1f} dB) on five tones inside +/-20 MHz")
+
+_qgs = Grid(fs=_qfs, baud=_qbd, n=1 << 16, domain="iq", fc_hz=_qfc)
+_qs = Signal(seed=1, grid=_qgs).iq("qam16", prbs=15, prbs_phase=100)
+_qsent, _ = _qs.transmitted()
+_qevm = {_sp: _IQ.evm(_IQ.demodulate(
+    Signal(seed=1, grid=_qgs).iq("qam16", prbs=15, prbs_phase=100, span_ui=_sp).waveform(),
+    _qgs, span_ui=_sp)[16:-16], _qsent[16:-16]) for _sp in (8, 16, 32)}
+check("an I/Q source's ground truth is what the record holds: a matched filter returns "
+      "transmitted(), and the residual is the pulse's truncation and falls with its span",
+      _qevm[8] > 2 * _qevm[16] > 2 * _qevm[32] and _qevm[32] < 0.002,
+      "QAM-16, root-raised-cosine beta 0.35: EVM "
+      + " / ".join(f"{100 * _qevm[_sp]:.3f} %" for _sp in (8, 16, 32))
+      + " at span_ui = 8 / 16 / 32")
+_qh = _IQ.rrc(np.arange(-6400, 6401) / 16.0, 0.35)
+_qisi = max(abs(float(np.sum(_qh[:len(_qh) - _k * 16] * _qh[_k * 16:]) / 16)) for _k in (1, 2, 3))
+check("  ... and the pulse is a ROOT raised cosine: unit energy, and an autocorrelation that is "
+      "zero at every other symbol centre",
+      abs(float(np.sum(_qh * _qh) / 16) - 1.0) < 1e-8 and _qisi < 1e-8,
+      f"energy {float(np.sum(_qh * _qh) / 16):.10f} per symbol, ISI {_qisi:.1e}")
+
+_qgr = Grid(fs=16e9, baud=_qbd, n=1 << 18, domain="iq", fc_hz=_qfc)
+_qrf = (Signal(seed=1, grid=_qgr).iq("qam16", prbs=15, prbs_phase=100).upconvert()
+        .acquire(_QProfile(sample_rate_hz=4e9, record_length=1 << 16,
+                           input_bandwidth_hz=3e9, bits=8))
+        .downconvert(fc_hz=_qfc, lpf=_qlpf, fs_out=250e6))
+_qy = _qrf.waveform()
+_qsg = _qrf.stored_grid(_qy)
+_qrs, _ = _qrf.transmitted()
+_qgot = _IQ.demodulate(_qy, _qsg)[16:-16]
+_qfit = _IQ.evm(_qgot, _qrs[16:-16], fit=True)
+check("an instrument sampling RF: I/Q -> 1 GHz passband -> an 8-bit 4 GSa/s acquisition -> "
+      "down-converted at the STORED rate returns the transmitted symbols",
+      (_qsg.fs, _qsg.domain) == (250e6, "iq") and _qfit < 0.01
+      and _IQ.evm(_qgot, _qrs[16:-16]) > 0.3,
+      f"EVM {100 * _qfit:.2f} % once the front end's carrier phase "
+      f"({np.angle(_IQ.complex_gain(_qgot, _qrs[16:-16])):+.3f} rad) is taken out, "
+      f"{100 * _IQ.evm(_qgot, _qrs[16:-16]):.0f} % before; stored at {_qsg.fs / 1e6:.0f} MSa/s")
+
+
+def _qrefusal(fn):
+    try:
+        fn()
+    except ValueError as e:
+        return str(e)
+    return ""
+
+
+_qmsg = _qrefusal(lambda: Signal(seed=1, grid=_qgs).iq("qpsk", prbs=9)
+                  .lossy(loss_db=3.0, loss_at_ghz=1.0))
+check("a real-only op handed an I/Q record refuses BY NAME, saying which op converts; complex "
+      "samples offered to a real record are refused, not cast",
+      _qmsg.startswith("lossy") and "'iq'" in _qmsg and "upconvert(" in _qmsg
+      and "complex (I/Q)" in _qrefusal(
+          lambda: Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx))).capture(values=_qx)),
+      _qmsg[:118] + "...")
+_qr = Signal.from_recipe(_qjson.loads(_qrf.to_json()))
+_qreal = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=4096)).carrier("nrz", n_ui=512)
+check("waveform() of an I/Q record is complex128 and replays bit for bit from its recipe; a "
+      "real record's recipe has no new key, so its content address did not move",
+      np.array_equal(_qr.waveform(), _qy) and _qr.sha256() == _qrf.sha256()
+      and _qrf.recipe()["grid"]["domain"] == "iq"
+      and sorted(_qreal.recipe()["grid"]) == ["baud", "fs", "n", "v_full"]
+      and _qreal.waveform().dtype == np.float64,
+      f"{_qy.dtype}, {len(_qy)} samples; real grid keys {sorted(_qreal.recipe()['grid'])}")
+
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

@@ -490,7 +490,11 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                # `law` and `filter` are a kind plus that kind's own parameters, so a knob only
                # exists per kind; tests/test_law_filter.py sweeps every parameter of every kind
                # and checks each moves the samples and the recipe's content address.
-               "law", "filter"}
+               "law", "filter",
+               # `iq` is a SOURCE, and `upconvert` / `downconvert` change the record's DOMAIN,
+               # so neither can be dropped into this sweep's real carrier chain. Each knob is
+               # moved against an analytic result in tests/test_iq_domain.py.
+               "iq", "upconvert", "downconvert"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

@@ -35,6 +35,7 @@ DEMOS = [
     "i2c_bus.py",
     "inductive_handover.py",
     "law_and_filter.py",
+    "iq_passband.py",
     "multi_driver_bus.py",
     "non_integer_sps.py",
     "provenance.py",
