@@ -22,15 +22,16 @@ TO OPT AN OP IN, add ONE line to `ACCEPTS`:
 
     ACCEPTS = {
         ...
-        "rx_noise": BOTH,          # complex AWGN on an envelope: checked in tests/test_x.py
+        "filter": BOTH,            # stated on the grid, so it means the same on an envelope
     }
 
 and make its executor honest for a complex `x` (the composer checks one thing for you: an op
 that returns a real array for an iq record is stopped, because that is the imaginary part
 being dropped). An op that CHANGES the domain also gets a line in `EMITS`.
 
-"A linear filter is linear, so it works on complex too" is NOT sufficient reason to opt in. A
-channel stated at RF (`lossy(loss_at_ghz=26)`) applied to an envelope filters around DC, not
+"A linear filter is linear, so it works on complex too" is NOT sufficient reason to opt in. The
+general `filter` op is in because its response is stated relative to the grid. A channel stated
+at RF (`lossy(loss_at_ghz=26)`) applied to an envelope filters around DC, not
 around the carrier, which is a different channel -- its baseband equivalent is the response
 shifted down by `fc_hz`, and that is new physics to write and check, not a flag to flip.
 """
@@ -45,6 +46,10 @@ ACCEPTS = {
     "iq": (IQ,),               # a source of complex symbols
     "upconvert": (IQ,),
     "downconvert": (REAL,),
+    # `filter` states its response on the GRID (a corner in Hz from DC, taps, a symbol rate),
+    # not at RF, so on an envelope it is exactly what it says: a filter about the centre
+    # frequency -- the matched filter, a channel-select filter. tests/test_iq_domain.py.
+    "filter": BOTH,
 }
 
 # op -> the domain it converts the record TO. Absent means the op leaves the domain alone.

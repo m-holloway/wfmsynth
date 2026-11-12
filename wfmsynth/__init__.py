@@ -32,6 +32,10 @@ Modules / public API:
   stages        the two GENERAL stages behind Signal.law() and Signal.filter() -- a named
                 transfer law (comparator, rectifier, dead zone, ...) and a stated linear
                 filter (butter, cheby1, rrc, zpk, ...) for a shape that has no op of its own
+  subchain      the ONE form of a signal held by an op's parameter -- a Signal, {"ops": [...]}
+                or {"from": recipe} -- and its resolver, subchain.signal()
+  tolerance     unit-to-unit variation: tol() / corners() written where a number would go,
+                Signal.unit(), unit_dataset(), unit_of()
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 
 A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM
@@ -73,7 +77,7 @@ __version__ = _read_version()
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
-               tolerance)
+               tolerance, subchain)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -186,7 +190,7 @@ __all__ = [
     "scope_bandwidth", "probe_loading", "timebase_jitter", "store_record",
     "sinad_noise_rms", "converter_noise_rms",
     "quantisation_floor_db_per_hz",
-    "tol", "corners", "unit_dataset", "unit_of", "tolerance",
+    "tol", "corners", "unit_dataset", "unit_of", "tolerance", "subchain",
     "Signal", "dataset", "op_params", "rederive_anchor", "canonicalize", "op_kind",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",

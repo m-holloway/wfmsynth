@@ -31,7 +31,15 @@ FOR AN OP THAT TAKES A SIGNAL the whole integration is one line in its executor,
 
 and nothing else: the namespace is `<op>/<idx>/<parameter>`, and the builder, `roles()`,
 `summary()`, `subchain()` and the event list all find the parameter by its SHAPE (a dict with
-`ops`, or with a recipe under `from`), so there is no table to register it in.
+`ops`, or with a recipe under `from`), so there is no table to register it in. `signals()` is the
+same for a list parameter. The result is a REAL waveform on the record's own grid: an I/Q
+sub-chain ends on `upconvert` (the domain rule, `wfmsynth.domain`, applies inside a sub-chain as
+it does outside), and `same_grid` is the single place that would be relaxed for an op that takes
+a complex envelope.
+
+A TOLERANCE inside a sub-chain (`wfmsynth.tolerance`) belongs to the record it joins: a Signal's
+resolved tolerances are restated on the way in and drawn under the outer seed, so `unit()` moves
+the nested parts with everything else. `{"from": recipe}` is pinned, its unit included.
 """
 from __future__ import annotations
 

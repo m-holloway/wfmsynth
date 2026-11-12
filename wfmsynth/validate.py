@@ -2740,13 +2740,13 @@ for _zbt, _zfh, _zwant in (
               f"max error {_zerr:.1e}")
 
 _zbaud, _zbeta = 100e6, 0.35
-_zgot = _zmeas(kind="rrc", beta=_zbeta, baud=_zbaud, span=64)
+_zgot = _zmeas(kind="rrc", beta=_zbeta, baud=_zbaud, span_ui=64)
 _zu = np.abs(_zfreq) / _zbaud
 _zwant = np.sqrt(np.where(_zu <= (1 - _zbeta) / 2, 1.0, np.where(
     _zu >= (1 + _zbeta) / 2, 0.0,
     0.5 * (1 + np.cos(np.pi / _zbeta * (_zu - (1 - _zbeta) / 2))))))
 _zerr = float(np.abs(_zgot - _zwant).max())
-_zh = _ZS.design_filter(_zfs, "rrc", beta=_zbeta, baud=_zbaud, span=64)["taps"]
+_zh = _ZS.design_filter(_zfs, "rrc", beta=_zbeta, baud=_zbaud, span_ui=64)["taps"]
 _zrc = np.convolve(_zh, _zh)
 _zisi = np.abs(_zrc[len(_zrc) // 2 % 10::10] / _zrc.max())
 _zisi = float(np.sort(_zisi)[-2])                 # the largest sample at a symbol instant but one
@@ -3022,6 +3022,47 @@ _ub = Signal.from_recipe(_ujson.loads(_us.to_json()))
 check("a recipe with resolved values replays bit-identically",
       _ub.sha256() == _us.sha256() and np.array_equal(_ub.waveform(), _uy),
       f"digest {_us.sha256()[:12]}, max |diff| = {np.abs(_ub.waveform() - _uy).max():.1e}")
+
+print("== the pieces compose: a matched filter on an envelope, a tolerance inside a sub-chain ==")
+_jg = Grid(fs=8e9, baud=25e6, n=1 << 16, domain="iq", fc_hz=1e9)
+
+
+def _jsrc():
+    return Signal(seed=1, grid=_jg).iq("qam16", prbs=15, prbs_phase=100)
+
+
+_jsent, _jt = _jsrc().transmitted()
+_jk = np.rint(_jt * _jg.fs).astype(int)[10:-10]         # symbol centres; the ends lack neighbours
+_jsent = _jsent[10:-10]
+_jm = _IQ.evm(_jsrc().filter("rrc", beta=0.35, zero_phase=True).waveform()[_jk], _jsent)
+_jr = _IQ.evm(_jsrc().waveform()[_jk], _jsent, fit=True)
+check("filter('rrc') on an I/Q record is the source's matched filter: the record AT the symbol "
+      "centres is the sent symbols, nothing fitted", _jm < 0.006 and _jr > 0.10,
+      f"EVM {100 * _jm:.3f} % after the filter (bound 0.6 %, set by the 16-symbol truncation) "
+      f"against {100 * _jr:.1f} % for the shaped source alone")
+from wfmsynth import tolerance as _JT                                       # noqa: E402
+_jgr = Grid(fs=20e9, n=4000)
+_jlane = Signal(grid=_jgr).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=25e6,
+                                   tr_s=_JT.tol(1e-9, 20))
+_jrec = Signal(seed=4, grid=_jgr).carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=10e6,
+                                          tr_s=1e-10).crosstalk(aggressor=_jlane, coupling=0.1)
+_jtr = _jrec.ops[1]["aggressor"]["ops"][0]["tr_s"]
+_jagg = _jrec.subchain("crosstalk/1/aggressor")
+
+def _jcross(level):                       # the first FALLING crossing of `level`, in samples
+    i = int(np.argmax(_jagg < level))
+    return i - 1 + (_jagg[i - 1] - level) / (_jagg[i - 1] - _jagg[i])
+
+
+_jmeas = float((_jcross(0.33) - _jcross(2.97)) / _jgr.fs)     # 90 % to 10 % of 0..3.3 V
+_jother = _jrec.unit(9)
+check("a tolerance inside a sub-chain is drawn by the record it joins: the aggressor's edge is "
+      "the recipe's number, and unit() moves it",
+      _jrec.roles() == ["unit/1/aggressor.ops.0.tr_s"] and abs(_jmeas / _jtr - 1) < 0.02
+      and _jother.ops[1]["aggressor"]["ops"][0]["tr_s"] != _jtr
+      and np.array_equal(_jrec.contrast("unit/*", seed=9), _jother.waveform()),
+      f"recipe tr_s {_jtr * 1e12:.1f} ps, measured 10-90 % {_jmeas * 1e12:.1f} ps (bound 2 %); "
+      f"unit 9 has {_jother.ops[1]['aggressor']['ops'][0]['tr_s'] * 1e12:.1f} ps")
 
 print()
 if fails:

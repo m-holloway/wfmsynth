@@ -47,7 +47,9 @@ WHAT EACH FILTER IS
                 -3 dB point for butter and bessel and the passband EDGE (-ripple_db) for cheby1
                 and elliptic. Designed on the grid by the bilinear transform, prewarped so the
                 stated corner is the realised corner.
-    rrc         root-raised-cosine FIR: `beta`, `span` symbols long, at `baud`. Unit DC gain.
+    rrc         root-raised-cosine FIR: `beta`, `span_ui` symbols long (16), at `baud`. Unit DC
+                gain. The same pulse, names and default length as the `iq` source's, so on an
+                I/Q record `filter("rrc", beta=<the source's>)` is its matched filter.
     fir         your taps, as given.
     sos         your DIGITAL second-order sections, for this grid's sample rate.
     zpk         your ANALOG zeros, poles (rad/s, s-plane) and gain, moved onto the grid by the
@@ -79,6 +81,8 @@ from scipy import fft as _fft
 from scipy import signal as _sig
 from scipy import special as _special
 
+from . import iq as _iq
+
 _REQ = object()            # a parameter with no honest default
 
 _LAW = {
@@ -98,7 +102,7 @@ _FILTER = {
     "bessel": dict(_IIR),
     "cheby1": {**_IIR, "ripple_db": _REQ},
     "elliptic": {**_IIR, "ripple_db": _REQ, "stop_db": _REQ},
-    "rrc": {"beta": _REQ, "baud": None, "span": 8, "zero_phase": False},
+    "rrc": {"beta": _REQ, "baud": None, "span_ui": _iq.RRC_SPAN_UI, "zero_phase": False},
     "fir": {"taps": _REQ, "zero_phase": False},
     "sos": {"sos": _REQ, "zero_phase": False},
     "zpk": {"poles": _REQ, "zeros": (), "gain": 1.0, "zero_phase": False},
@@ -414,7 +418,7 @@ def _design_iir(kind, q, fs):
 
 
 def _rrc_taps(q, fs, baud):
-    beta, span = float(q["beta"]), q["span"]
+    beta, span = float(q["beta"]), q["span_ui"]
     baud = q["baud"] if q["baud"] is not None else baud
     if baud is None:
         raise TypeError("filter('rrc') needs the symbol rate: pass baud=, or put one on the "
@@ -422,7 +426,7 @@ def _rrc_taps(q, fs, baud):
     if not 0.0 <= beta <= 1.0:
         raise ValueError(f"filter('rrc'): beta is the roll-off, 0 to 1, got {beta!r}")
     if not span >= 1:
-        raise ValueError(f"filter('rrc'): span is the filter's length in symbols, >= 1, got "
+        raise ValueError(f"filter('rrc'): span_ui is the filter's length in symbols, >= 1, got "
                          f"{span!r}")
     sps = fs / float(baud)
     if sps < 1.0 + beta:
@@ -432,18 +436,7 @@ def _rrc_taps(q, fs, baud):
             f"{0.5 * fs:.6g} Hz ({sps:.3g} samples per symbol; it needs {1 + beta:.3g}). "
             f"Raise Grid(fs=) or lower beta.")
     half = int(np.ceil(0.5 * span * sps))
-    t = np.arange(-half, half + 1) / sps                     # in symbols
-    h = np.empty_like(t)
-    zero = np.isclose(t, 0.0)
-    edge = np.isclose(np.abs(4.0 * beta * t), 1.0) if beta > 0 else np.zeros(t.shape, bool)
-    mid = ~(zero | edge)
-    tm = t[mid]
-    h[mid] = ((np.sin(np.pi * tm * (1 - beta)) + 4 * beta * tm * np.cos(np.pi * tm * (1 + beta)))
-              / (np.pi * tm * (1 - (4 * beta * tm) ** 2)))
-    h[zero] = 1 - beta + 4 * beta / np.pi
-    if beta > 0:
-        h[edge] = beta / np.sqrt(2) * ((1 + 2 / np.pi) * np.sin(np.pi / (4 * beta))
-                                       + (1 - 2 / np.pi) * np.cos(np.pi / (4 * beta)))
+    h = _iq.rrc(np.arange(-half, half + 1) / sps, beta)      # the pulse the `iq` source shapes with
     return h / h.sum()
 
 

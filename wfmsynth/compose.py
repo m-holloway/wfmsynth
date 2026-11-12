@@ -2042,7 +2042,7 @@ class Signal:
 
         kind: butter | bessel | cheby1 (ripple_db) | elliptic (ripple_db, stop_db) -- each
               with f_hz, order=4, btype="low"|"high"|"bandpass"|"bandstop";
-              rrc (beta, span=8, baud) | fir (taps) | sos (sos) | zpk (zeros, poles, gain) |
+              rrc (beta, span_ui=16, baud) | fir (taps) | sos (sos) | zpk (zeros, poles, gain) |
               integrate (tau_s) | differentiate (tau_s)
 
         Causal by default, and a causal filter DELAYS: `filter_delays()` reports by how much,

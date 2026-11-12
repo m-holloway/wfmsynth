@@ -325,8 +325,53 @@ def test_every_op_is_real_only_unless_it_is_listed():
     """The default that makes the design safe, as an inventory: this fails when an op is
     opted in, so the opting-in is a decision somebody wrote down next to a test of it."""
     both = {op for op in C._EXEC if "iq" in DOMAIN.accepts(op)}
-    assert both == {"capture", "iq", "upconvert"}
+    assert both == {"capture", "iq", "upconvert", "filter"}
     assert set(DOMAIN.ACCEPTS) | set(DOMAIN.EMITS) <= set(C._EXEC)
+
+
+# ------------------------------------------------------------------ `filter` on an envelope
+def test_filter_rrc_on_an_iq_record_is_the_matched_filter():
+    """The `iq` source shapes with a root-raised-cosine and `filter("rrc")` is the same pulse,
+    so the pair is a raised cosine: sampled at the symbol centres the record IS the sent
+    symbols, with no gain or phase fitted. The source alone is not (an RRC has ISI), and a
+    filter with another roll-off is not matched."""
+    sent, t_s = _src().transmitted()
+    k = np.rint(t_s * FS).astype(int)
+    assert np.abs(t_s * FS - k).max() < 1e-6            # 320 samples/symbol: centres on samples
+    core = slice(10, len(sent) - 10)                    # the ends lack their neighbours' tails
+
+    def err(sig, delay=0, fit=False):
+        return IQ.evm(sig.waveform()[k[core] + delay], sent[core], fit=fit)
+
+    matched = _src().filter("rrc", beta=0.35, zero_phase=True)
+    assert matched.waveform().dtype == np.complex128
+    assert matched.stage_kinds(domains=True)[-1] == ("general", "iq")
+    assert err(matched) < 0.006                         # 0.36 % measured, nothing fitted
+    assert err(_src(), fit=True) > 0.10                 # 13.7 %: the source alone has ISI
+    assert err(_src().filter("rrc", beta=0.6, zero_phase=True), fit=True) > 2 * err(matched)
+    # the causal form is the same record late by exactly the delay `filter_delays()` reports
+    causal = _src().filter("rrc", beta=0.35)
+    late = causal.filter_delays()[0]["group_delay_s"] * FS
+    assert late == pytest.approx(round(late), abs=1e-6) and late > 0
+    assert err(causal, delay=int(round(late))) < 0.006
+    # and the independent matched-filter measure agrees symbol by symbol
+    ref = IQ.demodulate(_src().waveform(), G)[core]
+    assert np.abs(matched.waveform()[k[core]] - ref).max() < 0.005      # 1.8e-3 measured
+
+
+def test_a_filter_on_an_envelope_acts_about_the_centre_frequency():
+    """A complex tone at +f0 and one at -f0 leave a Butterworth low-pass with the SAME constant
+    magnitude, the design's |H(f0)|: the response is about DC of the envelope, which is the
+    carrier. Filtering only I (or I and Q with different responses) would ripple."""
+    f0, fc, order = 30e6, 20e6, 4
+    want = 1.0 / np.sqrt(1.0 + (f0 / fc) ** (2 * order))
+    t = np.arange(N) / FS
+    for sign in (+1, -1):
+        y = (Signal(seed=1, grid=G).capture(values=np.exp(sign * 2j * np.pi * f0 * t))
+             .filter("butter", f_hz=fc, order=order).waveform())
+        mag = np.abs(y[N // 2:])                        # past the turn-on
+        assert mag.mean() == pytest.approx(want, rel=1e-3)
+        assert np.ptp(mag) < 1e-6 * want
 
 
 def test_the_converters_refuse_the_domain_they_do_not_convert():

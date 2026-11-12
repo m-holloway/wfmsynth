@@ -420,9 +420,9 @@ def redrawn(sig, streams):
     which case the sibling with those parameters drawn again. This is how `contrast("unit/*")`
     and `waveform(streams=...)` honour a unit role -- a toleranced value is resolved into the
     recipe, so re-rolling it is a different record rather than a different draw inside one."""
-    # a nested chain (a net driver's own ops) is run with a prefixed VIEW of the record's
-    # streams, which has no overrides of its own: its tolerances were resolved, and are
-    # re-rolled, as parameters of the outer op it sits in
+    # a sub-chain is run with a prefixed VIEW of the record's streams (subchain.Namespaced),
+    # which has no overrides of its own: its tolerances were resolved, and are re-rolled, as
+    # parameters of the outer op it sits in
     overrides = getattr(streams, "_overrides", {})
     seed_of = {k: v for k, v in overrides.items() if k.startswith("unit/")}
     if not seed_of:
