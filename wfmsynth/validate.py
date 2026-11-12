@@ -1742,12 +1742,16 @@ for _qk in (2.1227e-4, 4.8904e-4):
           abs(_meas - _pred) < 0.2, f"predicted {_pred:.2f}, measured {_meas:.2f} dB/Hz")
 
 # THE MECHANISM. Same recipe, rendered twice: without the export step and with it.
+# (`n_ui=32` is stated here and in the lead-in and filter checks below because that is what
+# these chains always rendered: the default 32 symbols, on a grid that says 16 GBd. Nothing
+# they assert -- a lattice, a lead-in, a filter's response -- depends on the symbol rate, and
+# stating it keeps their numbers and says so instead of tripping `carrier`'s warning.)
 _gst = Grid(fs=_fs_store, baud=16e9, n=1 << 16, v_full=0.846)
-_base = (Signal(seed=17, grid=_gst).carrier(kind="nrz", pattern="prbs13")
+_base = (Signal(seed=17, grid=_gst).carrier(kind="nrz", n_ui=32, pattern="prbs13")
          .lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
          .scope(bw_hz=110e9).digitize(noise_rms=0.0032, enob=10.0).scope(bw_hz=32e9))
 _smeared = _base.waveform()
-_stored = (Signal(seed=17, grid=_gst).carrier(kind="nrz", pattern="prbs13")
+_stored = (Signal(seed=17, grid=_gst).carrier(kind="nrz", n_ui=32, pattern="prbs13")
            .lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
            .scope(bw_hz=110e9).digitize(noise_rms=0.0032, enob=10.0).scope(bw_hz=32e9)
            .store(bits=11, full_scale=1.0)).waveform()
@@ -2010,7 +2014,7 @@ _lchain = dict(seed=17, grid=Grid(fs=_FSAMP, baud=16e9, n=1 << 20, v_full=0.8))
 
 def _lfull(**kw):
     return (Signal(**_lchain, **kw)
-            .carrier(kind="nrz", pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
+            .carrier(kind="nrz", n_ui=32, pattern="prbs13").lossy(loss_db=12.0, loss_at_ghz=8.0, causal=True)
             .scope(bw_hz=110e9).digitize(noise_rms=_sig_c, bits=10, full_scale=_A))
 
 
@@ -2791,8 +2795,8 @@ check("filter integrate / differentiate: a cosine integrates to a sine and a sin
 # THE FRONT END, AT THE SAME SETTINGS. `scope` stays the named op; the general stage must not be
 # a second, slightly different, Bessel.
 _zbg = Grid(fs=256e9, baud=32e9, n=1 << 13)
-_zsc = Signal(seed=3, grid=_zbg).carrier("nrz", pattern="prbs7").scope(bw_hz=32e9).waveform()
-_zfl = (Signal(seed=3, grid=_zbg).carrier("nrz", pattern="prbs7")
+_zsc = Signal(seed=3, grid=_zbg).carrier("nrz", n_ui=32, pattern="prbs7").scope(bw_hz=32e9).waveform()
+_zfl = (Signal(seed=3, grid=_zbg).carrier("nrz", n_ui=32, pattern="prbs7")
         .filter("bessel", order=4, f_hz=32e9).waveform())
 check("filter bessel, order 4, IS the existing front-end filter at the same settings -- bound "
       "zero, the same samples",

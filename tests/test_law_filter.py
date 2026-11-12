@@ -110,8 +110,8 @@ def test_every_law_parameter_moves_the_samples_and_the_digest(kind, key):
 @pytest.mark.parametrize("kind,key", _knobs(FILTERS))
 def test_every_filter_parameter_moves_the_samples_and_the_digest(kind, key):
     base, other = FILTERS[kind]
-    a = Signal(seed=1, grid=G).carrier("nrz", pattern="prbs7").filter(kind, **base)
-    b = (Signal(seed=1, grid=G).carrier("nrz", pattern="prbs7")
+    a = Signal(seed=1, grid=G).carrier("nrz", n_ui=32, pattern="prbs7").filter(kind, **base)
+    b = (Signal(seed=1, grid=G).carrier("nrz", n_ui=32, pattern="prbs7")
          .filter(kind, **{**base, key: other[key]}))
     assert a.sha256() != b.sha256()
     assert not np.array_equal(a.waveform(), b.waveform())
@@ -120,7 +120,7 @@ def test_every_filter_parameter_moves_the_samples_and_the_digest(kind, key):
 @pytest.mark.parametrize("op,kind", [("law", k) for k in LAWS] + [("filter", k) for k in FILTERS])
 def test_a_recipe_is_data_and_replays_to_the_same_samples(op, kind):
     base = (LAWS if op == "law" else FILTERS)[kind][0]
-    s = getattr(Signal(seed=4, grid=G).carrier("nrz", pattern="prbs7"), op)(kind, **base)
+    s = getattr(Signal(seed=4, grid=G).carrier("nrz", n_ui=32, pattern="prbs7"), op)(kind, **base)
     back = Signal.from_recipe(json.loads(json.dumps(s.recipe())))
     assert back.sha256() == s.sha256()
     assert np.array_equal(back.waveform(), s.waveform())
@@ -129,7 +129,7 @@ def test_a_recipe_is_data_and_replays_to_the_same_samples(op, kind):
 
 def test_arrays_and_complex_poles_are_stored_as_plain_json():
     pole = complex(-1e8, 3e8)
-    s = (Signal(seed=1, grid=G).carrier("nrz")
+    s = (Signal(seed=1, grid=G).carrier("nrz", n_ui=32)
          .filter("zpk", poles=np.array([pole, pole.conjugate()]), gain=1e17)
          .filter("fir", taps=np.array([0.5, 0.5]))
          .law("poly", coeffs=np.array([0.0, 1.0])))
@@ -197,7 +197,7 @@ def test_comparator_events_under_a_lead_in_are_on_the_delivered_window():
 # --------------------------------------------------------------- the filters, independently
 def test_bessel_order_4_is_the_front_end_to_the_bit():
     g = Grid(fs=256e9, baud=32e9, n=1 << 12)
-    src = lambda: Signal(seed=3, grid=g).carrier("nrz", pattern="prbs7")     # noqa: E731
+    src = lambda: Signal(seed=3, grid=g).carrier("nrz", n_ui=32, pattern="prbs7")     # noqa: E731
     for bw in (20e9, 32e9, 60e9):
         assert np.array_equal(src().scope(bw_hz=bw).waveform(),
                               src().filter("bessel", f_hz=bw).waveform())
@@ -259,7 +259,7 @@ def test_a_symmetric_fir_delays_by_exactly_half_its_length_and_zero_phase_takes_
 
 
 def test_filter_delays_lists_every_filter_op_and_only_those():
-    s = (Signal(seed=1, grid=G).carrier("nrz", pattern="prbs7").filter("butter", f_hz=40e6)
+    s = (Signal(seed=1, grid=G).carrier("nrz", n_ui=32, pattern="prbs7").filter("butter", f_hz=40e6)
          .scope(bw_hz=200e6).filter("fir", taps=[0.5, 0.0, 0.5]).filter("integrate"))
     rep = s.filter_delays()
     assert [r["op"] for r in rep] == [1, 3, 4] and [r["kind"] for r in rep] == [
@@ -381,7 +381,7 @@ def test_canonical_order_refuses_a_stage_with_no_home_and_leaves_other_chains_al
 
 def test_a_lead_in_sizes_its_guard_from_a_filter_and_refuses_an_integrator():
     g = Grid(fs=256e9, baud=32e9, n=1 << 12)
-    src = lambda **kw: Signal(seed=2, grid=g, **kw).carrier("nrz", pattern="prbs7")   # noqa: E731
+    src = lambda **kw: Signal(seed=2, grid=g, **kw).carrier("nrz", n_ui=32, pattern="prbs7")   # noqa: E731
     slow = src(lead_in=True).filter("butter", f_hz=0.5e9, order=2)
     fast = src(lead_in=True).filter("butter", f_hz=20e9, order=2)
     assert slow.lead_plan().measured > 10 * fast.lead_plan().measured > 0

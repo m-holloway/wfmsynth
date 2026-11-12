@@ -122,7 +122,38 @@ def _carrier(p, streams, grid, idx):
 
 
 def _op_carrier(x, p, streams, grid, idx):
+    _warn_default_n_ui(p, grid)
     return _carrier(p, streams, grid, idx)
+
+
+def _warn_default_n_ui(p, grid):
+    """`n_ui` defaults to 32 symbols stretched over the record, whatever the grid's baud. The
+    default cannot follow the grid without moving every record that relied on it, so it stays
+    -- and when the grid STATES a symbol rate and the 32 symbols come out at a different one,
+    that is said, once, with both rates and the value that would agree."""
+    if "n_ui" in p or grid is None or not getattr(grid, "baud", None):
+        return
+    if p.get("kind") != "nrz" and not re.fullmatch(r"pam\d+", str(p.get("kind"))):
+        return
+    n = _grid_n(grid, p)
+    if not n:
+        return
+    default = 32
+    want = n * grid.baud / grid.fs                      # UI in the record at the grid's baud
+    if abs(want - default) <= 1e-9 * max(want, default):
+        return
+    got_baud = default * grid.fs / n
+    whole = abs(want - round(want)) <= 1e-9 * max(want, 1.0)
+    fix = (f"n_ui={int(round(want))} matches the grid" if whole and round(want) >= 1 else
+           f"the grid's baud puts {want:.6g} UI in this record, not a whole number, so choose "
+           f"n_ui and the grid's n or baud together")
+    warnings.warn(
+        f"carrier({p.get('kind')!r}): n_ui was not stated, so the record is the default "
+        f"{default} symbols stretched over its {n} samples -- {got_baud:.6g} Bd, "
+        f"{n / default:.6g} samples per UI -- while the grid states baud={grid.baud:.6g} "
+        f"({grid.fs / grid.baud:.6g} samples per UI). Every op and measure that reads the "
+        f"grid's baud will disagree with the samples. State n_ui: {fix}.",
+        RuntimeWarning, stacklevel=2)
 
 
 # The `symbols` op carries its symbols one of two ways, and the pair IS the reproducibility
@@ -2477,6 +2508,13 @@ class Signal:
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
         pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter.
+
+        STATE `n_ui`. It is the number of symbols in the record and it defaults to 32,
+        stretched over the whole record whatever `Grid(baud=)` says: the symbol rate of the
+        samples is ``n_ui * fs / n``, and the grid's `baud` is what every later op and measure
+        ASSUMES it is. `n_ui = n * baud / fs` makes the two agree. Leaving it out on a grid
+        that states a baud the 32 symbols do not come out at warns once, with both rates and
+        that value; the default itself is unchanged, since records rely on it.
 
         pattern is carrier-specific and defaults to 'legacy' for both: NRZ takes
         'legacy' (== 'prbs7'), 'prbs7'/'prbs9'/'prbs11'/'prbs13'/'prbs15'/'prbs23'/
