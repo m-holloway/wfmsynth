@@ -261,6 +261,12 @@ def test_multipath_needs_a_transmitter_that_is_the_same_wherever_it_is_rendered(
                     seed=1, grid=g).waveforms()
     want = x["tx"][22:] + 0.7 * x["tx"][14:-8] + 0.4 * x["tx"][:-22]
     assert np.allclose(x["rx"][22:], want, atol=1e-9)        # noise and all, three times
+    # a named chain that draws AFTER the `use` is as different on every path as any other
+    with pytest.raises(ValueError, match=r"tx draws random roles \['awgn/1'\]"):
+        ws.recipes.multipath(Signal().use("tx").awgn(snr_db=10, bw_hz=8e6), DELAYS, GAINS)
+    with pytest.raises(ValueError, match=r"stray_reflection: tx draws random roles"):
+        ws.recipes.stray_reflection(Signal().use("l").edfa(gain_db=10.0, nf_db=5.0), 1e-9, 0.1)
+    assert Signal().use("tx").roles() == []
     with pytest.raises(ValueError, match="one delay and one gain per path"):
         ws.recipes.multipath(Signal().iq("qpsk", prbs=11), DELAYS, GAINS[:2])
     with pytest.raises(ValueError, match="already has its source"):

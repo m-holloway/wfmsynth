@@ -226,10 +226,16 @@ def test_bounce_closes_n_plus_one_times_at_the_stated_instants():
         seg = {"chain": Signal().carrier("dc", level=v)}
         return seg if d is None else dict(seg, duration_s=d)
 
+    def unlabelled(sig):                   # a label says what a segment is; it shapes nothing
+        for seg in sig.ops[-1]["by"]["ops"][0]["segments"]:
+            assert seg.pop("label").startswith("bounce: ")
+        return sig
+
     hand = Signal(seed=1, grid=BG).carrier("dc", level=1.0).gate(by=Signal().sequence([
         level(0.0, 2e-3), level(1.0, 100e-6), level(0.0, 400e-6), level(1.0, 100e-6),
         level(0.0, 200e-6), level(1.0, 100e-6), level(0.0, 100e-6), level(1.0)]))
-    x = same(got, hand)
+    assert np.array_equal(got.waveform(), hand.waveform())
+    x = same(unlabelled(got), hand)
     closes, opens = R.bounce_times(2e-3, 400e-6, n=3, ratio=0.5)
     assert np.allclose(closes, [2e-3, 2.5e-3, 2.8e-3, 3.0e-3], atol=1e-15)
     assert abs(closes[-1] - (2e-3 + 3 * 100e-6 + 400e-6 * (1 - 0.5 ** 3) / 0.5)) < 1e-15
@@ -257,6 +263,45 @@ def test_bounce_from_the_first_sample_has_no_open_segment_before_it():
     assert len(s.ops[0]["segments"]) == 3
     x = record(s, BG).waveform()
     assert x[0] == 1.0 and x[75] == 0.0 and x[200] == 1.0
+
+
+def test_a_bounce_duration_off_the_grid_is_refused_in_bounces_own_words():
+    """The default touch is gap_s / 4, a number the caller never wrote: the refusal says which
+    argument it is. Each segment's label is in its `segment` event."""
+    gate = lambda **kw: Signal(seed=1, grid=BG).carrier("dc", level=1.0).gate(by=R.bounce(**kw))
+    with pytest.raises(ValueError, match=r"bounce: a touch, touch_s = gap_s / 4 unless stated"
+                                         r".*83.325 samples.*8.3e-05 s"):
+        gate(t_s=2e-3, gap_s=333.3e-6).waveform()
+    with pytest.raises(ValueError, match=r"\(bounce: flight 1, gap_s \* ratio\*\*1\).*33.3 samples"):
+        gate(t_s=2e-3, gap_s=400e-6, ratio=1 / 12).waveform()
+    with pytest.raises(ValueError, match=r"\(bounce: open until t_s\)"):
+        gate(t_s=2.0005e-3, gap_s=400e-6).waveform()
+    ev = gate(t_s=2e-3, gap_s=400e-6, n=1).event_list()
+    assert [e.params["label"] for e in ev if e.kind == "segment"] == [
+        "bounce: a touch, touch_s = gap_s / 4 unless stated", "bounce: flight 0, gap_s",
+        "bounce: closed"]
+    with pytest.raises(ValueError, match="label is a few words"):
+        Signal(seed=1, grid=BG).sequence([{"chain": Signal().carrier("dc"), "label": 3}])
+
+
+@pytest.mark.parametrize("name", ["ripple", "pickup", "pickup_am", "pickup_fm", "hum"])
+def test_phase_rad_is_the_number_that_varies_a_recipe_that_draws_nothing(name):
+    """A quarter period of phase is the same waveform a quarter period earlier."""
+    f, g = 500e3, Grid(fs=1e8, n=1 << 14)                # 200 samples per period
+    msg = Signal().carrier("sine", f_hz=1e4)
+    make = {"ripple": lambda **kw: R.ripple(f, 0.01, duty=0.3, spike=0.04, f_ring_hz=1e7, **kw),
+            "pickup": lambda **kw: R.pickup(f, 0.01, **kw),
+            "pickup_am": lambda **kw: R.pickup(f, 0.01, message=msg, **kw),
+            "pickup_fm": lambda **kw: R.pickup(f, 0.01, message=msg, dev_hz=5e4, **kw),
+            "hum": lambda **kw: R.hum(f, 0.01, harmonics={3: 0.3}, **kw)}[name]
+    a = record(make(), g).waveform()
+    b = record(make(phase_rad=0.5 * np.pi), g).waveform()
+    assert make().roles() == [] and np.abs(a - b).max() > 0.005
+    if not name.startswith("pickup_"):                   # (a message does not move with it)
+        err = np.abs(b[2000:-50] - a[2050:]).max()       # past the ring filter's start-up
+        print(f"{name}: phase_rad=pi/2 against the record 50 samples on: {err:.1e}")
+        assert err < 1e-7                                # measured 1e-8 (ripple), 1e-16
+    assert "phase_rad" not in json.dumps(make().recipe()) or name == "hum"   # unstated: absent
 
 
 # ------------------------------------------------------------------ intermittent

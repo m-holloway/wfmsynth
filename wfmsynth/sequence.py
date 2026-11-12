@@ -25,6 +25,11 @@ take the rest of the record. What a segment brings across its boundary is stated
                           has is carried: a tone's phase, a pattern's position and a filter's
                           memory are what they would be had the chain been running all along.
 
+A segment may also carry a `"label"`: a few words saying what it IS ("preamble", or the
+argument of the recipe that made it). It changes no sample; it is in the segment's `segment`
+event, and a refusal about that segment quotes it, so a duration a composition computed is
+named in the composition's own words.
+
 Either way the chain is rendered on the record's own grid and cut -- never on a shorter one --
 so a segment is exactly `chain.waveform()[a:b]`, and nothing about the chain depends on how
 long its segment is. State is never carried from one segment's chain INTO another's: two chains
@@ -140,6 +145,11 @@ def layout(segments, grid):
     out, at = [], 0
     for k, seg in enumerate(segments):
         who = f"sequence: segments[{k}]"
+        if isinstance(seg, dict) and seg.get("label") is not None:
+            if not isinstance(seg["label"], str):
+                raise ValueError(f"{who}: label is a few words saying what the segment is, "
+                                 f"got {seg['label']!r}.")
+            who += f" ({seg['label']})"
         if not isinstance(seg, dict) or seg.get("chain") is None:
             raise ValueError(f"{who} must be a dict with 'chain' (a Signal, {{'ops': [...]}} "
                              f"or {{'from': <recipe>}}) and 'duration_s' (how long it lasts, seconds).")
@@ -168,7 +178,8 @@ def layout(segments, grid):
         else:
             count = _samples(seg["duration_s"], fs, f"{who}: duration_s")
         out.append({"segment": k, "start": at, "stop": at + count, "t_start_s": at / fs,
-                    "t_stop_s": (at + count) / fs, "state": state})
+                    "t_stop_s": (at + count) / fs, "state": state,
+                    **({} if seg.get("label") is None else {"label": seg["label"]})})
         at += count
     if at != n:
         raise ValueError(
@@ -275,7 +286,8 @@ def run_sequence(streams, grid, idx, segments=None, join="cut", t_join_s=None):
                 sample=s["start"], kind="segment", severity=0.0, t_s=s["t_start_s"],
                 width=max(m, 1), placement=f"sequence/{idx}",
                 params={"segment": s["segment"], "state": s["state"], "join": join,
-                        "t_join_s": m / grid.fs}))
+                        "t_join_s": m / grid.fs,
+                        **({"label": s["label"]} if "label" in s else {})}))
     return splice(waves, plan, join, m)
 
 

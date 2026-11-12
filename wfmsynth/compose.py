@@ -2889,7 +2889,9 @@ class Signal:
         segments: [{"chain": <sub-chain>, "duration_s": <seconds>,
                     "state": "restart"|"continue"}, ...] in order. A chain is a Signal, {"ops": [...]} or {"from": recipe} (see
                   `crosstalk`). Durations must land on the grid and fill the record exactly;
-                  the last segment may leave `duration_s` off to take the rest.
+                  the last segment may leave `duration_s` off to take the rest. A segment
+                  may add "label": a few words for what it is, kept in its `segment` event
+                  and quoted by a refusal about it.
         state:    "restart" (default) -- the segment is its chain from the chain's own t=0;
                   nothing is carried in. "continue" -- the segment is the chain as it would be
                   at that time had it run since the record began: phase, pattern position and
@@ -2956,8 +2958,11 @@ class Signal:
         from . import stages as ST
         params = self._drawn(ST.plain(params))
         ST.check_law(kind, **_stated(params))
-        if self.ops:                 # a voltage law on a voltage, an envelope law on I/Q;
-            # on an optical field no law applies, which the domain trace says in `_add`
+        # a voltage law on a voltage, an envelope law on I/Q; on an optical field no law
+        # applies, which the domain trace says in `_add`. A chain not yet on a record whose
+        # ops do not say (it starts with `use`, or is a stage of filters) cannot know:
+        # `stages.apply_law` refuses the wrong kind when it renders
+        if self.ops and (self.grid is not None or DOMAIN.needs(self.ops) is not None):
             dom = DOMAIN.trace(self.ops, self.grid)[-1][0]
             if dom in DOMAIN.BOTH and (kind in ST.ENVELOPE_LAWS) != (dom == DOMAIN.IQ):
                 raise ValueError(ST.refuse_law(kind, dom))

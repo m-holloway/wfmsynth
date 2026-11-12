@@ -289,6 +289,14 @@ def test_fields_about_two_carriers_do_not_combine():
     with pytest.raises(ValueError, match="another carrier \\(none stated\\)"):
         las.copy().combine([eo]).waveform()
     las.copy().combine([Signal().laser(start_nm=1549.0, stop_nm=1551.0)]).waveform()
+    # a PINNED record is a field about the carrier its own recipe states
+    with pytest.raises(ValueError, match="others\\[0\\] is a field about another carrier"):
+        las.copy().combine({"from": laser(start_nm=1540.0).recipe()}).waveform()
+    with pytest.raises(ValueError, match="another carrier \\(none stated\\)"):
+        las.copy().combine({"from": Signal(seed=1, grid=G).carrier("sine", f_hz=1e3).eo()
+                           .recipe()}).waveform()
+    both = las.copy().combine({"from": laser().recipe()}).photodetect(shot=False).waveform()
+    assert np.allclose(both, 4.0)                    # the same laser twice: twice the field
 
 
 # ---------------------------------------------------------------- the resonator
@@ -331,6 +339,29 @@ def test_a_ring_measured_on_a_slow_sweep_has_its_stated_wavelength_q_extinction_
     over = las.copy().resonator(wavelength_nm=1550.0, intrinsic_hz=0.5e9, coupling_hz=1.5e9)
     k = N // 2
     assert under.waveform()[k].real > 0.4 and over.waveform()[k].real < -0.4
+
+
+@pytest.mark.parametrize("coupling, q, ext, top", [("under", 19566, 12.20, 0.966),
+                                                   ("over", 19050, 11.67, 0.943)])
+def test_a_low_finesse_ring_reads_off_its_stated_q_and_extinction_by_the_stated_amount(
+        coupling, q, ext, top):
+    """`ring(q=2e4, fsr_nm=0.8)` is a finesse of 10: the numbers are one mode's, and the
+    neighbouring orders move what a sweep reads by about (pi*coupling_hz/fsr_hz)**2 -- by
+    different amounts under- and over-coupled. The record is still the stated response."""
+    g = Grid(fs=1e6, n=1 << 18)
+    ring = R.ring(Signal(seed=1, grid=g).laser(start_nm=1549.5, stop_nm=1551.5),
+                  wavelength_nm=1550.0, q=2e4, extinction_db=12.0, fsr_nm=0.8, coupling=coupling)
+    lam = SW.wavelength_map(ring)["wavelength_nm"]
+    x = pd(ring)
+    assert np.abs(x - np.abs(SW.steady(lam, ring.ops[-1])) ** 2).max() < 1e-6
+    dip = min(M.resonances(*M.transmission(x, lam), level=1.0),
+              key=lambda d: abs(d["wavelength_nm"] - 1550.0))
+    print(f"{coupling}: Q {dip['q']:.0f} (stated 20000), extinction {dip['extinction_db']:.2f} "
+          f"dB (stated 12), {x.max():.3f} between resonances")
+    assert abs(dip["q"] / q - 1) < 2e-3 and abs(dip["extinction_db"] - ext) < 0.02
+    assert abs(x.max() - top) < 2e-3
+    rho2 = (np.pi * ring.ops[-1]["coupling_hz"] / ring.ops[-1]["fsr_hz"]) ** 2
+    assert abs(dip["q"] / 2e4 - 1) < 6 * rho2 and abs(dip["extinction_db"] - 12.0) < 0.5
 
 
 @pytest.mark.parametrize("ki,ke,fsr,bound", [(1e9, 0.5e9, 100e9, 5e-4),

@@ -231,7 +231,7 @@ def multipath(tx, delays_s, gains, doppler_hz=None, shape="jakes"):
 def _same_on_every_path(tx, who):
     """Refuse a chain that would not be the same samples each time it is rendered."""
     drawn = tx.roles()
-    if drawn and tx.ops[0]["op"] != "use":
+    if drawn:
         raise ValueError(
             f"{who}: tx draws random roles {drawn}, and it is rendered once per path "
             f"under that path's own names, so each path would carry different noise rather "
@@ -362,7 +362,7 @@ def hum(f_hz, amp, harmonics=None, phase_rad=0.0, f_drift_hz=None, f_wander_hz=N
 
 @_numbers()
 def ripple(f_sw_hz, amp, duty=0.5, spike=None, f_ring_hz=None, q=4.0, spread_pct=None,
-           f_spread_hz=None):
+           f_spread_hz=None, phase_rad=0.0):
     """A switching converter's OUTPUT RIPPLE as a waveform, a sub-chain to `combine`.
 
         sig.combine(ws.recipes.ripple(500e3, amp=0.01))
@@ -390,13 +390,19 @@ def ripple(f_sw_hz, amp, duty=0.5, spike=None, f_ring_hz=None, q=4.0, spread_pct
     ``f_sw_hz * (1 - spread_pct / 100)`` and ``f_sw_hz * (1 + spread_pct / 100)`` and back
     `f_spread_hz` times a second, and every line of the ripple becomes a band.
 
+    `phase_rad` is where in the switching period the record starts: the whole waveform,
+    ring included, is earlier by ``phase_rad / (2 pi f_sw_hz)``. It is the number to vary
+    from record to record, since nothing here is drawn.
+
     Nothing is drawn. Ops: `carrier("triangle")` [`combine` of `carrier("square")` ->
     `filter("butter", btype="bandpass", order=1)`] [`ssc`]."""
     _positive("ripple", f_sw_hz=f_sw_hz, amp=amp)
     if not 0.0 < duty < 1.0:
         raise ValueError(f"ripple: duty is the fraction of the period the switch is on, "
                          f"strictly between 0 and 1; got {duty!r}.")
-    s = Signal().carrier("triangle", f_hz=float(f_sw_hz), amp=float(amp), symmetry=float(duty))
+    phase = {"phase_rad": float(phase_rad)} if phase_rad else {}
+    s = Signal().carrier("triangle", f_hz=float(f_sw_hz), amp=float(amp), symmetry=float(duty),
+                         **phase)
     if _both("ripple", "the ring at each switching edge", spike=spike, f_ring_hz=f_ring_hz):
         _positive("ripple", spike=spike, f_ring_hz=f_ring_hz)
         if not q > 0.5:
@@ -411,7 +417,7 @@ def ripple(f_sw_hz, amp, duty=0.5, spike=None, f_ring_hz=None, q=4.0, spread_pct
         root, damped = float(np.sqrt(1.0 + half * half)), float(np.sqrt(1.0 - half * half))
         ring = (Signal().carrier("square", f_hz=float(f_sw_hz), duty=float(duty),
                                  amp=0.5 * float(spike) * float(q) * damped,
-                                 tr_frac=0.125 * float(f_sw_hz) / float(f_ring_hz))
+                                 tr_frac=0.125 * float(f_sw_hz) / float(f_ring_hz), **phase)
                 .filter("butter", btype="bandpass", order=1,
                         f_hz=[float(f_ring_hz) * (root - half), float(f_ring_hz) * (root + half)]))
         s = s.combine(ring)
@@ -423,7 +429,7 @@ def ripple(f_sw_hz, amp, duty=0.5, spike=None, f_ring_hz=None, q=4.0, spread_pct
 
 
 @_numbers()
-def pickup(fc_hz, amp, message=None, depth=0.5, dev_hz=None):
+def pickup(fc_hz, amp, message=None, depth=0.5, dev_hz=None, phase_rad=0.0):
     """RADIO PICKUP: a carrier that is not yours, coupled in at a stated level; a sub-chain to
     `combine`.
 
@@ -439,20 +445,22 @@ def pickup(fc_hz, amp, message=None, depth=0.5, dev_hz=None):
     carrier spec, at the level it renders. With `dev_hz` it is FM, the instantaneous frequency
     ``fc_hz + dev_hz * message``; without, AM, ``amp * (1 + depth * message) * sin(2 pi fc_hz t)``,
     so a unit sine message puts a line ``depth / 2`` of the carrier either side of it.
-    Without a message it is a plain sine. Any randomness is the message's own, under
-    `.../modulate/<i>/message/...`.
+    Without a message it is a plain sine. `phase_rad` is the carrier's phase at t = 0, the
+    number to vary from record to record: a station is not locked to your acquisition. Any
+    randomness is the message's own, under `.../modulate/<i>/message/...`.
 
     Ops: `carrier("sine")` [`modulate(kind="am")`], or `modulate(kind="fm")` alone."""
     _positive("pickup", fc_hz=fc_hz, amp=amp)
+    phase = {"phase_rad": float(phase_rad)} if phase_rad else {}
     if message is None:
         if dev_hz is not None:
             raise ValueError("pickup: dev_hz= is the frequency deviation per unit of the "
                              "message, and there is no message=.")
-        return Signal().carrier("sine", f_hz=float(fc_hz), amp=float(amp))
+        return Signal().carrier("sine", f_hz=float(fc_hz), amp=float(amp), **phase)
     if dev_hz is not None:
         return Signal().modulate(kind="fm", fc_hz=float(fc_hz), dev_hz=float(dev_hz),
-                                 amp=float(amp), message=message)
-    return (Signal().carrier("sine", f_hz=float(fc_hz), amp=float(amp))
+                                 amp=float(amp), message=message, **phase)
+    return (Signal().carrier("sine", f_hz=float(fc_hz), amp=float(amp), **phase)
             .modulate(kind="am", depth=float(depth), message=message))
 
 
@@ -498,20 +506,26 @@ def bounce(t_s, gap_s, n=3, ratio=0.5, touch_s=None):
     It is a `sequence` of constant levels with those durations, so every boundary is a
     `segment` event and the `gate` it drives emits each switching as a `transition`. Each
     duration has to be a whole number of samples: `sequence` never rounds one, and refuses
-    with the nearest that fit. Nothing is drawn: for a population, vary the arguments.
+    with the nearest that fit, naming which of these arguments the duration is (the default
+    `touch_s` is on the grid when `gap_s` is a multiple of four samples). Nothing is drawn:
+    for a population, vary the arguments.
 
     Ops: one `sequence` of 2*n + 2 `carrier("dc")` segments (one fewer when t_s is 0)."""
     bounce_times(t_s, gap_s, n, ratio, touch_s)                      # the refusals
-    touch_s = 0.25 * gap_s if touch_s is None else touch_s
+    stated = touch_s is not None
+    touch_s = touch_s if stated else 0.25 * gap_s
 
-    def level(v, duration_s=None):
-        seg = {"chain": Signal().carrier("dc", level=v)}
+    def level(v, label, duration_s=None):
+        seg = {"chain": Signal().carrier("dc", level=v), "label": f"bounce: {label}"}
         return seg if duration_s is None else dict(seg, duration_s=float(duration_s))
 
-    segments = [level(0.0, t_s)] if t_s > 0 else []
-    for gap in _flights(gap_s, n, ratio):
-        segments += [level(1.0, touch_s), level(0.0, gap)]
-    return Signal().sequence(segments + [level(1.0)])
+    # each segment says which ARGUMENT its duration is, for the refusal of one off the grid
+    touch = "a touch, touch_s" + ("" if stated else " = gap_s / 4 unless stated")
+    segments = [level(0.0, "open until t_s", t_s)] if t_s > 0 else []
+    for k, gap in enumerate(_flights(gap_s, n, ratio)):
+        segments += [level(1.0, touch, touch_s),
+                     level(0.0, f"flight {k}, gap_s" + (f" * ratio**{k}" if k else ""), gap)]
+    return Signal().sequence(segments + [level(1.0, "closed")])
 
 
 def intermittent(closed_s, open_s, tr_s=None):
@@ -859,13 +873,22 @@ def ring(tx, wavelength_nm, q, extinction_db=None, fsr_nm=None, coupling="under"
         linewidth   nu0 / q                            intrinsic_hz + coupling_hz
         extinction  ((ki - ke)/(ki + ke))**2 = 10**(-extinction_db/10); left out, the ring
                     is critically coupled (ki = ke) and the dip reaches zero
-        coupling    "under" (ke < ki, the usual case) or "over" (ke > ki): the same dip,
-                    told apart only by phase
+        coupling    "under" (ke < ki, the usual case) or "over" (ke > ki): for one mode
+                    the same dip, told apart only by phase
         fsr_nm      the next resonance sits at wavelength_nm + fsr_nm; the others follow
                     evenly in optical FREQUENCY (no dispersion)
 
-    `q` is the LOADED Q, the one a sweep measures. `split_hz` and `by` are the
-    resonator's: a backscatter doublet, and a resonance that moves during the sweep."""
+    `q` is the LOADED Q, the one a sweep measures, and with `extinction_db` it is stated for
+    ONE mode. With `fsr_nm` the neighbouring orders' tails add to each dip, and the resonator
+    is first order in the coupling per round trip, so a slow sweep reads the stated numbers
+    to about ``(pi * coupling_hz / fsr_hz)**2`` -- and under- and over-coupling then differ in
+    POWER too, the bus taking more of the ring's light when over-coupled. Measured
+    (tests/test_swept.py): at a finesse of 52 (q=1e5, fsr_nm=0.8) Q and extinction read back
+    within 0.5 % and 0.05 dB; at a finesse of 10 (q=2e4) an under-coupled 12 dB ring reads
+    Q 19566 and 12.20 dB with 0.966 between resonances, an over-coupled one Q 19050 and
+    11.67 dB with 0.943. For a low-finesse ring that must READ a stated Q and extinction, set
+    `resonator`'s two rates yourself and check with `swept.steady`. `split_hz` and `by` are
+    the resonator's: a backscatter doublet, and a resonance that moves during the sweep."""
     if coupling not in ("under", "over"):
         raise ValueError(f"ring: coupling is 'under' (the bus takes less than the ring "
                          f"loses) or 'over'; got {coupling!r}.")

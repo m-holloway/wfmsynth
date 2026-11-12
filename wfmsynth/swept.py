@@ -428,16 +428,26 @@ def _said(c):
 def same_carrier(others, carrier, grid, record=None):
     """Refuse a `combine` of fields that are not about ONE carrier. Samples of two fields add
     coherently only in the same frame: two lasers, or a laser and a field that states no
-    carrier, beat at their difference -- terahertz -- which no sample here holds."""
+    carrier, beat at their difference -- terahertz -- which no sample here holds. A pinned
+    record (``{"from": recipe}``) is held to it as a sub-chain is: its recipe states its
+    carrier."""
     from . import domain as DOMAIN
     expand = None if record is None else record.rec.expand
     mine = {k: carrier[k] for k in LASER_KEYS if k in carrier} if isinstance(carrier, dict) \
         else None
     for k, spec in enumerate(others):
         ops = spec.get("ops") if isinstance(spec, dict) else None
-        if not isinstance(ops, (list, tuple)) or not ops:
-            continue                                   # a pinned record: its own business
-        own = DOMAIN.trace(ops, DOMAIN.grid_for(ops, grid), expand=expand)[-1][1]
+        if isinstance(ops, (list, tuple)) and ops:
+            own = DOMAIN.trace(ops, DOMAIN.grid_for(ops, grid), expand=expand)[-1][1]
+        elif isinstance(spec, dict) and isinstance(spec.get("from"), dict) \
+                and spec["from"].get("ops"):
+            # a pinned record is a field about the carrier its OWN recipe states
+            from .grid import Grid
+            pinned = spec["from"]
+            own = DOMAIN.trace(pinned["ops"], Grid(**pinned["grid"]) if pinned.get("grid")
+                               else grid)[-1][1]
+        else:
+            continue                                   # not a chain: refused where it is read
         if own == DOMAIN.CARRIER_ELSEWHERE:
             continue
         if (None if own is None else {k: own[k] for k in LASER_KEYS if k in own}) != mine:

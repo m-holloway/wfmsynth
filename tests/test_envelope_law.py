@@ -179,3 +179,28 @@ def test_a_law_handed_the_other_kind_of_record_is_refused_where_it_is_written():
         env().law("rapp", smoothness=0.0)
     with pytest.raises(ValueError, match="no AM/AM or AM/PM curve"):
         ST.am_am_pm("tanh", 1.0)
+
+
+def test_an_envelope_law_on_a_chain_that_cannot_yet_know_its_record_waits_for_the_render():
+    """`Signal().use("tx")` and a stage of filters do not say what they act on, so the law is
+    checked when it renders: accepted on I/Q, refused by name on a voltage."""
+    src = Signal().iq("qpsk", prbs=9)
+    for rx in (Signal().use("tx").law("rapp", sat=0.8),
+               Signal().use("tx").filter("butter", f_hz=2e6).law("saleh", **SALEH),
+               ws.recipes.multipath(Signal().use("tx"), [0.0, 1e-6], [1.0, 0.5]).law("rapp")):
+        x = ws.Channels({"tx": src, "rx": rx}, seed=1, grid=G).waveforms()
+        assert x["rx"].dtype == np.complex128
+    # ... and it is the law itself: the same op written on the transmitter's own chain
+    named = ws.Channels({"tx": src, "rx": Signal().use("tx").law("rapp", sat=0.8)},
+                        seed=1, grid=G).waveforms()["rx"]
+    direct = Signal(seed=1, grid=G).iq("qpsk", prbs=9).law("rapp", sat=0.8).waveform()
+    assert np.allclose(named, direct, rtol=0, atol=1e-12)
+    stage = Signal().filter("butter", f_hz=2e6).law("rapp")         # a shared stage builds
+    assert [o["op"] for o in stage.ops] == ["filter", "law"]
+    volts = ws.Channels({"tx": Signal().carrier("sine", f_hz=1e5),
+                         "rx": Signal().use("tx").law("rapp")},
+                        seed=1, grid=Grid(fs=8e6, n=4096))
+    with pytest.raises(ValueError, match=r"law\('rapp'\).*real voltage.*ENVELOPE law"):
+        volts.waveforms()
+    with pytest.raises(ValueError, match=r"law\('rapp'\).*real voltage"):
+        Signal().carrier("sine", f_hz=1e5).law("rapp")              # a source says: at once
