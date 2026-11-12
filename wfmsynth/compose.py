@@ -2225,7 +2225,10 @@ class Signal:
     def unit(self, seed):
         """The same design as ANOTHER UNIT: every toleranced parameter (`ws.tol`, `ws.corners`)
         drawn again under `seed`, everything else -- ops, seed, noise -- the same. Returns a
-        Signal, so the new unit's values are in its recipe. See `wfmsynth.tolerance`."""
+        Signal, so the new unit's values are in its recipe. See `wfmsynth.tolerance`.
+
+        A `{"from": recipe}` sub-chain is a pinned record and stays pinned: `unit()` does not
+        move its toleranced parts, and `roles()` does not list them."""
         self._alone("unit()", "Another unit is another record: rec.unit(seed).signal(<name>).")
         return TOL.as_unit(self, seed)
 
@@ -3677,7 +3680,9 @@ class Signal:
         parameters make it draw (`store` with a `dither_lsb`, `acquire` with a noise floor,
         clock jitter or interleave, `tia` with a `thermal_rms`, a carrier with `rj` jitter),
         so every name here moves samples when re-rolled and nothing is drawn under a name that
-        is not here."""
+        is not here. A `{"from": recipe}` sub-chain is a pinned record: its noise is listed and
+        can be re-rolled by name; its toleranced parts are not listed, because `unit()` and
+        `contrast("unit/*")` do not move a pinned record."""
         out = []
         for i, op in enumerate(self.ops):
             out.extend(_op_roles(op, i))

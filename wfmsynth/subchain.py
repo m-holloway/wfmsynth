@@ -455,9 +455,17 @@ def children(sig):
 
 
 def roles(sig):
-    """The re-rollable factors inside `sig`'s sub-chains, by their full role names."""
-    return [f"{at}/{r}" for _i, at, _label, spec in walk(sig.ops)
-            for r in child(spec, sig.grid).roles()]
+    """The re-rollable factors inside `sig`'s sub-chains, by their full role names.
+
+    A `{"from": recipe}` sub-chain is a pinned record: its noise can still be re-rolled by
+    name, but its toleranced parts were drawn when THAT record was built and `unit()` /
+    `contrast("unit/*")` do not move them, so they are not listed (`summary()` shows them)."""
+    out = []
+    for _i, at, _label, spec in walk(sig.ops):
+        pinned = spec.get("ops") is None
+        out += [f"{at}/{r}" for r in child(spec, sig.grid).roles()
+                if not (pinned and TOL.is_role(r))]
+    return out
 
 
 def render_at(sig, path, streams=None):

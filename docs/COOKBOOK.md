@@ -768,7 +768,8 @@ parameters that take one: `crosstalk(aggressor=)`, `crosstalk_matrix(aggressors=
 **Another record, pinned.** A `Signal()` sub-chain draws from the parent's seed, so it moves
 when the parent's seed does. `{"from": recipe}` is the other thing: a record with its own seed
 and its own baud, embedded as rendered. Same sample rate and length, or it is refused; nothing is
-resampled.
+resampled. Pinned includes its unit: `unit()` draws the parent's toleranced parts again and
+leaves the embedded record's as they were, and `roles()` lists its noise but not its parts.
 
 ```python
 other = (Signal(seed=5, grid=ws.Grid(fs=64e9, baud=2.5e9, n=8192))
