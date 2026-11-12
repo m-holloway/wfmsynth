@@ -2426,6 +2426,129 @@ for _dth, _want, _lbl in ((0.0, 0.0, "a BARE store lands on q^2/12 -- where the 
           _on_lattice(_r, _qs) > 0.9999 and 1851 <= len(_u) <= 2035,
           f"{len(_u)} distinct, on-lattice {_on_lattice(_r, _qs):.4f}")
 
+# ---- a sub-chain is a value: one nested-signal form for every op that takes one (GitHub #75) ----
+# `crosstalk(aggressor=)`, `modulate(message=)`, `open_drain(second=)`, `crosstalk_matrix(
+# aggressors=)` and a `net` driver's `source` all take {"ops": [...]}, {"from": <recipe>} or a
+# Signal, through ONE resolver (`wfmsynth.subchain`). The claims are that the second signal is
+# exactly the chain it says it is, that its randomness is its own and separately re-rollable, and
+# that nothing is fitted to the record behind the caller's back. Each is checked against something
+# that does not go through the resolver.
+from wfmsynth import subchain as _SUB
+from wfmsynth.compose import _carrier as _scar
+_sg = Grid(fs=64e9, baud=4e9, n=1 << 13)
+_sj = dict(rj=0.4)
+_sat = "crosstalk/1/aggressor"
+
+
+def _svic():
+    return Signal(seed=1, grid=_sg).carrier("nrz", n_ui=512, jitter=_sj)
+
+
+def _slane(loss_db, noise_rms=0.02):
+    s = Signal(grid=_sg).carrier("nrz", n_ui=512, seed=9, jitter=_sj)
+    if loss_db:
+        s = s.lossy(loss_db=loss_db, loss_at_ghz=2.0)
+    return s.digitize(noise_rms=noise_rms) if noise_rms else s
+
+
+def _salone(ops, at=_sat, seed=1):
+    """A sub-chain's ops rendered WITHOUT the resolver, under the role names it should have."""
+    s = Signal(grid=_sg)
+    s.ops = [dict(o) for o in ops]
+    return s._run(_SUB.Namespaced(_St(seed), at + "/"))
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _ssig = _svic().crosstalk(aggressor=_slane(12.0), coupling=0.1).digitize(noise_rms=0.01)
+    _sx, _sv = _ssig.waveform(), _svic().waveform()
+    _sa = _salone(_slane(12.0).ops)
+    _sown = _sx - P.crosstalk(_sv, _sa, coupling=0.1)          # the record's own digitizer noise
+    _sbare = _svic().crosstalk(aggressor=_slane(12.0), coupling=0.1).waveform()
+    check("an aggressor given as a sub-chain IS that chain rendered separately and coupled by hand",
+          np.array_equal(_sbare, P.crosstalk(_sv, _sa, coupling=0.1))
+          and np.array_equal(_ssig.subchain(_sat), _sa),
+          f"max |op - by hand| = {float(np.abs(_sbare - P.crosstalk(_sv, _sa, coupling=0.1)).max()):.1e} "
+          f"on a coupled term of {float(np.abs(_sbare - _sv).max()):.3f} peak; `subchain()` returns "
+          f"the same {len(_sa)} samples")
+
+    # THE EFFECT, not the call: the aggressor's own channel must be visible in what the victim
+    # receives. FEXT couples the aggressor's derivative, so an aggressor that has been through
+    # 12 dB of loss -- slower edges -- couples a lower-frequency term than the same lane raw.
+    _sc = [spectral_centroid(_svic().crosstalk(aggressor=_slane(_l, 0), coupling=0.1).waveform()
+                             - _sv) for _l in (0.0, 12.0)]
+    check("the aggressor's OWN channel reaches the victim: a lane after 12 dB of loss couples a "
+          "lower-frequency term than the same lane raw",
+          _sc[1] < 0.8 * _sc[0],
+          f"spectral centroid of the coupled term {_sc[0]:.4f} -> {_sc[1]:.4f} of fs "
+          f"({_sc[1] / _sc[0]:.2f}x)")
+
+    # ONE factor inside the sub-chain re-rolls and nothing else moves.
+    _srole = f"{_sat}/noise/2"
+    _sa1 = _ssig.subchain(_sat, streams=_St(1).reroll(_srole, seed=11))
+    _sclean = _salone(_slane(12.0).ops[:2])
+    _sd = float(np.std(_sa1 - _sa)) / (np.sqrt(2.0) * 0.02)
+    _sres = float(np.abs(_ssig.contrast(_srole, seed=11)
+                         - (P.crosstalk(_sv, _sa1, coupling=0.1) + _sown)).max())
+    check("contrast() reaches inside: re-rolling the aggressor's noise changes the aggressor's "
+          "noise and nothing else",
+          _srole in _ssig.roles() and abs(_sd - 1.0) < 0.05 and _sres < 1e-12
+          and abs(float(np.std(_sa1 - _sclean)) / 0.02 - 1.0) < 0.05,
+          f"roles {_ssig.roles()}; the aggressor moved by {_sd:.3f}x the sqrt(2)*20 mV two "
+          f"independent draws differ by (8192 samples estimate an rms to 0.8 %), and the record equals "
+          f"victim + coupling of the NEW aggressor + its own unchanged noise to {_sres:.1e}")
+
+    _sother = (Signal(seed=4, grid=Grid(fs=_sg.fs, baud=2.5e9, n=_sg.n))
+               .carrier("pam4", n_ui=320, jitter=_sj).lossy(loss_db=3.0, loss_at_ghz=2.0))
+    _sfrom = _svic().crosstalk(aggressor={"from": _sother}, coupling=0.2)
+    _srt = Signal.from_recipe(_json.loads(_sfrom.to_json()))
+    _sknob = _slane(12.0)
+    _sknob.ops[1]["loss_db"] = 12.5
+    check("a recipe under `from` is that record bit for bit -- its own seed, its own symbol rate "
+          "-- and the nested recipe replays from JSON alone, under a digest that covers it",
+          np.array_equal(_sfrom.subchain(_sat), _sother.waveform())
+          and np.array_equal(_srt.waveform(), _sfrom.waveform())
+          and np.array_equal(Signal.from_recipe(_json.loads(_ssig.to_json())).waveform(), _sx)
+          and _svic().crosstalk(aggressor=_sknob).sha256()
+          != _svic().crosstalk(aggressor=_slane(12.0)).sha256(),
+          f"a 2.5 GBd PAM4 lane inside a 4 GBd record on one {_sg.fs / 1e9:.0f} GSa/s grid; "
+          f"0.5 dB of loss inside the sub-chain changes the record's sha256")
+
+    _srefused = []
+    for _sbad in ({"from": Signal(grid=Grid(fs=32e9, baud=4e9, n=_sg.n)).carrier("nrz", n_ui=1024)
+                   .recipe()},
+                  {"ops": [{"op": "carrier", "kind": "nrz", "n_ui": 512},
+                           {"op": "digitize", "n_out": _sg.n // 2}]},
+                  {"ops": [{"op": "carrier", "kind": "nrz", "n_ui": 512},
+                           {"op": "acquire", "profile": {"sample_rate_hz": 32e9,
+                                                         "record_length": _sg.n}}]},
+                  {"ops": [{"op": "carrier", "kind": "nrz", "n_ui": 512}, {"op": "eo"}]}):
+        _sb = Signal(seed=1, grid=_sg)
+        _sb.ops = [{"op": "carrier", "kind": "nrz", "n_ui": 512},
+                   {"op": "crosstalk", "aggressor": _sbad}]
+        try:
+            _sb.waveform()
+            _srefused.append("RENDERED")
+        except ValueError as _se:
+            _srefused.append(next((w for w in ("SAME grid", "different timebase", "COMPLEX",
+                                               "never resampled")
+                                   if w in str(_se)), "UNNAMED"))
+    check("a sub-chain at another rate, another length, another timebase or complex is REFUSED "
+          "by name -- never resampled, cut or stripped to fit",
+          _srefused == ["never resampled", "SAME grid", "different timebase", "COMPLEX"],
+          f"{_srefused}")
+
+    _sspec = dict(n_ui=512, seed=9, jitter=_sj)
+    _sleg = _svic().crosstalk(aggressor=_sspec, coupling=0.2)
+    _swant = P.crosstalk(_sv, _scar({"kind": "nrz", **_sspec}, _St(1), _sg, "xtalk1"),
+                         coupling=0.2)
+    check("the carrier-spec shorthand is untouched: same recipe, same role stream, same samples",
+          np.array_equal(_sleg.waveform(), _swant)
+          and _sleg.ops[1] == {"op": "crosstalk", "aggressor": _sspec, "coupling": 0.2}
+          and _sleg.roles() == ["jitter/0", "jitter/xtalk1"],
+          f"max |op - primitive on role 'jitter/xtalk1'| = "
+          f"{float(np.abs(_sleg.waveform() - _swant).max()):.1e}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

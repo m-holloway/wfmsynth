@@ -21,7 +21,7 @@ OP_KEYS = {
     "cascade": frozenset({"method", "node", "path"}),
     "coded": frozenset({"bits", "block", "causal", "header", "jitter", "levels", "lsb_first", "n", "n_bits", "op", "pattern", "poly", "prbs", "prbs_phase", "prbs_seed", "rd", "scheme", "seed", "symbols", "sync", "tr_frac"}),
     "crosstalk": frozenset({"aggressor", "amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "causal", "coupling", "cycles", "decay", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hz", "fn", "jitter", "kind", "level", "method", "n", "n_ui", "offset", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "rms", "seed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "td_frac", "tr_frac", "tr_s", "v_hi", "v_lo", "width_frac", "width_s"}),
-    "crosstalk_matrix": frozenset({"baud_offsets", "couplings", "echo_db", "echo_f_hp_hz", "echo_td_ps", "fext_db", "kind", "next_db", "next_td_ps", "seeds", "synchronous"}),
+    "crosstalk_matrix": frozenset({"aggressors", "baud_offsets", "couplings", "echo_db", "echo_f_hp_hz", "echo_td_ps", "fext_db", "kind", "next_db", "next_td_ps", "seeds", "synchronous"}),
     "ctle": frozenset({"dc_gain", "fp1_ghz", "fp2_ghz", "fz_ghz"}),
     "dcd": frozenset({"frac_ui", "half_width", "plateau_ui", "ps", "threshold"}),
     "de_emphasis": frozenset({"db", "spb"}),

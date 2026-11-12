@@ -45,6 +45,8 @@ def _keys_in(body: str) -> set[str]:
     for tup in re.findall(r"for k in \(([^)]*)\)\s*(?::\s*\n\s*)?if k in p", body, re.S):
         ks |= set(re.findall(r'["\']([A-Za-z_]\w*)["\']', tup))
     ks |= set(re.findall(r'["\']([A-Za-z_]\w*)["\']\s*in p\b', body))
+    # a parameter that holds a sub-chain is read by name through `subchain.signal(p, "name", ...)`
+    ks |= set(re.findall(r'SUB\.signals?\(\s*p,\s*["\']([A-Za-z_]\w*)["\']', body))
     return ks
 
 

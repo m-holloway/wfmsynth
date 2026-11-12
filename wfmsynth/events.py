@@ -72,6 +72,10 @@ class Event:
     direction: float = 0.0
     placement: str = ""
     params: dict = field(default_factory=dict)
+    # "" for an event on the record itself. For one placed inside a SUB-CHAIN this is that
+    # sub-chain's namespace (`crosstalk/2/aggressor`): the event happened to the aggressor, at
+    # this sample of the shared grid, and reached the record only through the op that holds it.
+    at: str = ""
 
     def span(self, n=None):
         w = 1 if self.width is None else max(int(self.width), 1)
@@ -94,6 +98,8 @@ class Event:
         if self.params:
             d["params"] = {k: _jsonable(v) for k, v in self.params.items()
                            if k not in ("_n_ui",)}
+        if self.at:
+            d["at"] = str(self.at)
         return d
 
 
@@ -112,9 +118,15 @@ class EventList:
     def to_dicts(self):
         return [e.to_dict() if isinstance(e, Event) else dict(e) for e in self.events]
 
+    def on_record(self):
+        """The events placed on the record itself. One placed inside a sub-chain (`Event.at`)
+        is in this list as ground truth about that sub-chain, but it did not modify these
+        samples, so a window is not labelled with it and the mask does not cover it."""
+        return [e for e in self.events if not getattr(e, "at", "")]
+
     def overlapping(self, start, stop):
         out = []
-        for e in self.events:
+        for e in self.on_record():
             lo, hi = e.span(self.n)
             if lo < stop and hi > start:
                 out.append(e)
@@ -124,7 +136,7 @@ class EventList:
         """Per-sample support (1 where any event was applied). Unknown widths count
         as a single sample — call after ``apply_events`` for the true support."""
         g = np.zeros(int(self.n))
-        for e in self.events:
+        for e in self.on_record():
             lo, hi = e.span(self.n)
             if hi > lo:
                 g[lo:hi] = 1.0

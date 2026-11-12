@@ -41,6 +41,7 @@ from scipy.signal import resample_poly
 
 from . import physics as P
 from . import opkeys as OPKEYS
+from . import subchain as SUB
 from . import instrument as INST
 from .grid import Grid
 from .streams import Streams
@@ -294,8 +295,8 @@ def _op_pass_fet(x, p, streams, grid, idx):
     for the gate DRIVE (the same nested-spec shape `open_drain`'s `second` and `crosstalk`'s
     `aggressor` already use), thresholded at `vth` to decide the boolean `gate_on`."""
     from .physics import pass_fet
-    spec = {"kind": "square", **p.get("gate", {})}
-    g = np.asarray(_carrier(spec, streams, grid, f"pass_fet_gate{idx}"), float)
+    g = SUB.signal(p, "gate", streams, grid, idx, n=len(x), default={}, carrier=lambda s: _carrier(
+        {"kind": "square", **s}, streams, grid, f"pass_fet_gate{idx}"))
     gate_on = g > float(p.get("vth", 0.0))
     return pass_fet(x, gate_on, rds_on_ohm=p.get("rds_on_ohm", 5.0),
                     r_load_ohm=p.get("r_load_ohm", 1e6), v_rail_hi=p.get("v_rail_hi"),
@@ -304,9 +305,9 @@ def _op_pass_fet(x, p, streams, grid, idx):
 
 
 def _op_modulate(x, p, streams, grid, idx):
-    """AM/ASK/OOK, FM/FSK, PM as one op -- `message` is a nested carrier spec (the same shape
-    `open_drain`'s `second` and `crosstalk`'s `aggressor` already take), so a caller reaches
-    every one of these by choosing the message's `kind`, not a new function per modulation.
+    """AM/ASK/OOK, FM/FSK, PM as one op -- `message` is a sub-chain (see `wfmsynth.subchain`)
+    or a bare carrier spec, so a caller reaches every one of these by choosing what the message
+    IS, not a new function per modulation.
 
     AM/ASK/OOK COMBINE with the upstream `x` (the already-rendered RF carrier -- build it with
     `carrier("sine", f_hz=fc, ...)` first). FM/FSK and PM GENERATE their own carrier at
@@ -316,8 +317,9 @@ def _op_modulate(x, p, streams, grid, idx):
     kind = p.get("kind", "am")
     if "message" not in p:
         raise ValueError("modulate needs message=<a carrier spec dict>")
-    spec = {"kind": "sine", **p["message"]}
-    msg = np.asarray(_carrier(spec, streams, grid, f"modulate_msg{idx}"), float)
+    msg = SUB.signal(p, "message", streams, grid, idx,
+                     n=len(x) if x is not None else _grid_n(grid, p), carrier=lambda s: _carrier(
+                         {"kind": "sine", **s}, streams, grid, f"modulate_msg{idx}"))
     if kind in ("am", "ask", "ook"):
         return P_.am_modulate(x, msg, depth=p.get("depth", 1.0),
                               suppressed=p.get("suppressed", False))
@@ -353,8 +355,9 @@ def _op_reflect(x, p, streams, grid, idx):
 
 
 def _op_crosstalk(x, p, streams, grid, idx):
-    aggr = _carrier({"kind": "nrz", **p.get("aggressor", {"n_ui": 32, "seed": 7})},
-                    streams, grid, f"xtalk{idx}")
+    aggr = SUB.signal(p, "aggressor", streams, grid, idx, n=len(x),
+                      default={"n_ui": 32, "seed": 7}, carrier=lambda s: _carrier(
+                          {"kind": "nrz", **s}, streams, grid, f"xtalk{idx}"))
     return P.crosstalk(x, aggr, coupling=p.get("coupling", 0.1),
                        kind=p.get("kind", "fext"), td_frac=p.get("td_frac", 0.05))
 
@@ -373,6 +376,15 @@ def _op_tx_ffe(x, p, streams, grid, idx):
 
 def _op_crosstalk_matrix(x, p, streams, grid, idx):
     kw = {k: p[k] for k in ("baud_offsets", "seeds", "kind", "synchronous") if k in p}
+    if "aggressors" in p:
+        made = sorted(k for k in kw if k != "kind")
+        if made:
+            raise ValueError(
+                f"crosstalk_matrix: `aggressors` gives the aggressor waveforms, and {made} "
+                f"describe the ones this op would otherwise MANUFACTURE, so nothing would read "
+                f"them. An aggressor's pattern, seed and symbol rate are set on its own "
+                f"carrier.")
+        kw["aggressors"] = SUB.signals(p, "aggressors", streams, grid, idx, n=len(x))
     return P.crosstalk_matrix(x, grid, p["couplings"], **kw)
 
 
@@ -403,8 +415,8 @@ def _multipair_lanes(p, grid, n, which, seed, role):
 def _op_hybrid_echo(x, p, streams, grid, idx):
     """Own transmit leaking into own receive. The `own` spec is a carrier spec, same shape as
     `crosstalk`'s `aggressor`, because the echo's source is a stream the recipe has to name."""
-    own = _carrier({"kind": "nrz", **p.get("own", {"n_ui": 32, "seed": 7})},
-                   streams, grid, f"echo{idx}")
+    own = SUB.signal(p, "own", streams, grid, idx, n=len(x), default={"n_ui": 32, "seed": 7},
+                     carrier=lambda s: _carrier({"kind": "nrz", **s}, streams, grid, f"echo{idx}"))
     kw = {k: p[k] for k in ("isolation_db", "td_ps", "td_samples", "f_hp_hz", "f_hp_frac")
           if k in p}
     return P.hybrid_echo(x, own, grid=grid, **kw)
@@ -462,11 +474,11 @@ def _op_open_drain(x, p, streams, grid, idx):
     v_dd = float(p.get("v_dd", 3.3))
     sink_b = None
     if p.get("second") is not None:
-        # a SECOND driver on the same net, same nested-spec shape `crosstalk`'s `aggressor`
-        # and `hybrid_echo`'s `own` already use -- a wired-AND second sink is just another
-        # composition of an existing mechanism, not a new one.
-        spec = {"kind": "nrz", **p["second"]}
-        xb = np.asarray(_carrier(spec, streams, grid, f"open_drain_second{idx}"), float)
+        # a SECOND driver on the same net, a sub-chain like `crosstalk`'s `aggressor` -- a
+        # wired-AND second sink is just another composition of an existing mechanism, not a
+        # new one.
+        xb = SUB.signal(p, "second", streams, grid, idx, n=len(xa), carrier=lambda s: _carrier(
+            {"kind": "nrz", **s}, streams, grid, f"open_drain_second{idx}"))
         mid_b = 0.5 * (np.percentile(xb, 1) + np.percentile(xb, 99))
         sink_b = xb < mid_b
     if not sink.any() and (sink_b is None or not sink_b.any()):
@@ -633,9 +645,10 @@ def _op_events(x, p, streams, grid, idx, sink=None):
     from .events import apply_events, place_events
     kw = {k: v for k, v in p.items() if k not in _EVENT_SKIP}
     if kw.get("on") == "aggressor" and isinstance(kw.get("aggressor"), dict):
-        spec = {"kind": "nrz", **kw["aggressor"]}
         kw = dict(kw)
-        kw["aggressor"] = _carrier(spec, streams, grid, f"events_aggr{idx}")
+        kw["aggressor"] = SUB.signal(p, "aggressor", streams, grid, idx, n=len(x),
+                                     carrier=lambda s: _carrier({"kind": "nrz", **s}, streams,
+                                                                grid, f"events_aggr{idx}"))
     ev = place_events(len(x), grid=grid, rng=streams.role(f"events/{idx}"), x=x, **kw)
     y, _mask, ev = apply_events(x, ev, grid=grid)
     if sink is not None:
@@ -935,25 +948,6 @@ def _op_cascade(x, p, streams, grid, idx):
     return SP.cascade_channel(x, p["path"], grid=grid, node=p.get("node", "load"), **kw)
 
 
-class _Namespaced:
-    """A `Streams` view that prefixes every role name.
-
-    A nested chain asks for the same role names as the outer one -- `jitter/0`, `noise/1` --
-    keyed by its own op index, so handing it the parent's `Streams` would give a driver's jitter
-    the parent op 0's draws. Prefixing keeps each driver's randomness independent of the others
-    and of the chain the net sits in, while still deriving from the record's single seed, so one
-    `Signal(seed=)` moves the whole record coherently and `Streams.reroll` can still name a
-    driver's factor exactly (`reroll("net/3/host/jitter/0")`).
-    """
-    __slots__ = ("_st", "_pre")
-
-    def __init__(self, st, pre):
-        self._st, self._pre = st, pre
-
-    def role(self, name):
-        return self._st.role(self._pre + str(name))
-
-
 _NO_VOLTS = object()
 
 
@@ -1010,61 +1004,32 @@ def _source_volts(volts, y, did, last_kind):
 def _driver_source(src, x, streams, grid, idx, did, n):
     """One driver's `source` spec -> its Thevenin level in VOLTS, one sample per record sample.
 
-    Three bodies, exactly one of them: `from="chain"` (the waveform arriving at this op --
-    this driver IS the chain), `ops=[...]` (its own chain, any ops, rendered on this grid), or
-    a bare carrier spec by `kind` (the idiom `crosstalk(aggressor=)` and `open_drain(second=)`
-    already use). Plus `volts`, which says what level domain the result is in.
+    Exactly one body, resolved by `wfmsynth.subchain.render` like every other parameter that
+    holds a signal: `from="chain"` (the waveform arriving at this op -- this driver IS the
+    chain), `ops=[...]` (its own chain, any ops, rendered on this grid), `from=<recipe>`
+    (another record) or a bare carrier spec by `kind`. Plus `volts`, which says what level
+    domain the result is in.
     """
+    who = f"net: driver {did!r}'s `source`"
     if not isinstance(src, dict):
-        raise ValueError(f"net: driver {did!r}'s `source` is {src!r}; it is a spec dict -- "
-                         f"{{'from': 'chain', ...}}, {{'ops': [...], ...}} or a carrier spec "
-                         f"{{'kind': 'cmos', ...}} -- plus `volts`. An array does not belong in "
-                         f"a recipe; call `wfmsynth.net.solve(sources=...)` for one.")
+        raise ValueError(f"{who} is {src!r}; it is a spec dict -- {{'from': 'chain', ...}}, "
+                         f"{{'ops': [...], ...}} or a carrier spec {{'kind': 'cmos', ...}} -- "
+                         f"plus `volts`. An array does not belong in a recipe; call "
+                         f"`wfmsynth.net.solve(sources=...)` for one.")
     spec = dict(src)
     volts = spec.pop("volts", _NO_VOLTS)
-    frm, ops = spec.pop("from", None), spec.pop("ops", None)
-    bodies = [nm for nm, v in (("from", frm), ("ops", ops), ("kind", spec.get("kind")))
-              if v is not None]
-    if len(bodies) != 1:
+    if not any(spec.get(k) is not None for k in ("from", "ops", "kind")):
         raise ValueError(
-            f"net: driver {did!r}'s `source` needs exactly one of 'from' (the chain this op is "
-            f"in), 'ops' (its own chain) or 'kind' (one carrier); it has "
-            f"{bodies if bodies else 'none of them'}.")
-    last_kind = None
-    if frm is not None:
-        if frm != "chain":
-            raise ValueError(f"net: driver {did!r}'s source has from={frm!r}; the only value is "
-                             f"'chain', meaning the waveform arriving at this op.")
-        if x is None:
-            raise ValueError(f"net: driver {did!r}'s source is from='chain', but this net is the "
-                             f"first op so no waveform has arrived. Put a carrier before it, or "
-                             f"give the driver its own 'ops'/'kind'.")
-        y = np.asarray(x, float)
-    elif ops is not None:
-        sub = Signal(grid=grid)
-        sub.ops = [dict(o) for o in ops]
-        if not sub.ops:
-            raise ValueError(f"net: driver {did!r}'s source has an empty `ops`, so it renders "
-                             f"nothing. A driver that holds one level is `volts=` in its "
-                             f"description and needs no source.")
-        for o in sub.ops:
-            if o.get("op") not in _EXEC:
-                raise ValueError(f"net: driver {did!r}'s source chain has op {o.get('op')!r}, "
-                                 f"which does not exist. Known ops: {sorted(_EXEC)}")
-            OPKEYS.check(o["op"], o)         # the same gate the builders go through
-        if sub.ops and sub.ops[-1]["op"] == "carrier":
-            last_kind = sub.ops[-1].get("kind")
-        y = np.asarray(sub._run(_Namespaced(streams, f"net/{idx}/{did}/")), float)
-    else:
-        last_kind = spec.get("kind")
-        y = np.asarray(_carrier(spec, streams, grid, f"net/{idx}/{did}/carrier"), float)
-    if y.shape != (n,):
-        raise ValueError(
-            f"net: driver {did!r}'s source rendered {y.shape[0] if y.ndim == 1 else y.shape} "
-            f"samples but this net is solved over {n}. A driver's level is a waveform on the "
-            f"SAME grid as the net -- give it `n` or a grid that agrees, and keep the ops that "
-            f"resample or truncate a record (`acquire`, `digitize(n_out=)`, `sample_clock`) "
-            f"outside it.")
+            f"{who} needs exactly one of 'from' (the chain this op is in, or a recipe), 'ops' "
+            f"(its own chain) or 'kind' (one carrier); it has none of them.")
+    ops = spec.get("ops")
+    last_kind = spec.get("kind")
+    if ops and ops[-1].get("op") == "carrier":
+        last_kind = ops[-1].get("kind")
+    y = SUB.same_grid(
+        SUB.render(spec, streams, grid, f"net/{idx}/{did}", n, who, chain=x,
+                   carrier=lambda s: _carrier(s, streams, grid, f"net/{idx}/{did}/carrier")),
+        n, who)
     return _source_volts(volts, y, did, last_kind)
 
 
@@ -1483,6 +1448,7 @@ def _lead_check_ops(ops):
     nonlinear or stochastic, so it does not) or `_LEAD_REJECT` (a lead-in would change what it
     means). A new op therefore has to be reasoned about before it can be rendered with a lead-in,
     rather than defaulting into the safe-looking pile."""
+    SUB.refuse_lead_in(ops)
     for o in ops:
         if (o["op"] not in _LEAD_LTI and o["op"] not in _LEAD_SKIP
                 and o["op"] not in _LEAD_REJECT and o["op"] not in _LEAD_ANALYTIC):
@@ -1646,6 +1612,7 @@ class Signal:
         shared and the rule is: `op` is reserved, anything beginning with an underscore is
         annotation, and everything else is a parameter this op has to read.
         """
+        params = SUB.flatten(op, params, self)
         OPKEYS.check(op, params)
         self.ops.append({"op": op, **params}); return self
 
@@ -1975,11 +1942,12 @@ class Signal:
         return self._add("probe", **params)
 
     def modulate(self, **params):
-        """AM/ASK/OOK, FM/FSK, or PM -- one op, `kind` and the message's own carrier `kind`
-        picking which. `message` is a nested carrier spec, the same shape `open_drain`'s
-        `second` and `crosstalk`'s `aggressor` already take (e.g.
-        ``message=dict(kind="sine", f_hz=1e3)`` for analog, or a `cmos`/digital carrier for
-        ASK/OOK/FSK's two-level message).
+        """AM/ASK/OOK, FM/FSK, or PM -- one op, `kind` and what the message is picking which.
+        `message` is a bare carrier spec (``message=dict(kind="sine", f_hz=1e3)`` for analog,
+        or a `cmos`/digital carrier for ASK/OOK/FSK's two-level message) or a SUB-CHAIN, when
+        the message has a chain of its own -- band-limited noise, a filtered data stream:
+        ``message=Signal().carrier("noise", rms=0.3).scope(bw_hz=2e4)``. A sub-chain is used at
+        the level it renders (see `crosstalk` for the form).
 
         params: kind ('am' default, or 'ask'/'ook' -- the same physics, a two-level message;
         'fm'/'fsk'; 'pm'), message (required), depth/suppressed (AM), fc_hz/dev_hz (FM/FSK,
@@ -2099,9 +2067,9 @@ class Signal:
         stops reaching the input-high threshold inside a bit, which is how these buses actually
         fail and which a symmetric slow-edge model cannot produce.
 
-        `second=` adds a SECOND driver sharing this net -- a nested carrier spec, the same shape
-        `crosstalk`'s `aggressor` and `hybrid_echo`'s `own` already take (e.g.
-        ``second=dict(kind="nrz", n_ui=32, seed=9)``), with its own on-resistance `r_sink_b_ohm`
+        `second=` adds a SECOND driver sharing this net -- a bare carrier spec (e.g.
+        ``second=dict(kind="nrz", n_ui=32, seed=9)``) or a sub-chain (a `Signal`; see
+        `crosstalk` for the form), with its own on-resistance `r_sink_b_ohm`
         (defaults to `r_sink_ohm`). This resolves the wired-AND at the ANALOG level: when both
         devices sink together the target is the divider against their PARALLEL on-resistance, an
         analog mid-level dominated by whichever sink is stronger -- not the logic-level OR
@@ -2191,8 +2159,9 @@ class Signal:
                     "source": {"kind": "nrz", "n_ui": 64, "seed": 5, "volts": [0.0, 1.8]}}])
 
         A source body is exactly one of `from="chain"` (the waveform arriving at this op, so
-        this driver IS the chain), `ops=` (its own op list, or a `Signal` to take it from), or a
-        carrier spec by `kind=` -- the idiom `crosstalk(aggressor=)` already uses. `volts` is
+        this driver IS the chain), `ops=` (its own op list, or a `Signal` to take it from),
+        `from=<recipe>` (another record, with its own seed) or a carrier spec by `kind=` -- the
+        sub-chain form every parameter that holds a signal takes (see `crosstalk`). `volts` is
         REQUIRED and says the level domain: `True` for a chain already in volts, or `[lo, hi]`
         to map the +/-1 carrier convention onto those two volts. Without it a normalised carrier
         would make a driver a thousand times too weak and the solve would be perfectly correct
@@ -2242,17 +2211,45 @@ class Signal:
         return self._add("resonant_reflect", **params)
 
     def crosstalk(self, **params):
-        """Crosstalk. params: coupling, kind('fext'|'next'), td_frac, aggressor=dict(carrier spec)."""
+        """Crosstalk from one aggressor. params: coupling, kind('fext'|'next'), td_frac,
+        aggressor.
+
+        `aggressor` is a bare carrier spec (``aggressor=dict(n_ui=512, seed=9)``, an `nrz` unless
+        it names a `kind`) -- or a SUB-CHAIN, when the aggressor is a signal with a chain of
+        its own, "the neighbouring lane after its own channel":
+
+            lane = (Signal(grid=g).carrier("nrz", n_ui=512, seed=9)
+                    .lossy(loss_db=6.0, loss_at_ghz=8.0))
+            sig = Signal(seed=1, grid=g).carrier("nrz", n_ui=512).crosstalk(aggressor=lane)
+
+        Every parameter that takes a signal takes the same three things (`wfmsynth.subchain`):
+
+          a Signal            its chain becomes PART OF THIS RECORD -- rendered on this grid and
+                              drawing from this record's seed, so one seed moves everything.
+                              Stored in the recipe as ``{"ops": [...]}``.
+          {"ops": [...]}      the same, written as data.
+          {"from": recipe}    ANOTHER RECORD as recorded, with its own seed (a `Signal.recipe()`,
+                              a `Signal`, or the path of a saved recipe, which is read and
+                              embedded so the record still replays with no extra files).
+
+        Nothing is resampled or cut to fit: a sub-chain that does not render this record's
+        length at this record's sample rate is refused by name. Its randomness is namespaced by
+        the parameter holding it -- ``crosstalk/1/aggressor/jitter/0`` -- which `roles()` lists
+        and `contrast()` re-rolls; `summary()` prints the tree and `subchain(namespace)` returns
+        the sub-chain's waveform exactly as it was used."""
         return self._add("crosstalk", **params)
 
     def crosstalk_matrix(self, **params):
         """Multiple aggressors from a coupling vector, ASYNCHRONOUS by default. params:
-        couplings=[...], kind, baud_offsets, seeds, synchronous.
+        couplings=[...], kind, baud_offsets, seeds, synchronous, aggressors.
 
-        It MANUFACTURES its aggressors -- one `nrz` per coupling, at a seed and a baud offset --
-        and has NO parameter that takes a waveform. Right when the neighbours are unknown
-        traffic; wrong when they are the other lanes of a known link, which is what `multipair`
-        is for."""
+        By default it MANUFACTURES its aggressors -- one `nrz` per coupling, at a seed and a
+        baud offset -- which is right when the neighbours are unknown traffic. When they are
+        known, give them: `aggressors=[...]` is one sub-chain per coupling (a `Signal`,
+        ``{"ops": [...]}`` or ``{"from": recipe}``; see `crosstalk`), each coupled exactly as a
+        manufactured one would be. Their timing is then their own, so `baud_offsets`, `seeds`
+        and `synchronous` are refused alongside it. The four lanes of one transmitter with a
+        cabling standard's coupling budget are `multipair`."""
         return self._add("crosstalk_matrix", **params)
 
     def hybrid_echo(self, **params):
@@ -2433,6 +2430,8 @@ class Signal:
         win = None if plan is None else plan.window
         x = None
         sink = [] if collect_events else None
+        if collect_events:
+            st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
         for i, op in enumerate(ops):
             if collect_events and op["op"] == "events":
                 x = _op_events(x, op, st, grid, i, sink=sink)
@@ -2528,7 +2527,7 @@ class Signal:
         for i, op in enumerate(self.ops):
             if op["op"] == "carrier" and op.get("jitter"):
                 out.append(f"jitter/{i}")
-            elif op["op"] == "crosstalk":
+            elif op["op"] == "crosstalk" and not SUB.is_subchain(op.get("aggressor")):
                 out.append(f"jitter/xtalk{i}")
             elif op["op"] == "digitize":
                 if "snr_db" in op or "noise_rms" in op:
@@ -2539,7 +2538,34 @@ class Signal:
                 out.append(f"events/{i}")
             elif op["op"] == "probe" and op.get("noise_rms"):
                 out.append(f"probe/{i}")
-        return out
+        return out + SUB.roles(self)
+
+    def summary(self):
+        """The chain as text, one op per line with its parameters -- and each SUB-CHAIN indented
+        under the parameter that holds it, headed by its namespace:
+
+            Signal  seed=1  fs=6.4e+10 Hz, baud=1.6e+10, n=4096
+              0  carrier    kind='nrz', n_ui=1024
+              1  crosstalk  coupling=0.1
+                   aggressor  [crosstalk/1/aggressor]
+                     0  carrier  kind='nrz', n_ui=1024, seed=9
+                     1  lossy    loss_db=6.0, loss_at_ghz=8.0
+
+        The namespace is the prefix of that sub-chain's role names in `roles()` and the argument
+        `subchain()` takes. A long value prints as its size; the recipe has the values."""
+        return SUB.tree(self)
+
+    def subchains(self):
+        """``{namespace: Signal}`` for every sub-chain this signal holds, nested ones included."""
+        return SUB.children(self)
+
+    def subchain(self, path, streams=None):
+        """The waveform of the sub-chain at namespace `path` EXACTLY as it is rendered inside
+        this record -- the aggressor that was coupled, the message that modulated -- so the
+        second signal is ground truth too rather than something to re-derive. Pass the same
+        `streams` as `waveform()` to follow a re-roll. For a `net` driver (`net/<idx>/<id>`)
+        this is its chain's own output, before the driver's `volts` maps it."""
+        return SUB.render_at(self, path, streams)
 
     def contrast(self, *factors, seed=None):
         """A sibling waveform with ONLY the named factors re-rolled and every other

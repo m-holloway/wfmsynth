@@ -40,6 +40,7 @@ DEMOS = [
     "quickstart.py",
     "realistic_scenario.py",
     "sim_to_real.py",
+    "sub_chains.py",
     "touchstone_channel.py",
     "two_rate_acquisition.py",
 ]

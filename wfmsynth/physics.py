@@ -783,8 +783,8 @@ def db_to_coupling(loss_db):
 def crosstalk_sum(x, aggressors, couplings, kinds="fext", td_samples=0, grid=None, td_ps=None):
     """Sum the coupling from EXPLICIT aggressor streams into one victim.
 
-    `crosstalk_matrix` MANUFACTURES its aggressors (one `nrz` per coupling, at a seed and a baud
-    offset) and has no parameter that takes a waveform. That is right when the neighbours are
+    `crosstalk_matrix` MANUFACTURES its aggressors by default (one `nrz` per coupling, at a seed
+    and a baud offset), with the delay a fraction of the record. That is right when the neighbours are
     unknown traffic, and wrong when they are known: on a four-pair link the three near-end
     aggressors are the OTHER THREE LANES OF THE SAME TRANSMITTER, carrying the same line code and
     correlated with the victim's own transmit by construction. This op takes those streams.
@@ -1032,7 +1032,7 @@ def common_mode(p, n):
 
 
 def crosstalk_matrix(x, grid, couplings, baud_offsets=None, seeds=None, kind="fext",
-                     synchronous=False):
+                     synchronous=False, aggressors=None):
     """Add crosstalk from MULTIPLE aggressors weighted by a coupling vector (one entry per
     aggressor — a column of the coupling matrix for this victim). Aggressors are ASYNCHRONOUS
     by default: each runs at a slightly offset baud so its timing is not locked to the victim
@@ -1040,17 +1040,29 @@ def crosstalk_matrix(x, grid, couplings, baud_offsets=None, seeds=None, kind="fe
     clock, which a receiver's CDR partly tracks out and which then looks like ISI rather than
     crosstalk, so a synchronous default quietly makes crosstalk easier to detect than it is.
     Pass ``synchronous=True`` (or explicit ``baud_offsets``) for the locked case. Returns the
-    victim with every aggressor's coupling summed in."""
+    victim with every aggressor's coupling summed in.
+
+    ``aggressors`` gives the aggressor waveforms instead of manufacturing them: one array as
+    long as `x` per coupling, coupled exactly as a manufactured one would be. Their timing is
+    then their own, so `baud_offsets`, `seeds` and `synchronous` do not apply."""
     x = np.asarray(x, float)
     n = len(x)
     m = len(couplings)
+    kinds = kind if isinstance(kind, (list, tuple)) else [kind] * m
+    if aggressors is not None:
+        if len(aggressors) != m:
+            raise ValueError(f"crosstalk_matrix: {len(aggressors)} aggressors for {m} "
+                             f"couplings; it takes one coupling per aggressor")
+        y = x.copy()
+        for c, aggr, kd in zip(couplings, aggressors, kinds):
+            y = y + (crosstalk(x, aggr, coupling=c, kind=kd) - x)
+        return y
     if grid is None or grid.baud is None:
         raise ValueError("crosstalk_matrix needs grid=Grid(fs, baud, ...)")
     if baud_offsets is None:
         baud_offsets = [0.0] * m if synchronous else [0.017 * (i + 1) for i in range(m)]
     if seeds is None:
         seeds = [7 + i for i in range(m)]
-    kinds = kind if isinstance(kind, (list, tuple)) else [kind] * m
     y = x.copy()
     for c, off, sd, kd in zip(couplings, baud_offsets, seeds, kinds):
         n_ui = int(round(n * grid.baud * (1.0 + off) / grid.fs))

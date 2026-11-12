@@ -79,25 +79,29 @@ def _corr(a, b):
 # ==================================================================================
 # 1. THE AUDIT: what `crosstalk_matrix` actually does
 # ==================================================================================
-def test_crosstalk_matrix_generates_its_own_aggressors_and_cannot_be_given_streams():
+def test_crosstalk_matrix_generates_its_own_aggressors_unless_it_is_given_them():
     """The contract the caller needs stated plainly, as an executable fact.
 
-    `crosstalk_matrix(x, grid, couplings, baud_offsets, seeds, kind, synchronous)` has NO
-    parameter that takes a waveform. It MANUFACTURES one aggressor per coupling from
-    `physics.nrz` at a seed and a baud offset. Two consequences:
+    By default `crosstalk_matrix(x, grid, couplings, baud_offsets, seeds, kind, synchronous)`
+    MANUFACTURES one aggressor per coupling from `physics.nrz` at a seed and a baud offset. Two
+    consequences:
 
       * the aggressor content is the op's choice, not the caller's -- which is why moving
         `seeds` alone moves the output;
       * every aggressor is NRZ, whatever the victim carries. On a 4D-PAM5 link that is the
         wrong alphabet, the wrong baud and the wrong spectrum.
 
-    It DOES take four (it takes len(couplings)), so the count was never the problem.
+    It DOES take four (it takes len(couplings)), so the count was never the problem. The content
+    was, and since GitHub #75 `aggressors=` supplies it: the waveforms themselves, coupled
+    exactly as a manufactured one is (`tests/test_subchain.py` covers the op).
     """
-    import inspect
-    params = set(inspect.signature(P.crosstalk_matrix).parameters)
-    assert "aggressor" not in params and "aggressors" not in params, (
-        f"crosstalk_matrix's signature is {sorted(params)}; if it grew a stream parameter "
-        f"this test is the thing to update")
+    x = P.nrz(n_ui=N_UI, n=GRID.n, seed=1, causal=True)
+    given = [P.nrz(n_ui=N_UI, n=GRID.n, seed=s, causal=True) for s in (11, 12)]
+    y = P.crosstalk_matrix(x, None, [0.05, 0.04], aggressors=given)
+    assert np.array_equal(y, x + (P.crosstalk(x, given[0], coupling=0.05) - x)
+                          + (P.crosstalk(x, given[1], coupling=0.04) - x))
+    with pytest.raises(ValueError, match="1 aggressors for 2 couplings"):
+        P.crosstalk_matrix(x, None, [0.05, 0.04], aggressors=given[:1])
 
     x = P.nrz(n_ui=N_UI, n=GRID.n, seed=1, causal=True)
     four = [0.05, 0.04, 0.03, 0.02]
