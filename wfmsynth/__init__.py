@@ -25,6 +25,9 @@ Modules / public API:
   patterns      a NAME -> symbol-generator registry: register/resolve/describe/replay, a
                 general arbitrary-polynomial LFSR and a block-repeat generator. Mechanisms live
                 here; WHICH pattern a standard names is the caller's to register.
+  stages        the two GENERAL stages behind Signal.law() and Signal.filter() -- a named
+                transfer law (comparator, rectifier, dead zone, ...) and a stated linear
+                filter (butter, cheby1, rrc, zpk, ...) for a shape that has no op of its own
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 
 A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM
@@ -65,7 +68,7 @@ __version__ = _read_version()
 
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
-               acquire, patterns, quinary, hdf5, capture, net, scenario)
+               acquire, patterns, quinary, hdf5, capture, net, scenario, stages)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -122,6 +125,7 @@ from .bus import open_drain, combine_drivers, uart_frame, uart_decode
 # `scenario.schedule` is NOT re-exported at package level: `ws.schedule` reads as a verb
 # with no object, and the word is already taken by the net op's own `schedule=`.
 from .scenario import Hold, Agent, merge_holds, hold_windows
+from .stages import LAW_KINDS, FILTER_KINDS
 from .acquire import AcquisitionProfile, acquire_record, record_decimation
 
 __all__ = [
@@ -133,7 +137,7 @@ __all__ = [
     # `resample` holds the interpolation kernel `physics` and `instrument` share. All three
     # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
     # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
-    "capture", "hdf5", "resample", "net", "scenario",
+    "capture", "hdf5", "resample", "net", "scenario", "stages", "LAW_KINDS", "FILTER_KINDS",
     "Hold", "Agent", "merge_holds", "hold_windows",
     "AcquisitionProfile", "acquire_record", "record_decimation",
     "open_drain", "combine_drivers", "uart_frame", "uart_decode",

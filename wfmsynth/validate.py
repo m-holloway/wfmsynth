@@ -2549,6 +2549,290 @@ with warnings.catch_warnings():
           f"max |op - primitive on role 'jitter/xtalk1'| = "
           f"{float(np.abs(_sleg.waveform() - _swant).max()):.1e}")
 
+# ---------------------------------------------------------------------------------------------
+# #80: TWO GENERAL STAGES. `law` is a named transfer law and `filter` a stated linear filter, for
+# a shape that has no op of its own. Each law is checked against its analytic curve by a property
+# of a SINE through it (a harmonic, a mean, a duty, a noise floor) rather than by re-evaluating
+# the formula it was written with, and each filter by its magnitude MEASURED on an impulse sent
+# down a chain, against the design's closed form at the bilinear transform's own frequency map.
+from scipy import special as _zsp
+from scipy.optimize import brentq as _zbrentq
+from wfmsynth import stages as _ZS
+
+_zfs, _zn = 1e9, 1 << 14
+_zg = Grid(fs=_zfs, n=_zn)
+_zcyc = 37                                        # whole cycles in the record: bin 37, no leakage
+_zf0 = _zcyc * _zfs / _zn
+
+
+def _zsine(amp, **law):
+    s = Signal(seed=1, grid=_zg).carrier("sine", cycles=_zcyc, amp=amp)
+    return (s.law(**law) if law else s).waveform()
+
+
+def _zharm(y, k):
+    return float(2.0 * np.abs(np.fft.rfft(y)[k * _zcyc]) / _zn)
+
+
+_zA = 0.05
+_zy = _zsine(_zA, kind="tanh", gain=3.0, sat=0.8)
+_zwant = (3.0 * _zA) ** 3 / (12.0 * 0.8 ** 2)
+check("law tanh: the small-signal gain is `gain` and the first distortion product is the cubic "
+      "term's, (gain A)^3 / (12 sat^2)",
+      abs(_zharm(_zy, 1) / (3.0 * _zA) - 1.0) < 0.01 and abs(_zharm(_zy, 3) / _zwant - 1.0) < 0.02
+      and abs(_zsine(50.0, kind="tanh", gain=3.0, sat=0.8)).max() <= 0.8,
+      f"fundamental {_zharm(_zy, 1) / _zA:.4f}x against gain 3 (compressed "
+      f"{(1 - _zharm(_zy, 1) / (3 * _zA)) * 100:.2f} %), HD3 {_zharm(_zy, 3) * 1e6:.2f} uV "
+      f"against {_zwant * 1e6:.2f} uV, and a 50x overdrive stays inside +/-0.8")
+
+_zy = _zsine(0.5, kind="poly", coeffs=[0.0, 1.0, 0.2, -0.4])
+check("law poly: 0.2 x^2 - 0.4 x^3 on a sine makes exactly the second and third harmonics the "
+      "identities give, c2 A^2 / 2 and c3 A^3 / 4",
+      abs(_zharm(_zy, 2) - 0.2 * 0.25 / 2) < 1e-12 and abs(_zharm(_zy, 3) - 0.4 * 0.125 / 4) < 1e-12
+      and _zharm(_zy, 4) < 1e-12,
+      f"HD2 {_zharm(_zy, 2):.6f} (0.025000), HD3 {_zharm(_zy, 3):.6f} (0.012500), "
+      f"HD4 {_zharm(_zy, 4):.1e}")
+
+_zy = _zsine(1.0, kind="limiter", lo=-0.3, hi=0.6)
+_zwant = (0.5 - np.arcsin(0.6) / np.pi, 0.5 - np.arcsin(0.3) / np.pi)
+_zgot = (float(np.mean(_zy == 0.6)), float(np.mean(_zy == -0.3)))
+check("law limiter: a sine spends the arcsine's share of its time on each rail, and is untouched "
+      "between them",
+      abs(_zgot[0] - _zwant[0]) < 2e-3 and abs(_zgot[1] - _zwant[1]) < 2e-3
+      and np.array_equal(_zy[(_zy > -0.3) & (_zy < 0.6)],
+                         _zsine(1.0)[(_zy > -0.3) & (_zy < 0.6)]),
+      f"{_zgot[0] * 100:.2f} % at +0.6 (analytic {_zwant[0] * 100:.2f} %), "
+      f"{_zgot[1] * 100:.2f} % at -0.3 ({_zwant[1] * 100:.2f} %)")
+
+_zy = _zsine(1.0, kind="deadzone", width=0.5)
+_zwant = 2.0 * np.arcsin(0.25) / np.pi
+check("law deadzone: the output is zero for the arcsine's share of a cycle and the peak is "
+      "moved in by half the width",
+      abs(float(np.mean(_zy == 0.0)) - _zwant) < 2e-3 and abs(_zy.max() - 0.75) < 1e-6
+      and abs(_zy.min() + 0.75) < 1e-6,
+      f"{np.mean(_zy == 0.0) * 100:.2f} % of the record at zero (analytic {_zwant * 100:.2f} %), "
+      f"peaks {_zy.min():+.4f} / {_zy.max():+.4f}")
+
+_zh, _zf = _zsine(1.0, kind="rectify", mode="half"), _zsine(1.0, kind="rectify", mode="full")
+check("law rectify: the mean of a rectified sine is A/pi (half) and 2A/pi (full), and a "
+      "full-wave rectifier doubles the frequency",
+      abs(_zh.mean() - 1 / np.pi) < 1e-6 and abs(_zf.mean() - 2 / np.pi) < 1e-6
+      and _zharm(_zf, 1) < 1e-9 and abs(_zharm(_zf, 2) - 4 / (3 * np.pi)) < 1e-6,
+      f"means {_zh.mean():.6f} (0.318310) and {_zf.mean():.6f} (0.636620); full-wave fundamental "
+      f"{_zharm(_zf, 1):.1e}, second harmonic {_zharm(_zf, 2):.6f} (4/3pi = 0.424413)")
+
+_zb = 10
+_zstep = 2.0 / 2 ** _zb
+_zx = _zsine(1.0 - _zstep)
+_zy = _zsine(1.0 - _zstep, kind="quantize", bits=_zb, lo=-1.0, hi=1.0)
+_zsqnr = 10 * np.log10(np.mean(_zx ** 2) / np.mean((_zy - _zx) ** 2))
+_zover = _zsine(3.0, kind="quantize", bits=_zb, lo=-1.0, hi=1.0)
+check("law quantize: a full-scale sine comes out 6.02 N + 1.76 dB above its own quantisation "
+      "error, on 2^N codes, and an overdrive SATURATES at the end codes",
+      abs(_zsqnr - (6.02 * _zb + 1.76)) < 0.3
+      and len(np.unique(_zover)) == 2 ** _zb
+      and _zover.min() == -1.0 and _zover.max() == 1.0 - _zstep,
+      f"SQNR {_zsqnr:.2f} dB at {_zb} bits (ideal {6.02 * _zb + 1.76:.2f}); a 3x overdrive "
+      f"uses {len(np.unique(_zover))} codes from {_zover.min():+.4f} to {_zover.max():+.6f}")
+
+_zy = _zsine(2.0, kind="diode", r_load_ohm=1e3)
+_zx = _zsine(2.0)
+_zfw = _zy > 1e-6
+_zres = float(np.abs(_zy[_zfw] + 0.025852 * np.log(_zy[_zfw] / (1e3 * 1e-12) + 1.0)
+                     - _zx[_zfw]).max())
+_zbig = _ZS.apply_law(np.array([5.0, 50.0, 500.0]), "diode", r_load_ohm=1e3)
+_zbres = float(np.abs(_zbig + 0.025852 * np.log(_zbig / 1e-9 + 1.0)
+                      - np.array([5.0, 50.0, 500.0])).max())
+check("law diode: the output satisfies the circuit it claims to be -- v_in = v_diode + v_load "
+      "with the Shockley current in the load -- and blocks in reverse",
+      _zres < 1e-12 and _zbres < 1e-10 and abs(_zy.min() + 1e3 * 1e-12) < 1e-15,
+      f"Kirchhoff residual {_zres:.1e} V over the forward half of a 2 V sine and {_zbres:.1e} V "
+      f"at 5 / 50 / 500 V; peak {_zy.max():.4f} V (a {2.0 - _zy.max():.3f} V drop at "
+      f"{_zy.max():.2f} mA), reverse {_zy.min():.1e} V = -R * I_sat")
+
+# THE COMPARATOR. It is the bridge from an analog signal to a digital one, so what it must get
+# right is the COUNT and the TIME of its transitions, against a signal whose crossings are known.
+_zthr, _zhys, _zrms = 0.2, 0.3, 0.02
+_zclean = Signal(seed=5, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0)
+_znoisy = (Signal(seed=5, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0)
+           .rx_noise(rms=_zrms))
+_zpeak = float(np.abs(_znoisy.waveform() - _zclean.waveform()).max())
+_zwith = _znoisy.law("comparator", threshold=_zthr, hysteresis=_zhys).event_list()
+_znone = (Signal(seed=5, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0).rx_noise(rms=_zrms)
+          .law("comparator", threshold=_zthr).event_list())
+check("law comparator: with hysteresis wider than the noise there is EXACTLY one transition per "
+      "crossing, and without it the same record chatters",
+      _zhys > 2 * _zpeak and len(_zwith) == 2 * _zcyc and len(_znone) > 2 * _zcyc
+      and all(a.direction != b.direction for a, b in zip(_zwith.events, _zwith.events[1:])),
+      f"{len(_zwith)} transitions for {2 * _zcyc} crossings at {_zhys:.2f} of hysteresis against "
+      f"{2 * _zpeak:.3f} peak-to-peak of noise; {len(_znone)} with none")
+_zev = _zclean.law("comparator", threshold=_zthr, hysteresis=_zhys).event_list().events
+_zw = 2 * np.pi * _zf0
+_zwant = np.array([((np.arcsin((_zthr + 0.5 * _zhys * e.direction)) if e.direction > 0
+                     else np.pi - np.arcsin(_zthr - 0.5 * _zhys)) + 2 * np.pi * (i // 2)) / _zw
+                   for i, e in enumerate(_zev)])
+_zterr = float(np.abs(np.array([e.t_s for e in _zev]) - _zwant).max())
+_zbound = (_zw / _zfs) ** 2 / 8.0 / (_zw * np.sqrt(1 - 0.35 ** 2))     # chord error / slope
+check("  ... and each transition's time is the INPUT's crossing of the trip level, to the error "
+      "of a straight line between two samples and not to a sample",
+      len(_zev) == 2 * _zcyc and _zterr < _zbound,
+      f"worst |t_event - arcsin| = {_zterr * 1e12:.3f} ps against a chord bound of "
+      f"{_zbound * 1e12:.3f} ps, on a {1e12 / _zfs:.0f} ps grid")
+
+# THE FILTERS. One impulse down a chain, and the ratio of the two spectra.
+_zimp = np.zeros(_zn)
+_zimp[_zn // 8] = 1.0
+_zfreq = np.fft.rfftfreq(_zn, 1 / _zfs)
+
+
+def _zmeas(**flt):
+    y = Signal(seed=1, grid=_zg).capture(values=_zimp, fs_hz=_zfs).filter(**flt).waveform()
+    return np.abs(np.fft.rfft(y) / np.fft.rfft(_zimp))
+
+
+_zfc = 60e6
+_zr = np.tan(np.pi * _zfreq[:-1] / _zfs) / np.tan(np.pi * _zfc / _zfs)   # the bilinear map
+_zjr = 1j * _zr
+_zth4 = lambda s: s ** 4 + 10 * s ** 3 + 45 * s ** 2 + 105 * s + 105     # noqa: E731
+_zk = _zbrentq(lambda k: abs(105 / _zth4(1j * k)) - np.sqrt(0.5), 1.0, 3.0)
+_zeps2 = 10 ** (1.0 / 10) - 1
+_zez, _zep, _zek = sp.ellipap(5, 0.5, 60.0)
+_zclosed = {
+    "butter": (dict(order=5), 1 / np.sqrt(1 + _zr ** 10)),
+    "bessel": (dict(order=4), np.abs(105 / _zth4(_zjr * _zk))),
+    "cheby1": (dict(order=5, ripple_db=1.0),
+               1 / np.sqrt(1 + _zeps2 * _zsp.eval_chebyt(5, _zr) ** 2)),
+    "elliptic": (dict(order=5, ripple_db=0.5, stop_db=60.0),
+                 np.abs(sp.freqs_zpk(_zez, _zep, _zek, _zr)[1])),
+}
+for _zkind, (_zkw, _zwant) in _zclosed.items():
+    _zgot = _zmeas(kind=_zkind, f_hz=_zfc, **_zkw)[:-1]
+    _zerr = float(np.abs(_zgot - _zwant).max())
+    check(f"filter {_zkind}: the magnitude measured on an impulse through the chain is the "
+          f"design's closed form, at every frequency on the grid",
+          _zerr < 1e-9,
+          f"max ||H| - closed form| = {_zerr:.1e} over {len(_zwant)} bins; "
+          f"{20 * np.log10(_zgot[np.argmin(abs(_zfreq[:-1] - _zfc))]):.3f} dB at the "
+          f"{_zfc / 1e6:.0f} MHz corner")
+_zdb = 20 * np.log10(_zmeas(kind="elliptic", f_hz=_zfc, order=5, ripple_db=0.5, stop_db=60.0))
+_zstop = int(np.argmax(_zdb <= -60.0))            # where the stopband begins
+check("  ... and the elliptic design is equiripple where it says: the passband dips to exactly "
+      "-ripple_db and the stopband comes back up to exactly -stop_db",
+      abs(_zdb[_zfreq <= _zfc].min() + 0.5) < 1e-3 and abs(_zdb[_zstop:].max() + 60.0) < 1e-3,
+      f"passband minimum {_zdb[_zfreq <= _zfc].min():.4f} dB; stopband from "
+      f"{_zfreq[_zstop] / 1e6:.1f} MHz, maximum {_zdb[_zstop:].max():.4f} dB")
+for _zbt, _zfh, _zwant in (
+        ("high", _zfc, np.sqrt(_zr ** 6 / (1 + _zr ** 6))),
+        ("bandpass", [40e6, 90e6], None), ("bandstop", [40e6, 90e6], None)):
+    _zgot = _zmeas(kind="butter", f_hz=_zfh, order=3, btype=_zbt)
+    if _zwant is None:
+        _zedge = [float(_zgot[np.argmin(abs(_zfreq - f))]) for f in (40e6, 90e6)]
+        _zmid = float(_zgot[np.argmin(abs(_zfreq - 60e6))])
+        check(f"filter butter, btype={_zbt}: both stated edges are the -3 dB points and the band "
+              f"between them is {'passed' if _zbt == 'bandpass' else 'removed'}",
+              all(abs(20 * np.log10(e) + 3.0103) < 0.05 for e in _zedge)
+              and (_zmid > 0.999 if _zbt == "bandpass" else _zmid < 1e-3),
+              f"{20 * np.log10(_zedge[0]):.3f} / {20 * np.log10(_zedge[1]):.3f} dB at 40 / 90 "
+              f"MHz, {20 * np.log10(_zmid):.2f} dB at 60 MHz")
+    else:
+        _zerr = float(np.abs(_zgot[:-1] - _zwant).max())
+        check(f"filter butter, btype={_zbt}: the mirrored closed form", _zerr < 1e-9,
+              f"max error {_zerr:.1e}")
+
+_zbaud, _zbeta = 100e6, 0.35
+_zgot = _zmeas(kind="rrc", beta=_zbeta, baud=_zbaud, span=64)
+_zu = np.abs(_zfreq) / _zbaud
+_zwant = np.sqrt(np.where(_zu <= (1 - _zbeta) / 2, 1.0, np.where(
+    _zu >= (1 + _zbeta) / 2, 0.0,
+    0.5 * (1 + np.cos(np.pi / _zbeta * (_zu - (1 - _zbeta) / 2))))))
+_zerr = float(np.abs(_zgot - _zwant).max())
+_zh = _ZS.design_filter(_zfs, "rrc", beta=_zbeta, baud=_zbaud, span=64)["taps"]
+_zrc = np.convolve(_zh, _zh)
+_zisi = np.abs(_zrc[len(_zrc) // 2 % 10::10] / _zrc.max())
+_zisi = float(np.sort(_zisi)[-2])                 # the largest sample at a symbol instant but one
+check("filter rrc: the magnitude is the square root of a raised cosine, and two of them in "
+      "cascade put zeros on every other symbol's instant",
+      _zerr < 0.01 and _zisi < 1e-3 and abs(_zh.sum() - 1.0) < 1e-12,
+      f"max ||H| - sqrt(RC)| = {_zerr:.1e} at 64 symbols of span and "
+      f"{float(np.abs(_zmeas(kind='rrc', beta=_zbeta, baud=_zbaud) - _zwant).max()):.1e} at the "
+      f"default 8 (the truncation, which is what span buys); worst inter-symbol sample "
+      f"{_zisi:.1e} of the peak, DC gain {_zh.sum():.6f}")
+
+_zw0, _zq = 2 * np.pi * 40e6, 4.0
+_zpole = complex(-_zw0 / (2 * _zq), _zw0 * np.sqrt(1 - 1 / (4 * _zq ** 2)))
+_zgot = _zmeas(kind="zpk", poles=[_zpole, _zpole.conjugate()], zeros=[-2 * np.pi * 150e6],
+               gain=_zw0 ** 2 / (2 * np.pi * 150e6))[:-1]
+_zs = 2j * _zfs * np.tan(np.pi * _zfreq[:-1] / _zfs)
+_zwant = np.abs(_zw0 ** 2 / (2 * np.pi * 150e6) * (_zs + 2 * np.pi * 150e6)
+                / ((_zs - _zpole) * (_zs - _zpole.conjugate())))
+_zerr = float(np.abs(_zgot - _zwant).max())
+check("filter zpk: an analog resonance and a zero, stated in rad/s, come out as that transfer "
+      "function at the bilinear transform's frequency map",
+      _zerr < 1e-9 and abs(_zgot.max() / _zq - 1.0) < 0.05,
+      f"max ||H| - |H(j 2 fs tan(pi f / fs))|| = {_zerr:.1e}; the Q = {_zq:g} peak measures "
+      f"{_zgot.max():.3f}x at {_zfreq[np.argmax(_zgot)] / 1e6:.2f} MHz")
+
+_zint = (Signal(seed=1, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0, phase_rad=np.pi / 2)
+         .filter("integrate", tau_s=1 / _zw).waveform())
+_zdif = (Signal(seed=1, grid=_zg).carrier("sine", cycles=_zcyc, amp=1.0)
+         .filter("differentiate", tau_s=1 / _zw).waveform())
+_zt = np.arange(_zn) / _zfs
+_zhalf = _zw / (2 * _zfs)
+_zie = float(np.abs(_zint - _zhalf / np.tan(_zhalf) * np.sin(_zw * _zt)).max())
+_zde = float(np.abs(_zdif[1:] - np.sin(_zhalf) / _zhalf
+                    * np.cos(_zw * (_zt[1:] - 0.5 / _zfs))).max())
+check("filter integrate / differentiate: a cosine integrates to a sine and a sine differentiates "
+      "to a cosine, each at its rule's own closed-form gain, the difference half a sample late",
+      _zie < 1e-10 and _zde < 1e-10,
+      f"integrate: {_zie:.1e} from sin * (wT/2)/tan(wT/2), {(1 - _zhalf / np.tan(_zhalf)) * 100:.4f}"
+      f" % under the ideal 1/w; differentiate: {_zde:.1e} from cos(w(t - T/2)) * sinc, "
+      f"{(1 - np.sin(_zhalf) / _zhalf) * 100:.4f} % under the ideal w")
+
+# THE FRONT END, AT THE SAME SETTINGS. `scope` stays the named op; the general stage must not be
+# a second, slightly different, Bessel.
+_zbg = Grid(fs=256e9, baud=32e9, n=1 << 13)
+_zsc = Signal(seed=3, grid=_zbg).carrier("nrz", pattern="prbs7").scope(bw_hz=32e9).waveform()
+_zfl = (Signal(seed=3, grid=_zbg).carrier("nrz", pattern="prbs7")
+        .filter("bessel", order=4, f_hz=32e9).waveform())
+check("filter bessel, order 4, IS the existing front-end filter at the same settings -- bound "
+      "zero, the same samples",
+      np.array_equal(_zsc, _zfl),
+      f"max |filter - scope| = {np.abs(_zsc - _zfl).max():.1e} over {len(_zsc)} samples of a "
+      f"32 GHz Bessel-4 on PRBS7")
+
+# THE DELAY IT REPORTS IS THE DELAY IT HAS. A ramp through a low-pass comes out the same ramp,
+# later by the group delay at DC -- so a comparator before and after the filter times it.
+_zramp = np.clip((np.arange(_zn) - 2000) / 6000.0, 0.0, 1.0)
+_zpre = (Signal(seed=1, grid=_zg).capture(values=_zramp, fs_hz=_zfs)
+         .law("comparator", threshold=0.5).event_list().events[0].t_s)
+_zchain = (Signal(seed=1, grid=_zg).capture(values=_zramp, fs_hz=_zfs)
+           .filter("butter", f_hz=5e6, order=4).law("comparator", threshold=0.5))
+_zpost = _zchain.event_list().events[0].t_s
+_zrep = _zchain.filter_delays()[0]["group_delay_s"]
+check("a filter REPORTS its group delay, and adding it to an upstream event's time lands on the "
+      "event as delivered",
+      abs((_zpost - _zpre) - _zrep) < 1e-3 / _zfs,
+      f"the 50 % crossing moves {(_zpost - _zpre) * 1e9:.4f} ns through a 5 MHz Butterworth-4; "
+      f"filter_delays() reports {_zrep * 1e9:.4f} ns "
+      f"(off by {abs(_zpost - _zpre - _zrep) * _zfs:.1e} of a sample)")
+
+_zzp = _zmeas(kind="butter", f_hz=_zfc, order=5, zero_phase=True)[:-1]
+_zunit = (np.arange(_zn) >= _zn // 2).astype(float)
+_zzs = (Signal(seed=1, grid=_zg).capture(values=_zunit, fs_hz=_zfs)
+        .filter("butter", f_hz=_zfc, order=5, zero_phase=True))
+_zys = _zzs.waveform()
+_zsym = float(np.abs(_zys[_zn // 2:_zn // 2 + 500] + _zys[_zn // 2 - 1:_zn // 2 - 501:-1]
+                     - 1.0).max())
+check("zero_phase=True keeps the STATED magnitude (a forward-backward pass would square it), "
+      "has no delay, and says so in the recipe",
+      float(np.abs(_zzp - 1 / np.sqrt(1 + _zr ** 10)).max()) < 1e-6 and _zsym < 1e-9
+      and _zzs.recipe()["ops"][-1]["zero_phase"] is True
+      and _zzs.filter_delays()[0]["group_delay_s"] == 0.0,
+      f"max ||H| - closed form| = {np.abs(_zzp - 1 / np.sqrt(1 + _zr ** 10)).max():.1e} "
+      f"({20 * np.log10(_zzp[np.argmin(abs(_zfreq[:-1] - _zfc))]):.3f} dB at the corner, where "
+      f"filtfilt gives -6.02); a step comes out odd-symmetric about its own instant to "
+      f"{_zsym:.1e}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

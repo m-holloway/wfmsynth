@@ -50,7 +50,8 @@ KNOWN_UNIT_PARAMS = frozenset({
     'loss_at_ghz', 'loss_db', 'n_ui', 'next_db', 'next_td_ps', 'nf_db', 'overload_tau_s',
     'phase0_s', 'phase1_rad', 'phase2_rad', 'phase_rad', 'phase_s', 'pink_frac', 'plateau_ui',
     'psij_ps', 'r_load_ohm', 'r_pullup_ohm', 'r_sink_b_ohm', 'r_sink_ohm', 'r_term_ohm',
-    'rate_hz', 'rds_on_ohm', 'rin_db_per_hz', 'rj_ps', 'rms_ps', 'skew_ps', 'snr_db',
+    'rate_hz', 'rds_on_ohm', 'rin_db_per_hz', 'ripple_db', 'rj_ps', 'rms_ps', 'skew_ps',
+    'snr_db', 'stop_db',
     'spacing_ui', 't_off_s', 't_on_s', 't_start_frac', 't_start_s', 't_step_frac', 't_step_s',
     'tau_frac', 'tau_s', 'td_frac', 'td_ps', 'tr_frac', 'tr_s', 'trend_floor_db',
     'wavelength_nm', 'width_frac', 'width_s'

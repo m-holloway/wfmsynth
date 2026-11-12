@@ -45,6 +45,7 @@ from . import subchain as SUB
 from . import instrument as INST
 from .grid import Grid
 from .streams import Streams
+from .stages import LAW_KEYS as _LAW_KEYS, FILTER_KEYS as _FILTER_KEYS
 
 
 # --------------------------------------------------------------- op executors
@@ -1153,6 +1154,26 @@ def _op_digitize(x, p, streams, grid, idx, win=None):
     return x
 
 
+def _op_law(x, p, streams, grid, idx, sink=None):
+    """A named transfer law (`wfmsynth/stages.py`). `sink` collects a comparator's transitions
+    for `Signal.realize()`, the way `_op_events` collects placed events."""
+    from . import stages as ST
+    if x is None:
+        raise ValueError("law: a transfer law acts on a waveform -- put a carrier before it.")
+    return ST.apply_law(x, fs=None if grid is None else grid.fs, events=sink,
+                        placement=f"law/{idx}", **{k: p[k] for k in _LAW_KEYS if k in p})
+
+
+def _op_filter(x, p, streams, grid, idx):
+    """A stated linear filter (`wfmsynth/stages.py`)."""
+    from . import stages as ST
+    if x is None or grid is None:
+        raise ValueError("filter: a filter acts on a waveform at a known sample rate -- put a "
+                         "carrier before it and give the Signal a grid (Grid(fs=...)).")
+    return ST.apply_filter(x, grid.fs, grid_baud=grid.baud,
+                           **{k: p[k] for k in _FILTER_KEYS if k in p})
+
+
 _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "capture": _op_capture, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
@@ -1171,7 +1192,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "events": _op_events,
          "dcd": _op_dcd, "agc": _op_agc, "rx_noise": _op_rx_noise,
          "sample_clock": _op_sample_clock, "burst": _op_burst, "pass_fet": _op_pass_fet,
-         "modulate": _op_modulate}
+         "modulate": _op_modulate, "law": _op_law, "filter": _op_filter}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1183,6 +1204,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
 # is preserved (a stable sort), because same-kind ops do not generally commute.
 # A probe sits BETWEEN the channel and the instrument -- it is what the instrument observes
 # through -- so it gets its own rank rather than sharing the instrument's.
+# `law` and `filter` are GENERAL stages: a comparator belongs after the probe and a soft limiter
+# inside the transmitter, so the op name does not say where it sits and they have no home kind.
 KIND_RANK = {"source": 0, "shape": 1, "supply": 2, "channel": 3, "probe": 4, "instrument": 5}
 OP_KIND = {
     "carrier": "source", "symbols": "source", "coded": "source", "capture": "source",
@@ -1202,6 +1225,7 @@ OP_KIND = {
     "sample_clock": "instrument",
     "photodetect": "instrument", "scope": "instrument", "digitize": "instrument",
     "timebase": "instrument", "acquire": "instrument", "store": "instrument",
+    "law": "general", "filter": "general",
 }
 
 
@@ -1212,6 +1236,13 @@ def op_kind(op_name):
 def canonicalize(ops):
     """Stable-sort an op list into canonical stage-kind order (source->shape->supply->channel->
     instrument). Order within a kind is preserved. Returns a new list."""
+    general = sorted({o["op"] for o in ops if op_kind(o["op"]) == "general"})
+    if general:
+        raise ValueError(
+            f"canonical order: {' and '.join(repr(g) for g in general)} is a general stage with "
+            f"no home in source -> shape -> supply -> channel -> probe -> instrument -- where "
+            f"it sits is the meaning (a comparator after the probe is not one before the "
+            f"channel), so it cannot be sorted. Keep this chain in the order it was written.")
     return sorted(ops, key=lambda o: KIND_RANK[op_kind(o["op"])])
 
 
@@ -1283,7 +1314,10 @@ LEAD_SOURCE_TR = 32.0                     # multiples of the source's rise time 
 # The ops the extent probe runs: LTI, deterministic, length-preserving, real-valued. These are the
 # ops that HAVE an impulse response, and they are exactly the ops that ring on a turn-on.
 _LEAD_LTI = {"lossy", "reflect", "resonant_reflect", "ac_couple", "sparam", "cascade", "tx_ffe",
-             "de_emphasis", "ctle", "rx_ffe", "scope", "probe", "intra_pair_skew"}
+             "de_emphasis", "ctle", "rx_ffe", "scope", "probe", "intra_pair_skew",
+             # every `filter` kind is LTI; `integrate` alone has no end to its memory and is
+             # refused in `_lead_check_ops`
+             "filter"}
 # Ops that are skipped by the probe rather than rejected: memoryless (or a fraction of a UI of
 # interpolation), so they do not lengthen the chain's memory, or nonlinear/stochastic, so they have
 # no impulse response to measure. An OPTICAL chain is skipped because the field is complex and this
@@ -1305,7 +1339,10 @@ _LEAD_SKIP = {"carrier", "symbols", "coded", "nonlinearity", "crosstalk", "cross
               # `pass_fet` is a nonlinear per-sample decision (gate threshold, then either a
               # divider or a diode clamp) with no impulse response of its own -- the same
               # bucket `dcd`/`agc` are already in.
-              "pass_fet"}
+              "pass_fet",
+              # every `law` is a per-sample curve; the comparator's one bit of state is set by
+              # the guard's own samples, which is the history a running signal would have had
+              "law"}
 # Ops with REAL memory but no probeable impulse response, whose extent is known in closed form.
 #
 # This category exists because `open_drain` fits none of the other three and putting it in the wrong
@@ -1465,6 +1502,11 @@ def _lead_check_ops(ops):
             if o["op"] == key[0] and o.get(key[1]) is not None:
                 raise ValueError(f"lead_in: {o['op']}({key[1]}=...) is relative to the record, "
                                  f"which a lead-in lengthens -- {fix}")
+        if o["op"] == "filter" and o.get("kind") == "integrate":
+            raise ValueError("lead_in: filter('integrate') is the running integral FROM THE "
+                             "RECORD'S FIRST SAMPLE, and a lead-in moves that origin -- the "
+                             "guard's own area would be delivered as an offset. Integrate "
+                             "without a lead-in.")
         if o["op"] == "crosstalk" and o.get("kind", "fext") == "next":
             raise ValueError("lead_in: crosstalk(kind='next') delays the aggressor by td_frac, a "
                              "fraction of the record, which a lead-in lengthens")
@@ -1781,6 +1823,63 @@ class Signal:
         """Nominal (always-on) transmitter imperfections so the unfaulted class isn't
         suspiciously perfect. params: compression, level_noise, rise_fall_ratio, a_base."""
         return self._add("nonlinearity", **params)
+
+    def law(self, kind, **params):
+        """A named TRANSFER LAW, for a nonlinear shape that has no op of its own.
+
+            .law("comparator", threshold=1.65, hysteresis=0.2, v_lo=0.0, v_hi=3.3)
+
+        kind: tanh (gain, sat) | poly (coeffs) | limiter (lo, hi) | deadzone (width, center) |
+              rectify (mode) | quantize (bits, lo, hi) | comparator (threshold, hysteresis,
+              v_lo, v_hi, initial) | diode (r_load_ohm, i_sat, ideality, v_thermal)
+
+        A kind is a name with parameters, never a callable, so the recipe stays data. Every
+        kind is memoryless except `comparator`, whose state is the level it is holding; its
+        transitions come back from `realize()` / `event_list()` as `transition` events with
+        the sub-sample time of each crossing -- the bridge from an analog signal to a digital
+        one. `nonlinearity`, `digitize` and `pass_fet` stay the named ops for a transmitter,
+        a converter and a switch; see `wfmsynth.stages` for each curve and which is which."""
+        from . import stages as ST
+        ST.check_law(kind, **params)
+        return self._add("law", kind=kind, **ST.plain(params))
+
+    def filter(self, kind, **params):
+        """A stated LINEAR FILTER, for a response that has no op of its own.
+
+            .filter("butter", f_hz=20e6, order=3)
+
+        kind: butter | bessel | cheby1 (ripple_db) | elliptic (ripple_db, stop_db) -- each
+              with f_hz, order=4, btype="low"|"high"|"bandpass"|"bandstop";
+              rrc (beta, span=8, baud) | fir (taps) | sos (sos) | zpk (zeros, poles, gain) |
+              integrate (tau_s) | differentiate (tau_s)
+
+        Causal by default, and a causal filter DELAYS: `filter_delays()` reports by how much,
+        so the time of an event placed upstream can be corrected. `zero_phase=True` is the
+        opt-in, recorded in the recipe, and keeps the stated magnitude. A design that is
+        unstable or not resolved on the grid is refused here, on the line that wrote it.
+        `scope`, `probe`, `ctle` and `ac_couple` stay the named ops for the instrument, the
+        equaliser and a coupling capacitor; see `wfmsynth.stages`."""
+        from . import stages as ST
+        params = ST.plain(params)
+        if self.grid is None:
+            ST.check_filter(kind, **params)
+        else:
+            ST.design_filter(self.grid.fs, kind, grid_baud=self.grid.baud, **params)
+        return self._add("filter", kind=kind, **params)
+
+    def filter_delays(self):
+        """The group delay of every `filter` op in this chain, in order: a list of
+        `{"op": index, "kind", "zero_phase", "group_delay_s", "at_hz"}`. An event placed
+        before op `i` is delivered later by the sum of the delays at index > its own. Only
+        `filter` ops report here -- the named channel and instrument ops have delays of their
+        own, which this does not include. See `stages.describe_filter`."""
+        from . import stages as ST
+        if self.grid is None:
+            raise ValueError("filter_delays: a delay in seconds needs the sample rate -- give "
+                             "the Signal a grid (Grid(fs=...)).")
+        return [{"op": i, **ST.describe_filter(self.grid.fs, grid_baud=self.grid.baud,
+                                               **{k: o[k] for k in _FILTER_KEYS if k in o})}
+                for i, o in enumerate(self.ops) if o["op"] == "filter"]
 
     def tx_ffe(self, taps, pre=1, **params):
         """Transmitter FFE pre-emphasis (place after carrier, before the channel). `taps`
@@ -2433,8 +2532,8 @@ class Signal:
         if collect_events:
             st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
         for i, op in enumerate(ops):
-            if collect_events and op["op"] == "events":
-                x = _op_events(x, op, st, grid, i, sink=sink)
+            if collect_events and op["op"] in ("events", "law"):
+                x = _EXEC[op["op"]](x, op, st, grid, i, sink=sink)
             elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
                 x = _EXEC[op["op"]](x, op, st, grid, i, win=win)   # range the vertical to the window
             else:
@@ -2447,6 +2546,9 @@ class Signal:
                                  f"{plan.n_ext}-sample render, so the window cannot be sliced out")
             if not _extended:
                 x = x[win].copy()
+                if sink:                                   # a comparator's transitions, on
+                    from .stages import window_events      # the delivered window's own clock
+                    sink = window_events(sink, win, grid.fs)
         if collect_events:
             return x, EventList(sink, n=len(x), grid=self.grid)
         return x
