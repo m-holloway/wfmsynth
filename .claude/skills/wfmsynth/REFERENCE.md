@@ -777,17 +777,27 @@ def ofdm():                                            # ALWAYS state prbs_seed 
 
 par = ofdm().ops[0]                                    # the receiver takes the op's own parameters
 grid_sent, t_useful = ofdm().transmitted()             # [symbol, subcarrier] (819 x 52), each FFT's start
-bw = ws.ofdm.plan(par, go)["noise_bw_hz"]              # 16.25 MHz; an OFDM grid has no baud
+plan = ws.ofdm.plan(par, go)
+bw, ref = plan["noise_bw_hz"], plan["ref_power"]       # 16.25 MHz; amp**2. An OFDM grid has no baud
+# awgn(snr_db=s, bw_hz=bw, ref_power=ref) is s dB per resource element, burst or not
 
+TWT = dict(alpha_a=2.1587, beta_a=1.1517, alpha_phi_rad=4.0033, beta_phi=9.1040)
 rx = (ws.recipes.multipath(ofdm(), delays_s=[0.0, 150e-9], gains=[1.0, 0.5])   # delay + gain + combine
-      .gain(by=0.1).law("saleh", alpha_a=2.1587, beta_a=1.1517,                # 20 dB back-off, AM/AM + AM/PM
-                        alpha_phi_rad=4.0033, beta_phi=9.1040)
+      .gain(by=0.1).law("saleh", **TWT)                # 20 dB back-off, AM/AM + AM/PM
       .awgn(snr_db=30, bw_hz=bw))                      # against the record's own power here
 y = rx.waveform()
 fit = rf.evm(y, go, grid_sent, ofdm=par, correct=("common_phase", "gain", "equalizer"))
 fit["evm_pct"]                                         # 7.1 %; without "equalizer" 47 %
 fit["removed"]["equalizer"]                            # the channel, one complex number per subcarrier
 fit["evm_per_subcarrier"], fit["evm_per_symbol"]       # where the error is
+# symbols=<bool mask per OFDM symbol> counts only those; block=<symbols> refits per block (a fade)
+
+# a transmitter that DRAWS (noise, a fade of its own) is a named chain, the same on every path:
+noisy = ws.Channels(
+    {"rx": ws.recipes.multipath(Signal().use("tx"), delays_s=[0.0, 150e-9], gains=[1.0, 0.5])
+           .gain(by=0.1).law("saleh", **TWT)},
+    shared={"tx": Signal().ofdm(constellation="qam16", prbs=15, prbs_seed=0x2F6E, **NUM)
+                  .awgn(snr_db=30, bw_hz=bw, ref_power=ref)}, seed=1, grid=go)
 
 fade = ws.recipes.fading(doppler_hz=200.0)             # unit mean power; k_db= adds a line of sight
 # sig.gain(by=fade): the record must hold 4 Doppler periods or more (refused under that)
@@ -795,12 +805,18 @@ fade = ws.recipes.fading(doppler_hz=200.0)             # unit mean power; k_db= 
 
 `rf.evm(..., ofdm=)` corrections: `"timing"`, `"common_phase"` (per symbol), `"gain"`,
 `"equalizer"`; the single-carrier names are refused. A frame is a `sequence` of `ofdm` chains;
-a burst schedule is `gate(by=Signal().carrier("states", dwell=[t_on, t_off]))`, and then EVM
-is taken over the symbols inside an on interval (`ws.ofdm.demodulate` and
-`ws.states.intervals(events, at="gate/<i>/by")`; COOKBOOK, "OFDM"). `ws.ofdm.register(name,
+a burst schedule is `gate(by=Signal().carrier("states", levels=[1.0, 0.0], dwell=[t_on,
+t_off]))` -- `dwell[i]` belongs to `levels[i]`, and the DEFAULT levels are `[0.0, 1.0]`, off
+first -- and then EVM is taken over the symbols inside an on interval:
+`rf.evm(..., ofdm=par, symbols=mask)` with the mask built from
+`ws.states.intervals(events, at="gate/<i>/by")` (COOKBOOK, "OFDM"). In a `Channels` record a
+chain brought in by `use` keeps its name in front (`at="tx/gate/1/by"`); an `at` nothing is
+at is refused with the list of those that are. An `ofdm_symbol` event's useful part starts at
+`t_s + params["cp_s"]`; `complete: False` marks one a segment cut. `ws.ofdm.register(name,
 source=, **numbers)` names a parameter set; the recipe keeps the numbers. `multipath`'s
-transmitter is rendered once per path, so one that draws anything is refused: make it a named
-chain of a `Channels` record and pass `Signal().use("tx")`.
+transmitter is rendered once per path, so one that draws anything (after a `use` as well) is
+refused: make the whole transmitter a named chain of a `Channels` record and pass
+`Signal().use("tx")`, as above. Ops after `use` are checked when the record renders.
 
 ## Sources that dwell, and shipped compositions (`ws.recipes`)
 
@@ -810,7 +826,7 @@ from wfmsynth import Signal
 R = ws.recipes
 g = ws.Grid(fs=1e6, n=1 << 20)
 
-busy = Signal().carrier("states", dwell=[800e-6, 300e-6])        # two states 0/1, mean dwells (exponential)
+busy = Signal().carrier("states", dwell=[800e-6, 300e-6])        # dwell[i] is levels[i]'s mean: 0 (off) 0.8 ms, 1 (on) 0.3 ms
 sig = Signal(seed=1, grid=g).carrier("sine", f_hz=10e3).gate(by=busy)
 x, events = sig.realize()
 spans = ws.states.intervals(events, at="gate/1/by")    # [{t_start_s, t_stop_s, state, level, complete}, ...]
@@ -849,6 +865,15 @@ nm = ws.measure.swept_map(w["ref"], gs, delay_s=2e-9, at_s=0.0, wavelength_nm=15
 dip = ws.measure.resonances(*ws.measure.transmission(w["dut"], nm), level=1.0)[0]
 dip["wavelength_nm"], dip["q"], dip["extinction_db"]   # 1550.00000, 99999.98, 15.000
 ```
+
+`level=` is the record's OFF-RESONANCE baseline: 1.0 here (unit laser, unit detector, no other
+loss). On a bench with insertion loss, a responsivity or another power, pass
+`transmission(x, nm, power=<the detector's reading with no device>)` or leave `level` out
+(the spectrum's median); a `level` the record never reaches is refused. `resonator`'s
+`intrinsic_hz` and `coupling_hz` are its two loss rates as linewidths in Hz:
+`Q = nu0 / (intrinsic_hz + coupling_hz)` (`nu0 = ws.swept.hz(wavelength_nm)`), the dip reaches
+`((ki - ke) / (ki + ke))**2`, equal rates are critical coupling. The die a unit drew is
+`ws.op_params(bench.unit(k).recipe(), "resonator", chain="dut")`.
 
 A field is `eo()` .. `photodetect()` (or `laser(...)` ..), its own domain: `filter`, `gain`
 (real, or a complex NUMBER), `gate`, a sum `combine` (a coupler: coherent), `sequence`,

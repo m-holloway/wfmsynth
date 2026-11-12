@@ -290,12 +290,14 @@ these.
     point on every subcarrier and are impulses: MEASURED 15.5 dB peak-to-average on 52 QPSK
     subcarriers with `prbs=31`, against 11.6 dB with a stated seed.
 37. **`ofdm`'s `cp=` and `window=` are samples at the FFT rate** (`n_fft * scs_hz`), not
-    seconds and not the grid's samples. And the `"equalizer"` correction is ONE coefficient
-    per subcarrier for the whole record: on a channel that moves within it (fading), measure
-    in blocks.
+    seconds and not the grid's samples (a time is refused, with the count it comes to). And
+    the `"equalizer"` correction is ONE coefficient per subcarrier for the whole record: on a
+    channel that moves within it (fading), measure in blocks: `rf.evm(..., ofdm=, block=16)`.
 38. **EVM of a gated or bursty record counts what was never sent.** MEASURED on an OFDM burst
-    schedule: 64.9 % over every symbol against 5.6 % over the symbols inside an on interval.
-    Select the symbols from the schedule's own intervals.
+    schedule: 76.5 % over every symbol against 5.6 % over the symbols inside an on interval.
+    Select the symbols from the schedule's own intervals: `rf.evm(..., ofdm=, symbols=mask)`.
+    And `dwell[i]` belongs to `levels[i]`, whose default is `[0.0, 1.0]`: `dwell=[a, b]` alone
+    is OFF for `a`, on for `b`.
 39. **A sub-chain that draws nothing is the SAME signal every time it is written.** Two
     `Signal().carrier(...).eo()` peers in a `combine` are one laser, fully coherent (4x the
     power, or none); two `recipes` paths of one transmitter are one transmission. Independence
@@ -304,11 +306,14 @@ these.
     noisy before any device is in the chain.
 41. **A deterministic recipe does not vary with the seed.** `hum`, `ripple`, `pickup`,
     `bounce`, `multitone` and `oscillator_startup` draw nothing, so a thousand records from
-    one template carry the same hum at the same phase. Vary a number (`phase_rad=`, `f_hz=`).
+    one template carry the same hum at the same phase. Vary a number: `phase_rad=` on `hum`,
+    `ripple` and `pickup`; `t_s=` on `bounce`; `phase="random", seed=` on `multitone`;
+    `startup_s=` on `oscillator_startup`.
 42. **A state source's cut intervals are not draws.** The interval in force at t = 0 and the
-    last one carry `complete: False`; in a dwell histogram they bias it short. After
-    `trigger`, or in a restarting `sequence` segment, the state in force at the window's
-    start is missing from the event list altogether.
+    last one carry `complete: False`; in a dwell histogram they bias it short. So does one
+    that a `sequence` segment, a `trigger` / `acquire` window or a `delay` ended: it stops at
+    the cut. After `trigger`, or in a restarting `sequence` segment, the state in force at
+    the window's START is missing from the event list altogether.
 43. **`recipes.fading` averages to unit power only over many Doppler periods**: MEASURED
     0.971 over 52 periods, and a first-path power of 1.34 over 10. Size the record from the
     Doppler, as from the pattern period.

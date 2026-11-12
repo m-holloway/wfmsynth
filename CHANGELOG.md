@@ -274,7 +274,7 @@ None of these moves a rendered sample.
   carriers. Before the `square` / `cmos` change the same comparison, on the tool's then 28
   chains, was 28 of 28 and 238 of 238. `tests/test_byte_identity.py` pins the default path in the tree.
 - **Each effect is asserted against an analytic result or an independent method**, in
-  `wfmsynth.validate` (482 checks) and the test suite (2842 tests): a sub-chain against
+  `wfmsynth.validate` (485 checks) and the test suite (2890 tests): a sub-chain against
   the same chain rendered alone and coupled by hand (equal); Bessel-4 `filter` against the
   scope front end (equal); a product `combine` against `modulate` OOK (equal); the delay's
   error against the exact trigonometric interpolant; trigger instants against an independent
@@ -299,6 +299,50 @@ None of these moves a rendered sample.
   `sequence` segment, a selected `switch` input or a `use`d chain were left out of `mask()`;
   `contrast()` with a mistyped role returned the record unchanged; `iq()` recorded and
   ignored a second symbol source.
+- **A second review round** (three reviewers, every finding reproduced first) fixed, each
+  with its test:
+  - `resonator`: a mode hop BETWEEN two samples was moved to a sub-step edge, so every sample
+    after it had the wrong ring phase (field error 0.14 to 1.7 against the closed form); the
+    sample holding a hop is now cut at the hop (6e-14). An input ramping across a sample was
+    held at each sub-step's midpoint; it is now integrated as the line it is (1.1e-2 ->
+    4e-16 at kappa*dt = 6). A hop that leaves a ring still holding light half the sample
+    rate or more from the laser is refused, as a fast sweep is.
+  - events that state an extent: a `state` interval ended by a `sequence` segment, a
+    `trigger` / `acquire` / `sample_clock(n_out=)` window or a `delay` kept its whole
+    `dwell_s` and `complete: True`, so `states.intervals` reported it past the cut; it now
+    stops there, incomplete (`events.cut`). An `ofdm_symbol` event carried `t_useful_s`, an
+    absolute time nothing re-timed (wrong in every later `sequence` segment and after a
+    `delay`): it is gone, the useful part starting at `t_s + cp_s`; a symbol a segment cuts
+    has `complete: False`, so the complete events are `transmitted()`'s rows.
+  - `ofdm(cp=)` truncated a non-whole number (`cp=0.8e-6`, seconds, rendered with no prefix
+    at all): refused, with the count it comes to.
+  - `law("saleh" | "rapp")` after `Signal().use(...)` or in a shared stage was refused at
+    build time as "a real voltage"; a chain that cannot yet know its record is now checked
+    when it renders, as `gain` was.
+  - `recipes.multipath` / `mzi` / `stray_reflection` accepted a transmitter that drew AFTER
+    a `use` (each path then got independent noise): refused.
+  - `combine({"from": recipe})` of a field about another carrier was accepted (two lasers
+    1.2 THz apart summed coherently): refused, as the sub-chain form is.
+  - `states.intervals(at=)` returned `[]` for a namespace nothing is at: refused, listing
+    those that are. `measure.resonances(level=)` returned NaN widths when the record never
+    reached the stated baseline: refused, naming `transmission(power=)`.
+  - `measure.swept_map` misread the part fringe at a record's end where the sweep rate was
+    changing (up to 0.7 fringe, and every sample when it was the first): it is now read from
+    the fringe's own crest and trough (0.02 at worst over the same sweeps).
+  - `rf.evm(..., ofdm=)` gained `symbols=` (a mask over OFDM symbols) and `block=` (the
+    fits refitted per block, for a fade); without `ofdm=` on an OFDM record it names the
+    argument. `ofdm.plan()` returns `ref_power`. `recipes.ripple` and `pickup` take
+    `phase_rad=`. A `sequence` segment may carry a `label`, which `bounce` uses so an
+    off-grid duration is refused in `bounce`'s own argument names.
+  - stated, not changed: `recipes.ring`'s Q and extinction are one mode's, read to about
+    `(pi*coupling_hz/fsr_hz)**2` with `fsr_nm` (measured at a finesse of 10); a causal
+    `lossy` on an envelope far above the sample rate has almost no carrier phase and a
+    0.35 ns advance, because its minimum phase is built up to the band's own top
+    (`wfmsynth.baseband`); the dwell order of a burst schedule in the docs was backwards.
+  Against the branch tip before it (8a26c2d), `tools/digest_compare.py`: 31 of 31 fixed
+  chains identical. Of the 588 example renders in common, the 15 of
+  `swept_ring.py` differ, by 3e-16 on a slow sweep and 1.1e-13 on a fast one (the
+  resonator's exact step for a ramping input; inside the Tier 2 band), and no other.
 - **The rulings on what that round left open** are in BACKLOG.md (#75–#87, *Ruled*), each
   with its test: sub-sample edges for `square` / `cmos`, the `n_ui` warning, exact
   `roles()`, the domain following the source, `copy()`, the decided-reference EVM's
@@ -324,9 +368,15 @@ None of these moves a rendered sample.
   (#88–#94): Bragg gratings, polarisation-dependent loss, a resonator's drop port, coherent
   detection, a carrier through `sequence` / `switch`.
 - A `state` event in force when a `trigger` window or a restarting `sequence` segment begins
-  is dropped, not clipped to the window.
+  is dropped, not clipped to the window. (One a window or a segment ENDS is cut there.)
+- On numpy < 2 a COMPLEX record does not replay to the byte: numpy 1.x's complex product
+  rounds differently with the array's alignment (measured on 1.26.4, arm64: three byte
+  results for one `x * g`), so 13 to 18 tests that assert byte equality of an I/Q or optical
+  replay fail per run there. Real records are unaffected; numpy >= 2.0.2 is byte-stable. The
+  declared floor is still `numpy>=1.21`; raising it is undecided
+  ([COMPATIBILITY.md](docs/COMPATIBILITY.md), Tier 2).
 - The work of #88–#94 was gated on Python 3.14 (macOS). `validate` also passes on 3.9.6 with
-  numpy 2.0.2 and scipy 1.13.1, all 482 checks; the test suite was not re-run on 3.9, 3.12,
+  numpy 2.0.2 and scipy 1.13.1, all 485 checks; the test suite was not re-run on 3.9, 3.12,
   Linux or Windows after it.
 - Python 3.9, the declared floor, was run on one machine only (macOS arm64, CPython 3.9.6),
   not in CI. With numpy 2.0.2 and scipy 1.13.1: 2470 passed, 2 failed, both

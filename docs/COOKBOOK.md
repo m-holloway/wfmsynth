@@ -1093,9 +1093,9 @@ made of and you can take the chain and change one op
 
 | Function | It is | Use it as |
 |---|---|---|
-| `hum(f_hz, amp, harmonics=, f_drift_hz=, f_wander_hz=)` | a sine and its harmonics; the line frequency wanders by one `delay` on all of them | `combine` |
-| `ripple(f_sw_hz, amp, duty=, spike=, f_ring_hz=, spread_pct=)` | a triangle, a ring at each switching edge, a spread-spectrum clock | `combine` |
-| `pickup(fc_hz, amp, message=, depth=, dev_hz=)` | a carrier that is not yours: plain, AM or FM | `combine` |
+| `hum(f_hz, amp, harmonics=, phase_rad=, f_drift_hz=, f_wander_hz=)` | a sine and its harmonics; the line frequency wanders by one `delay` on all of them | `combine` |
+| `ripple(f_sw_hz, amp, duty=, spike=, f_ring_hz=, spread_pct=, phase_rad=)` | a triangle, a ring at each switching edge, a spread-spectrum clock | `combine` |
+| `pickup(fc_hz, amp, message=, depth=, dev_hz=, phase_rad=)` | a carrier that is not yours: plain, AM or FM | `combine` |
 | `flicker(f_lo_hz, f_hi_hz, rms=)` | 1/f noise between two frequencies: two-state processes superposed | `combine` |
 | `bounce(t_s, gap_s, n=3, ratio=0.5)` | a contact closing, with flights that shorten | `gate(by=)` |
 | `intermittent(closed_s, open_s)` | a contact that opens briefly at random | `gate(by=)` |
@@ -1433,13 +1433,19 @@ xo = ofdm().waveform()
 grid_sent, t_useful = ofdm().transmitted()             # [819 symbols, 52 subcarriers], and each FFT's start
 par = ofdm().ops[0]                                    # the receiver takes the op's own parameters
 rf.evm(xo, go, grid_sent, ofdm=par)["evm_pct"]         # -> 2e-14 %: the round trip is exact
-bw = ws.ofdm.plan(par, go)["noise_bw_hz"]              # 16.25 MHz, the 52 occupied spacings
+plan = ws.ofdm.plan(par, go)
+bw, ref = plan["noise_bw_hz"], plan["ref_power"]       # 16.25 MHz, the 52 occupied spacings; amp**2 = 1.0
 
-in_noise = ofdm().awgn(snr_db=25, bw_hz=bw, ref_power=1.0)
+in_noise = ofdm().awgn(snr_db=25, bw_hz=bw, ref_power=ref)
 rf.evm(in_noise.waveform(), go, grid_sent, ofdm=par)["evm_db"]    # -> -25.0 dB: EVM is -SNR in that band
 ```
 
-`cp` and `window` are counts of samples at the FFT rate. `active=52` is the 26 subcarriers
+State `ref_power`: left out, `awgn` references the mean power of the whole record, which is the
+useful part's only when the symbols fill it. A burst of `n_symbols=` half the record then reads
+3 dB better than stated.
+
+`cp` and `window` are counts of samples at the FFT rate, and a time is refused with the count
+it comes to (`cp=0.8e-6` here is `cp=16`). `active=52` is the 26 subcarriers
 each side of the centre, which is left out; a list of signed indices states any other set.
 `pilots` are +1 on every symbol unless a dict states values and a cadence, and data fills the
 rest. Useful-part power is `amp**2`. An OFDM grid has no `baud`, so noise is `snr_db` in a
@@ -1448,7 +1454,11 @@ and symbols of one repeated point are impulses.
 
 `rf.evm(..., ofdm=)` fits nothing unless named: `"timing"`, `"common_phase"` (one rotation per
 symbol), `"gain"`, `"equalizer"` (one complex number per subcarrier). EVM counts pilots and
-data alike.
+data alike. `symbols=<boolean mask, one per OFDM symbol>` counts only those symbols, and
+`block=<OFDM symbols>` fits the timing, gain and equaliser afresh over each run of that many,
+for a channel that moves within the record (a fade). Each symbol is an `ofdm_symbol` event:
+its useful part starts at `t_s + params["cp_s"]`, and one a `sequence` segment cut short has
+`complete: False` and is not a row of `transmitted()`.
 
 A frame is a `sequence` of OFDM chains (a preamble is one whose every element is a pilot), and
 two blocks of subcarriers with different constellations are two chains with disjoint `active=`
@@ -1461,22 +1471,27 @@ ws.ofdm.unregister("lab_20mhz")
 np.array_equal(Signal.from_recipe(named.recipe()).waveform(), xo)   # -> True: the recipe holds the numbers
 ```
 
-A burst schedule is a `gate` by the state-dwell source. Measure the symbols that were sent
-whole, read from the schedule's own intervals:
+A burst schedule is a `gate` by the state-dwell source. `dwell[i]` is how long `levels[i]`
+lasts, and the default levels are `[0.0, 1.0]`, so a schedule stated on-first states its levels
+(as `recipes.intermittent` does). Measure the symbols that were sent whole, read from the
+schedule's own intervals:
 
 ```python
-bursty = (ofdm().gate(by=Signal().carrier("states", dwell=[800e-6, 300e-6]))  # on 0.8 ms, off 0.3 ms
-          .awgn(snr_db=25, bw_hz=bw, ref_power=1.0))
+schedule = Signal().carrier("states", levels=[1.0, 0.0], dwell=[800e-6, 300e-6])   # on 0.8 ms, off 0.3 ms (means)
+bursty = ofdm().gate(by=schedule).awgn(snr_db=25, bw_hz=bw, ref_power=ref)
 xb, evb = bursty.realize()
 on = [(s["t_start_s"], s["t_stop_s"]) for s in ws.states.intervals(evb, at="gate/1/by")
       if s["level"] == 1.0]
 edge, t_fft = 8 / go.fs, 64 / go.fs                    # the gate's edge, and one useful part
 whole = np.array([any(a + edge <= t and t + t_fft <= b - edge for a, b in on) for t in t_useful])
-got = ws.ofdm.demodulate(xb, go, par)
-100 * np.sqrt(np.mean(np.abs(got[whole] - grid_sent[whole]) ** 2)
-              / np.mean(np.abs(grid_sent[whole]) ** 2))        # -> 5.62 % over the 474 whole symbols
-rf.evm(xb, go, grid_sent, ofdm=par)["evm_pct"]         # -> 64.9 %: counting what was never sent
+rf.evm(xb, go, grid_sent, ofdm=par, symbols=whole)["evm_pct"]   # -> 5.60 % over the 337 whole symbols
+rf.evm(xb, go, grid_sent, ofdm=par)["evm_pct"]         # -> 76.5 %: counting what was never sent
 ```
+
+Over a long record that schedule is on 73 % of the time (`ws.states.occupancy`); this 3.3 ms
+holds five on intervals and is on for 42 % of it. `intervals(at=)` refuses a namespace nothing
+is at and lists the ones that are: in a `Channels` record a chain brought in by `use` keeps
+its name in front (`"tx/gate/1/by"`).
 
 [`examples/ofdm_frame.py`](../examples/ofdm_frame.py).
 
@@ -1644,9 +1659,23 @@ r["wavelength_nm"], r["q"], r["extinction_db"]         # -> 1550.00000, 99999.98
 The record stays a time record. `swept.wavelength_map` is the truth; `measure.swept_map`
 recovers a wavelength axis from the reference interferometer's fringes and one anchor, as a
 bench does, without reading the recipe; `measure.transmission` puts a record on any axis and
-`measure.resonances` reads each dip. `ring` converts Q, extinction and `fsr_nm` into the one
-`resonator` op (`wavelength_nm`, `intrinsic_hz`, `coupling_hz`, `fsr_hz`), and `gas_cell` is
-one undercoupled resonator per absorption line: an absolute reference.
+`measure.resonances` reads each dip. `level=1.0` says the record away from resonance reads 1:
+true here, where a unit laser meets a unit detector and nothing else is in the path. With an
+insertion loss, a responsivity or another laser power, divide it out
+(`transmission(x, nm, power=<the detector's reading with no device>)`) or leave `level` out,
+and the spectrum's own median is the baseline; a `level` the record never comes up to is
+refused. `ring` converts Q, extinction and `fsr_nm` into the one `resonator` op
+(`wavelength_nm`, `intrinsic_hz`, `coupling_hz`, `fsr_hz`), and `gas_cell` is one undercoupled
+resonator per absorption line: an absolute reference.
+
+`intrinsic_hz` and `coupling_hz` are the ring's two loss rates as LINEWIDTHS in hertz: what it
+loses inside (absorption, scattering) and what it gives the bus. The dip is their sum wide, so
+the loaded `Q = nu0 / (intrinsic_hz + coupling_hz)` with `nu0 = c / wavelength` (193.4 THz at
+1550 nm), and it reaches `((intrinsic_hz - coupling_hz) / (intrinsic_hz + coupling_hz))**2`:
+equal rates are critical coupling, a dip to zero. `ring(q=1e5, extinction_db=15)` is
+`intrinsic_hz=1.139e9, coupling_hz=0.795e9`. With `fsr_nm` those are one mode's numbers and a
+sweep reads them to about `(pi * coupling_hz / fsr_hz)**2` (`ring`'s docstring has the
+measured figures).
 
 ## What a bench adds
 Each artefact is a change to the chain, and the read-back says what it costs.
@@ -1682,7 +1711,12 @@ die = (Signal().use("laser")
                   intrinsic_hz=ws.tol(1.0e9, 20), coupling_hz=ws.tol(0.7e9, 20)))
 wafer = bench(die)
 [figures(wafer.unit(k)) for k in range(3)]
-# -> (1549.9371, 118827, 30.44), (1550.0084, 116142, 12.07), (1550.0877, 110116, 12.17): each equal to its stated part
+# -> (1549.9371, 118827, 30.44), (1550.0084, 116142, 12.07), (1550.0877, 110116, 12.17)
+
+part = ws.op_params(wafer.unit(0).recipe(), "resonator", chain="dut")     # the die that was drawn
+ki, ke = part["intrinsic_hz"], part["coupling_hz"]
+part["wavelength_nm"], ws.swept.hz(part["wavelength_nm"]) / (ki + ke), -20 * np.log10(abs(ki - ke) / (ki + ke))
+# -> 1549.93706, 118826.9, 30.44: the truth, which the read-back equals
 ```
 
 The first die drew nearly equal loss rates, which is critical coupling: 30 dB.
@@ -1690,7 +1724,8 @@ The first die drew nearly equal loss rates, which is critical coupling: 30 dB.
 reflection, a fast sweep into a slow detector and a mode hop.
 
 Things to know: `stop_nm` is reached one sample after the last; `resonator` refuses a sweep
-that crosses its linewidth in under 4.4 samples and names the `fs` needed; `fsr_hz` must exceed
+that crosses its linewidth in under 4.4 samples and names the `fs` needed, and a mode hop that
+leaves the laser half the sample rate or more from a resonance still holding light; `fsr_hz` must exceed
 four linewidths, and the model is coupled-mode (at finesse 12.5 it differs from the ring
 formula by 1.6e-2 in transmission); `optical_mpi` is refused on a laser's field in favour of
 `stray_reflection`; a `sequence` or `switch` of laser chains has no stated carrier, so nothing
