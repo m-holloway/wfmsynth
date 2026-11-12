@@ -169,6 +169,39 @@ def test_an_interval_that_a_later_cut_ends_stops_there_and_says_so(name):
             assert abs(x[k] - r["level"]) < 0.02, (r, x[k])
 
 
+def test_under_a_delay_that_varies_an_interval_ends_where_the_samples_do():
+    """A delay swinging 0 .. 2 ms at 50 Hz stretches and squeezes the dwells. Each interval's
+    END is re-timed by the delay at its own arrival, as its start is: against the samples'
+    own edges, and against the arrival time solved here from t - by(t) written out. (With
+    only the start moved the ends were up to 287 us from any edge and the intervals
+    overlapped by up to 374 us.)"""
+    g = Grid(fs=1e6, n=20000)
+    src = Signal(seed=3, grid=g).carrier("states", levels=[1.0, 0.0], dwell=[700e-6, 300e-6])
+    sig = src.copy().delay(by=Signal().carrier("sine", f_hz=50.0, amp=1e-3, offset=1e-3))
+    x, ev = sig.realize()
+    iv = S.intervals(ev)
+    starts, stops = (np.array([r[k] for r in iv]) for k in ("t_start_s", "t_stop_s"))
+    edges = (np.flatnonzero(np.diff(x > 0.5)) + 1) / g.fs
+    to_start, to_stop = (max(np.abs(t - e).min() for e in edges) for t in (starts, stops))
+    tile = np.abs(stops[:-1] - starts[1:]).max()
+    # the arrival of an input instant u is the t with t - by(t) = u
+    t = np.arange(g.n) / g.fs
+    arrive = lambda u: np.interp(u, t - (1e-3 + 1e-3 * np.sin(2 * np.pi * 50.0 * t)), t)  # noqa: E731
+    was = [r for r in S.intervals(src.event_list()) if arrive(r["t_start_s"]) < t[-1]]
+    assert len(was) == len(iv) > 15
+    whole = [k for k, r in enumerate(iv) if r["complete"]]
+    off = max(abs(iv[k]["t_stop_s"] - arrive(was[k]["t_stop_s"])) for k in whole)
+    stretch = [(iv[k]["t_stop_s"] - iv[k]["t_start_s"])
+               / (was[k]["t_stop_s"] - was[k]["t_start_s"]) for k in whole]
+    print(f"every sample edge is within {to_start * 1e6:.2f} us of a start and "
+          f"{to_stop * 1e6:.2f} us of an end; ends and next starts differ by {tile * 1e6:.2f} "
+          f"us at most; ends are {off * 1e6:.2f} us from the solved arrival; dwells stretched "
+          f"by {min(stretch):.2f} .. {max(stretch):.2f}")
+    assert to_start < 1.5e-6 and to_stop < 1.5e-6 and tile < 1e-6 and off < 1e-6
+    assert min(stretch) < 0.8 and max(stretch) > 1.2             # the delay did vary
+    assert iv[-1]["t_stop_s"] <= g.n / g.fs + 1e-12 and not iv[-1]["complete"]
+
+
 def test_intervals_refuses_an_at_that_nothing_is_at_and_lists_what_is():
     busy = Signal().carrier("states", dwell=20e-6)
     sig = Signal(seed=1, grid=G).carrier("dc", level=1.0).gate(by=busy)

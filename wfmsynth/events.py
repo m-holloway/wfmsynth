@@ -195,20 +195,37 @@ def shift(events, by, fs, n):
     record), in place. The output at time t is the input at ``t - by(t)``, so an event at input
     sample s arrives where ``t = s + by(t)``: `sample` and `t_s` are later by the delay AT THE
     ARRIVAL, found by iterating that (it converges because a delay changes by less than one
-    second per second). One delayed past the end of the `n`-sample record is removed, and one
-    whose extent now runs past that end is cut there (`cut`)."""
+    second per second). An event that states an EXTENT has its end moved the same way, by the
+    delay at the END's arrival, so under a delay that varies a `state` interval's `dwell_s`
+    and an `ofdm_symbol`'s `width` and `cp_s` are what the delayed samples show, stretched
+    or squeezed.
+    One delayed past the end of the `n`-sample record is removed, and one whose extent now
+    runs past that end is cut there (`cut`)."""
+    def delay_at_arrival(sample):
+        if np.ndim(by) == 0:
+            return float(by)
+        pos = float(sample)
+        for _ in range(32):
+            d = float(by[min(max(int(round(pos)), 0), n - 1)])
+            pos = sample + d * fs
+        return d
+
     kept = []
     for e in events:
-        if np.ndim(by) == 0:
-            d = float(by)
-        else:
-            pos = float(e.sample)
-            for _ in range(32):
-                d = float(by[min(max(int(round(pos)), 0), n - 1)])
-                pos = e.sample + d * fs
+        d = delay_at_arrival(e.sample)
         pos = int(e.sample) + int(round(d * fs))
         if pos >= n:
             continue
+        if np.ndim(by) and e.kind == "state" and e.t_s is not None:
+            end = e.t_s + e.params["dwell_s"]
+            e.params = dict(e.params, dwell_s=float(
+                e.params["dwell_s"] + delay_at_arrival(end * fs) - d))
+        elif np.ndim(by) and e.kind == "ofdm_symbol":
+            e.width = max(int(round(
+                e.width + (delay_at_arrival(e.sample + e.width) - d) * fs)), 1)
+            cp_s = e.params["cp_s"]
+            e.params = dict(e.params, cp_s=float(
+                cp_s + delay_at_arrival(e.sample + cp_s * fs) - d))
         e.sample = pos
         if e.t_s is not None:
             e.t_s = float(e.t_s + d)

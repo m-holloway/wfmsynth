@@ -505,7 +505,8 @@ def _render(rg):
 def run(params, grid, idx, n=None, sink=None):
     """The `ofdm` op: the record, and one `ofdm_symbol` event per symbol: `t_s` is where its
     prefix starts and ``t_s + params["cp_s"]`` where its useful part does (both move with the
-    event through a `delay`, a `sequence` or a `trigger`), `width` is its samples, and
+    event through a `delay`, a `sequence` or a `trigger`; a delay that varies stretches
+    `cp_s` and `width` with the samples), `width` is its samples, and
     `complete` is False for one a `sequence` segment or a window cut short (`events.cut`):
     the complete ones are the rows of `Signal.transmitted()`."""
     pl = _resolved(params, grid, n)

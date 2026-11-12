@@ -55,8 +55,10 @@ back as a table. `complete` is False for an interval the record cut -- the one i
 t = 0 under a stationary start, and the last -- whose `dwell_s` is the part inside the record
 and so is NOT a draw from the stated distribution. The same holds for an interval a LATER cut
 ends: the end of a `sequence` segment, of a `trigger` / `acquire` / `sample_clock(n_out=)`
-window, or of the record after a `delay` (`events.cut`). An interval already in force when
-such a window BEGINS has no event in it at all. `occupancy()` is the fraction of time the
+window, or of the record after a `delay` (`events.cut`). A `delay` that VARIES stretches and
+squeezes the intervals with the samples: each `dwell_s` is then the delayed record's, start
+to end, and no longer the draw. An interval already in force when such a window BEGINS has
+no event in it at all. `occupancy()` is the fraction of time the
 process spends in each state.
 
 USED DIRECTLY it is burst noise: add it with `combine`. As `gate(by=)` or `switch(select=)` it

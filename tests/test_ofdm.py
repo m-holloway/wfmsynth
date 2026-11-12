@@ -289,6 +289,33 @@ def test_a_symbols_event_is_on_the_records_clock_through_a_sequence_and_a_delay(
     assert useful_starts(late) == pytest.approx(want[whole], abs=1e-12)
 
 
+def test_under_a_delay_that_varies_a_symbols_extent_is_stretched_with_its_samples():
+    """A delay that grows and shrinks at up to 12 % (a carrier low enough for that Doppler to
+    fit) stretches the symbols it lets through: each event's `width` reaches the next
+    symbol's start, and its useful part starts at the arrival of the transmitted instant,
+    solved here from t - by(t) written out. Unmoved, the widths stayed 80 samples under
+    symbols 71 to 91 apart."""
+    g = grid(50, fc_hz=50e6)
+    by = dict(f_hz=5e3, amp=4e-6, offset=5e-6)
+    sig = Signal(seed=1, grid=g).ofdm(**dict(NUM, constellation="qpsk", prbs=7)).delay(
+        by=Signal().carrier("sine", **by))
+    ev = [e for e in sig.event_list() if e.kind == "ofdm_symbol"]
+    whole = [e for e in ev if e.params["complete"]]
+    gaps = [b.sample - a.sample - a.width for a, b in zip(ev[:-1], ev[1:])]
+    widths = [e.width for e in whole]
+    t = np.arange(g.n) / g.fs
+    arrive = lambda u: np.interp(                                   # noqa: E731
+        u, t - (by["offset"] + by["amp"] * np.sin(2 * np.pi * by["f_hz"] * t)), t)
+    sent = Signal(seed=1, grid=g).ofdm(**dict(NUM, constellation="qpsk", prbs=7))
+    want = arrive(sent.transmitted()[1][:len(whole)])
+    off = np.abs(np.array([e.t_s + e.params["cp_s"] for e in whole]) - want).max()
+    print(f"{len(whole)} whole symbols, {min(widths)} .. {max(widths)} samples wide; width "
+          f"against the next start {min(gaps)} .. {max(gaps)} samples; useful starts "
+          f"{off * RATE:.2f} samples from the solved arrival")
+    assert len(whole) > 30 and min(widths) < 74 and max(widths) > 88
+    assert max(abs(v) for v in gaps) <= 1 and off < 1.0 / RATE
+
+
 def test_a_symbol_that_a_segment_or_the_record_cuts_says_so_and_is_not_in_transmitted():
     o = dict(NUM, constellation="qpsk", prbs=7)
     seq = Signal(seed=1, grid=Grid(fs=RATE, n=800)).sequence(

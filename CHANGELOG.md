@@ -313,7 +313,11 @@ None of these moves a rendered sample.
     stops there, incomplete (`events.cut`). An `ofdm_symbol` event carried `t_useful_s`, an
     absolute time nothing re-timed (wrong in every later `sequence` segment and after a
     `delay`): it is gone, the useful part starting at `t_s + cp_s`; a symbol a segment cuts
-    has `complete: False`, so the complete events are `transmitted()`'s rows.
+    has `complete: False`, so the complete events are `transmitted()`'s rows. Under a
+    `delay(by=<chain>)` that varies only an event's start was re-timed: its END now is too,
+    by the delay at its own arrival, so `dwell_s` (and an `ofdm_symbol`'s `width` and `cp_s`)
+    are the delayed record's (the ends were up to 287 us from the samples' edges under a
+    delay swinging 2 ms at 50 Hz; now under 1 us).
   - `ofdm(cp=)` truncated a non-whole number (`cp=0.8e-6`, seconds, rendered with no prefix
     at all): refused, with the count it comes to.
   - `law("saleh" | "rapp")` after `Signal().use(...)` or in a shared stage was refused at

@@ -312,7 +312,8 @@ these.
 42. **A state source's cut intervals are not draws.** The interval in force at t = 0 and the
     last one carry `complete: False`; in a dwell histogram they bias it short. So does one
     that a `sequence` segment, a `trigger` / `acquire` window or a `delay` ended: it stops at
-    the cut. After `trigger`, or in a restarting `sequence` segment, the state in force at
+    the cut. After a moving `delay(by=<chain>)` every `dwell_s` is the delayed record's
+    (stretched or squeezed with the samples), so none is the draw. After `trigger`, or in a restarting `sequence` segment, the state in force at
     the window's START is missing from the event list altogether.
 43. **`recipes.fading` averages to unit power only over many Doppler periods**: MEASURED
     0.971 over 52 periods, and a first-path power of 1.34 over 10. Size the record from the
