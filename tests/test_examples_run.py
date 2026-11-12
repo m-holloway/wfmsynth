@@ -36,6 +36,7 @@ DEMOS = [
     "inductive_handover.py",
     "law_and_filter.py",
     "iq_passband.py",
+    "joins.py",
     "multi_driver_bus.py",
     "non_integer_sps.py",
     "provenance.py",

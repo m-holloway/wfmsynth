@@ -32,6 +32,8 @@ Modules / public API:
   stages        the two GENERAL stages behind Signal.law() and Signal.filter() -- a named
                 transfer law (comparator, rectifier, dead zone, ...) and a stated linear
                 filter (butter, cheby1, rrc, zpk, ...) for a shape that has no op of its own
+  joins         where a second signal meets the chain: combine (sum, product, min, max of peer
+                signals) and the signal-driven parameters gain/offset/gate/delay(by=)
   subchain      the ONE form of a signal held by an op's parameter -- a Signal, {"ops": [...]}
                 or {"from": recipe} -- and its resolver, subchain.signal()
   tolerance     unit-to-unit variation: tol() / corners() written where a number would go,
@@ -77,7 +79,7 @@ __version__ = _read_version()
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
-               tolerance, subchain)
+               tolerance, subchain, joins)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -147,7 +149,7 @@ __all__ = [
     # `resample` holds the interpolation kernel `physics` and `instrument` share. All three
     # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
     # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
-    "capture", "hdf5", "resample", "net", "scenario", "stages", "iq", "domain",
+    "capture", "hdf5", "resample", "net", "scenario", "stages", "iq", "domain", "joins",
     "LAW_KINDS", "FILTER_KINDS",
     "Hold", "Agent", "merge_holds", "hold_windows",
     "AcquisitionProfile", "acquire_record", "record_decimation",

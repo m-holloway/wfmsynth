@@ -494,7 +494,11 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                # `iq` is a SOURCE, and `upconvert` / `downconvert` change the record's DOMAIN,
                # so neither can be dropped into this sweep's real carrier chain. Each knob is
                # moved against an analytic result in tests/test_iq_domain.py.
-               "iq", "upconvert", "downconvert"}
+               "iq", "upconvert", "downconvert",
+               # the joins take a second SIGNAL (or a number that is also a signal), so there
+               # is no scalar to swap here; tests/test_joins.py moves every parameter of each
+               # and checks it moves the samples and the recipe's content address.
+               "combine", "gain", "offset", "gate", "delay"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

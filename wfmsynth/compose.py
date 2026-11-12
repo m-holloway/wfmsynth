@@ -1222,6 +1222,65 @@ def _op_filter(x, p, streams, grid, idx):
                            **{k: p[k] for k in _FILTER_KEYS if k in p})
 
 
+def _by_given(op, by):
+    if by is None or isinstance(by, (bool, str, bytes, list, tuple, np.ndarray)):
+        got = by if by is None or isinstance(by, bool) else type(by).__name__
+        raise ValueError(f"{op} needs by=: a number, or a sub-chain (a Signal, "
+                         f"{{'ops': [...]}} or {{'from': <recipe>}}); got {got!r}. A measured "
+                         f"waveform comes in through a `capture` op in a sub-chain.")
+    return float(by) if isinstance(by, (int, float, np.integer, np.floating)) else by
+
+
+def _by(p, streams, grid, idx, n):
+    """A signal-driven parameter: `by` is a number, or a sub-chain rendered on this grid."""
+    by = _by_given(p["op"], p.get("by"))
+    if isinstance(by, float):
+        return by
+    return SUB.signal(p, "by", streams, grid, idx, n=n)
+
+
+def _joined(x, p):
+    if x is None:
+        raise ValueError(f"{p['op']}: there is no waveform yet for it to act on -- put a "
+                         f"carrier before it.")
+    return x
+
+
+def _op_combine(x, p, streams, grid, idx):
+    """Peer signals joined sample by sample (`wfmsynth/joins.py`)."""
+    from . import joins as JN
+    x = _joined(x, p)
+    JN.check_combine(p.get("how", "sum"), p.get("gains"), len(p.get("others") or ()))
+    return JN.combine(x, SUB.signals(p, "others", streams, grid, idx, n=len(x)),
+                      how=p.get("how", "sum"), gains=p.get("gains"))
+
+
+def _op_gain(x, p, streams, grid, idx):
+    from . import joins as JN
+    return JN.gain(_joined(x, p), _by(p, streams, grid, idx, len(x)))
+
+
+def _op_offset(x, p, streams, grid, idx):
+    from . import joins as JN
+    return JN.offset(_joined(x, p), _by(p, streams, grid, idx, len(x)))
+
+
+def _op_gate(x, p, streams, grid, idx, sink=None):
+    """An ideal switch on an enable. `sink` collects its switching instants for
+    `Signal.realize()`, as it does a comparator's transitions."""
+    from . import joins as JN
+    return JN.gate(_joined(x, p), _by(p, streams, grid, idx, len(x)),
+                   threshold=p.get("threshold", 0.5), off=p.get("off", "zero"),
+                   fs=None if grid is None else grid.fs, events=sink, placement=f"gate/{idx}")
+
+
+def _op_delay(x, p, streams, grid, idx):
+    from . import joins as JN
+    return JN.delay(_joined(x, p), _by(p, streams, grid, idx, len(x)),
+                    None if grid is None else grid.fs,
+                    max_rate=p.get("max_rate", JN.DELAY_MAX_RATE))
+
+
 _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "capture": _op_capture, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
@@ -1241,7 +1300,9 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "dcd": _op_dcd, "agc": _op_agc, "rx_noise": _op_rx_noise,
          "sample_clock": _op_sample_clock, "burst": _op_burst, "pass_fet": _op_pass_fet,
          "modulate": _op_modulate, "law": _op_law, "filter": _op_filter,
-         "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert}
+         "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert,
+         "combine": _op_combine, "gain": _op_gain, "offset": _op_offset, "gate": _op_gate,
+         "delay": _op_delay}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1276,6 +1337,8 @@ OP_KIND = {
     "photodetect": "instrument", "scope": "instrument", "digitize": "instrument",
     "timebase": "instrument", "acquire": "instrument", "store": "instrument",
     "law": "general", "filter": "general",
+    "combine": "general", "gain": "general", "offset": "general", "gate": "general",
+    "delay": "general",
 }
 
 
@@ -1367,7 +1430,11 @@ _LEAD_LTI = {"lossy", "reflect", "resonant_reflect", "ac_couple", "sparam", "cas
              "de_emphasis", "ctle", "rx_ffe", "scope", "probe", "intra_pair_skew",
              # every `filter` kind is LTI; `integrate` alone has no end to its memory and is
              # refused in `_lead_check_ops`
-             "filter"}
+             "filter",
+             # a CONSTANT `delay` is a shift through a 32-tap interpolator, so it has an impulse
+             # response and the guard is where it reads its history from. One driven by a
+             # sub-chain never gets here: `SUB.refuse_lead_in` refuses any op holding one.
+             "delay"}
 # Ops that are skipped by the probe rather than rejected: memoryless (or a fraction of a UI of
 # interpolation), so they do not lengthen the chain's memory, or nonlinear/stochastic, so they have
 # no impulse response to measure. An OPTICAL chain is skipped because the field is complex and this
@@ -1386,6 +1453,9 @@ _LEAD_SKIP = {"carrier", "symbols", "coded", "nonlinearity", "crosstalk", "cross
               # and the caveat is the same one they already carry: a lead-in changes WHERE in
               # the on/off cycle the delivered window begins, not what the cycle is.
               "burst",
+              # `gain`, `offset` and `gate` by a NUMBER and are per-sample; with a sub-chain
+              # they, and `combine` always, are refused by `SUB.refuse_lead_in` first.
+              "combine", "gain", "offset", "gate",
               # `pass_fet` is a nonlinear per-sample decision (gate threshold, then either a
               # divider or a diode clamp) with no impulse response of its own -- the same
               # bucket `dcd`/`agc` are already in.
@@ -2073,6 +2143,101 @@ class Signal:
                                                **{k: o[k] for k in _FILTER_KEYS if k in o})}
                 for i, o in enumerate(self.ops) if o["op"] == "filter"]
 
+    def combine(self, others, how="sum", gains=None):
+        """Join this chain with other signals, sample by sample.
+
+            hum = Signal(grid=g).carrier("sine", f_hz=50.0, amp=0.02)
+            sig.combine(hum)                                   # superposition
+            sig.combine([lo], how="product")                   # an ideal mixer
+            sig.combine([a, b], how="max", gains=[1.0, 0.5])   # an ideal diode-OR
+
+        others: one sub-chain or a list of them -- a Signal, {"ops": [...]} or
+                {"from": recipe} (see `Signal.crosstalk` for the three forms). Each is rendered
+                on this record's grid; one on another grid, or a complex one, is refused.
+        how:    "sum" | "product" | "min" | "max".
+        gains:  one number per entry of `others`, applied before the join. The chain itself is
+                taken as it stands.
+
+        Each sub-chain's randomness and events sit under `combine/<op index>/others/<k>`, so
+        `roles()`, `contrast()`, `subchain()` and the event list reach inside.
+
+        A SUM IS SUPERPOSITION, which is true where the sources do not load one another: a
+        coupled ripple, an interferer, a tone on a supply. Two drivers fighting on one node is
+        not a sum -- each loads the other -- and is `net`. `crosstalk` (a coupled sum) and
+        `modulate` (AM/OOK is a product) stay the named ops for those effects. See
+        `wfmsynth.joins`."""
+        from . import joins as JN
+        if SUB.is_subchain(others) or isinstance(others, Signal):
+            others = [others]
+        if isinstance(others, (str, bytes, dict, np.ndarray)) or not hasattr(others, "__len__"):
+            raise ValueError(f"combine: others is a sub-chain or a list of them (a Signal, "
+                             f"{{'ops': [...]}} or {{'from': recipe}}), got "
+                             f"{type(others).__name__}.")
+        gains = JN.check_combine(how, gains, len(others))
+        for k, o in enumerate(others):
+            if not isinstance(o, (Signal, dict)):
+                raise ValueError(f"combine: others[{k}] is {type(o).__name__}; each entry is a "
+                                 f"sub-chain. A measured waveform comes in through a `capture` "
+                                 f"op: Signal(grid=g).capture(values=...).")
+        return self._add("combine", others=list(others), how=how,
+                         **({} if gains is None else {"gains": gains}))
+
+    def gain(self, by):
+        """Multiply by `by`: a number, or a sub-chain for a gain that moves.
+
+            ripple = Signal(grid=g).carrier("sine", f_hz=120.0, amp=0.03, offset=1.0)
+            sig.gain(by=ripple)                    # a gain riding on a supply ripple
+
+        `by` is the factor itself, so 1 leaves the signal alone. `drift(kind="gain")` is this
+        with a ramp or half-sine across the record. See `wfmsynth.joins`."""
+        return self._add("gain", by=_by_given("gain", by))
+
+    def offset(self, by):
+        """Add `by`, in the waveform's own units: a number, or a sub-chain for a baseline that
+        moves. `drift(kind="dc")` is this with a ramp scaled to the signal's swing; a second
+        signal in its own right is `combine`. See `wfmsynth.joins`."""
+        return self._add("offset", by=_by_given("offset", by))
+
+    def gate(self, by, threshold=0.5, off="zero"):
+        """Let the signal through where `by > threshold`: an ideal switch on an enable.
+
+            enable = Signal(grid=g).carrier("square", f_hz=1e3, amp=0.5, offset=0.5)
+            sig.gate(by=enable)
+
+        off: "zero" (0 while closed) or "hold" (the last value let through). Each switching
+        instant comes back from `realize()` / `event_list()` as a `transition` event with the
+        sub-sample time `by` crossed the threshold. `burst` is the named op for a periodic
+        cadence with ramped edges. See `wfmsynth.joins`."""
+        from . import joins as JN
+        JN.check_gate(threshold, off)
+        return self._add("gate", by=_by_given("gate", by), threshold=threshold, off=off)
+
+    def delay(self, by, max_rate=0.5):
+        """Delay by `by` SECONDS: a number, or a sub-chain for a delay that moves.
+
+            wobble = Signal(grid=g).carrier("sine", f_hz=1e6, amp=5e-12, offset=20e-12)
+            sig.delay(by=wobble)                   # 5 ps of periodic jitter on a 20 ps delay
+
+        Causal and band-limited: `by` is never negative, changes by less than `max_rate`
+        seconds per second (default 0.5), and the interpolation error is stated by
+        `delay_errors()`. Each of those is refused by name when it does not hold. `timing` is
+        the named op for clock jitter about zero. See `wfmsynth.joins`."""
+        from . import joins as JN
+        JN.check_delay(max_rate)
+        return self._add("delay", by=_by_given("delay", by), max_rate=max_rate)
+
+    def delay_errors(self):
+        """What every `delay` op in this chain promises, in order: a list of
+        `{"op": index, "taps", "error", "below_hz", "max_rate"}`. A tone below `below_hz` comes
+        out within `error` times its amplitude of the exact delayed tone; for one frequency
+        ask `wfmsynth.joins.delay_error(f_hz, fs)`."""
+        from . import joins as JN
+        if self.grid is None:
+            raise ValueError("delay_errors: the error is stated against the sample rate -- "
+                             "give the Signal a grid (Grid(fs=...)).")
+        return [{"op": i, **JN.describe_delay(self.grid.fs, o.get("max_rate", JN.DELAY_MAX_RATE))}
+                for i, o in enumerate(self.ops) if o["op"] == "delay"]
+
     def tx_ffe(self, taps, pre=1, **params):
         """Transmitter FFE pre-emphasis (place after carrier, before the channel). `taps`
         are per-UI weights, `pre` the number of pre-cursor taps. Puts a deliberate
@@ -2734,7 +2899,7 @@ class Signal:
                 # a mixer needs the rate the record is at NOW, which after an `acquire` or a
                 # resample is not the synthesis grid's
                 x = _EXEC[op["op"]](x, op, st, _grid_now(ops[:i], grid, x), i)
-            elif collect_events and op["op"] in ("events", "law"):
+            elif collect_events and op["op"] in ("events", "law", "gate"):
                 x = _EXEC[op["op"]](x, op, st, grid, i, sink=sink)
             elif win is not None and op["op"] in _LEAD_WINDOW_RANGED:
                 x = _EXEC[op["op"]](x, op, st, grid, i, win=win)   # range the vertical to the window

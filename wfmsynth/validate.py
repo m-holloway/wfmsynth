@@ -3064,6 +3064,78 @@ check("a tolerance inside a sub-chain is drawn by the record it joins: the aggre
       f"recipe tr_s {_jtr * 1e12:.1f} ps, measured 10-90 % {_jmeas * 1e12:.1f} ps (bound 2 %); "
       f"unit 9 has {_jother.ops[1]['aggressor']['ops'][0]['tr_s'] * 1e12:.1f} ps")
 
+print("== joins: combine, and gain / offset / gate / delay driven by a signal (GitHub #76, #79) ==")
+from wfmsynth import joins as _JN                                           # noqa: E402
+_cg = Grid(fs=1e6, baud=1e3, n=1 << 14)
+_ct = np.arange(_cg.n) / _cg.fs
+
+
+def _csin(f, amp=1.0, offset=0.0, phase_rad=0.0):
+    return Signal(grid=_cg).carrier("sine", f_hz=f, amp=amp, offset=offset, phase_rad=phase_rad)
+
+
+def _csq01():
+    return Signal(grid=_cg).carrier("square", f_hz=500.0, amp=0.5, offset=0.5)
+
+
+_cy = _csin(1e3).combine(_csin(7e3, amp=0.3, phase_rad=0.4)).waveform()
+_cw = np.sin(2 * np.pi * 1e3 * _ct) + 0.3 * np.sin(2 * np.pi * 7e3 * _ct + 0.4)
+check("combine: the sum of two sines is the analytic sum", np.array_equal(_cy, _cw),
+      f"max |diff| = {np.abs(_cy - _cw).max():.1e} (bound 0)")
+_ca = _csin(50e3).combine([_csq01()], how="product").waveform()
+_cb = _csin(50e3).modulate(kind="ook", suppressed=True, message=_csq01()).waveform()
+_cc = _csin(50e3).combine([_csq01()], how="product", gains=[2.0]).waveform()
+_cd = _csin(50e3).modulate(kind="ook", message=Signal(grid=_cg).carrier("square", f_hz=500.0)).waveform()
+check("combine: a carrier times a 0/1 square is modulate's OOK, suppressed and not",
+      np.array_equal(_ca, _cb) and np.abs(_cc - _cd).max() <= 4 * np.finfo(float).eps,
+      f"max |diff| = {np.abs(_ca - _cb).max():.1e} suppressed (bound 0), "
+      f"{np.abs(_cc - _cd).max():.1e} with the carrier kept and a gain of 2 (bound 8.9e-16)")
+_cgt = _csin(50e3).gate(by=_csq01()).waveform()
+_cbu = _csin(50e3).burst(t_on_s=1e-3, t_off_s=1e-3, edge_frac=0.0).waveform()
+_cdf = np.flatnonzero(_cgt != _cbu)
+check("gate by a square is burst at that cadence, but for burst's own one-sample ramps",
+      len(_cdf) <= 2 * 9 and set(_cdf % 2000) <= {0, 999} and not _cbu[_cdf].any(),
+      f"{len(_cdf)} of {_cg.n} samples differ, each the first or last of a burst, which "
+      f"burst zeroes and an ideal switch lets through")
+_cev = _csin(50e3).gate(by=_csin(500.0)).event_list()
+_cwant = np.sort(np.concatenate([(np.arange(9) + 1 / 12) / 500.0, (np.arange(9) + 5 / 12) / 500.0]))
+_cwant = _cwant[_cwant < _cg.n / _cg.fs]
+_cgot = np.array([e.t_s for e in _cev])
+check("gate emits its switching instants: the times a sine enable crosses the threshold",
+      len(_cgot) == len(_cwant) and np.abs(_cgot - _cwant).max() < 2e-9,
+      f"{len(_cgot)} transitions, worst {np.abs(_cgot - _cwant).max() * 1e9:.2f} ns from "
+      f"asin(0.5) (bound 2 ns: linear interpolation across a 1 us sample)")
+_cfj, _camp, _ck = 300.0, 2e-6, 4
+_cd0 = _ck / _cg.fs
+_cerr = []
+for _cf0 in (2e3, 50e3, 200e3, 390e3):
+    _cyd = _csin(_cf0).delay(by=_csin(_cfj, amp=_camp, offset=_cd0)).waveform()
+    _cex = np.sin(2 * np.pi * _cf0 * (_ct - _cd0 - _camp * np.sin(2 * np.pi * _cfj * _ct)))
+    _cerr.append((np.abs(_cyd - _cex)[24:-16].max(), _JN.delay_error(_cf0, _cg.fs)))
+check("delay: a tone under a moving delay is within the error the op reports, across the band",
+      all(e <= b + 1e-13 for e, b in _cerr) and _JN.describe_delay(_cg.fs)["error"] < 2.5e-5,
+      "measured / reported at 0.002, 0.05, 0.2, 0.39 fs: "
+      + ", ".join(f"{e:.1e} / {b:.1e}" for e, b in _cerr)
+      + f"; stated for the band below 0.4 fs: {_JN.describe_delay(_cg.fs)['error']:.2e}")
+_cyd = _csin(2e3).delay(by=_csin(_cfj, amp=_camp, offset=_cd0,
+                                  phase_rad=-2 * np.pi * _cfj * _cd0)).waveform()
+_cyt = _csin(2e3).timing(pj=dict(amp_ps=_camp * 1e12, f_hz=_cfj)).waveform()
+_cdiff = np.abs(_cyd[_ck:] - _cyt[:-_ck])[16:-16].max()
+_clin = (2 * np.pi * 2e3 / _cg.fs) ** 2 / 8
+check("delay by a sine reproduces timing's periodic jitter at that amplitude and frequency",
+      _cdiff <= _JN.delay_error(2e3, _cg.fs) + _clin
+      and np.ptp(_cyd[_ck:] - np.sin(2 * np.pi * 2e3 * _ct)[:-_ck]) > 0.02,
+      f"max |diff| = {_cdiff:.2e}; bound {_JN.delay_error(2e3, _cg.fs):.1e} (delay, reported) + "
+      f"{_clin:.2e} (timing's linear interpolation, (2*pi*f/fs)^2/8)")
+_cng = Grid(fs=64e9, baud=1e9, n=1 << 13)
+_cns = (Signal(seed=2, grid=_cng).carrier("nrz", n_ui=128)
+        .combine([Signal(grid=_cng).carrier("nrz", n_ui=128).events(kind="glitch", count=3)],
+                 gains=[0.2]))
+_cne = _cns.event_list()
+check("a combined sub-chain's events are in the record's event list under its namespace",
+      len(_cne) == 3 and {e.at for e in _cne} == {"combine/1/others/0"} and not _cne.on_record(),
+      f"{len(_cne)} events, at = {sorted({e.at for e in _cne})}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
