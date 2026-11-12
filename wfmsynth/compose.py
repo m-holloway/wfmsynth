@@ -1318,13 +1318,21 @@ def _driver_source(src, x, streams, grid, idx, did, n):
     return _source_volts(volts, y, did, last_kind)
 
 
-def _flatten_driver(d):
+def _flatten_driver(d, parent=None):
     """One driver description on the way into a recipe, with a `Signal` source chain flattened.
 
     `source={"ops": Signal(...)}` is the pleasant thing to write and is not JSON; a recipe is
     provenance only if it serialises, so the op list is taken here rather than left to fail in
     whatever writes the archive. A driver with no source, or one whose `ops` is already a list,
     passes through unchanged -- including identically, so no existing recipe moves.
+
+    Only the Signal's OPS are taken. Its seed and grid are not: a driver's chain is part of
+    this record, drawn under this record's seed and rendered on this record's grid. The
+    generic sub-chain path refuses a Signal whose seed or grid would be dropped; this one has
+    always accepted it, and refusing now would break calls that render. So where the dropped
+    seed or grid DIFFERS from the record's -- the record is then not what was written -- it
+    warns, naming what is ignored and the fix; where they are the record's own, or were left
+    at their defaults, it is silent as before.
     """
     src = d.get("source")
     if not isinstance(src, dict):
@@ -1336,12 +1344,37 @@ def _flatten_driver(d):
                 f"net: driver {d.get('id')!r}'s source Signal sets a lead-in, which renders a "
                 f"LONGER record and discards the guard. A driver's level has to be the same "
                 f"length as the net it drives, so put the lead-in on the chain the net is in.")
+        if parent is not None:
+            _warn_dropped(ops, parent, d.get("id"))
         ops = TOL.stated(ops.ops)     # its tolerances are drawn by the record it joins
     elif ops is not None:
         ops = [dict(o) for o in ops]
     else:
         return d
     return {**d, "source": {**src, "ops": ops}}
+
+
+def _warn_dropped(sig, parent, did):
+    """Say what of a driver's source Signal is not used, when it is not the record's own."""
+    who = f"net: driver {did!r}'s source"
+    fix = (f"Pass {{'from': that_signal.recipe(), 'volts': ...}} to embed it as its own record, "
+           f"with its own seed and grid.")
+    if sig.seed not in (0, parent.seed):
+        warnings.warn(
+            f"{who} is a Signal with seed={sig.seed}, and that seed is IGNORED: a driver's "
+            f"chain is part of this record and draws from this record's seed ({parent.seed}), "
+            f"so its jitter and noise are not the ones that Signal renders by itself. Leave "
+            f"the seed off the driver's chain. {fix}", RuntimeWarning, stacklevel=4)
+    g, pg = sig.grid, parent.grid
+    same = g is None or (pg is not None and dataclasses.replace(
+        g, domain=pg.domain, fc_hz=pg.fc_hz) == pg)
+    if not same:
+        warnings.warn(
+            f"{who} is a Signal on {SUB._grid_words(g)}, and that grid is IGNORED: a driver's "
+            f"chain is rendered on this record's grid, {SUB._grid_words(pg)}, and nothing is "
+            f"resampled, so its edges, rates and length are not the ones that Signal renders "
+            f"by itself. Build it on this record's grid, or with no grid. {fix}",
+            RuntimeWarning, stacklevel=4)
 
 
 def _op_net(x, p, streams, grid, idx):
@@ -3305,7 +3338,7 @@ class Signal:
         # whatever wrote the archive.
         from . import scenario as SC
         if "drivers" in params:
-            params["drivers"] = [_flatten_driver(d) for d in params["drivers"]]
+            params["drivers"] = [_flatten_driver(d, self) for d in params["drivers"]]
         if "holds" in params:
             params["holds"] = [SC.Hold.from_dict(h).to_dict() for h in params["holds"]]
         if "agents" in params:
