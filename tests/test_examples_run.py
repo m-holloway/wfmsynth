@@ -51,6 +51,7 @@ DEMOS = [
     "realistic_scenario.py",
     "rf_measures.py",
     "sim_to_real.py",
+    "state_dwell.py",
     "sub_chains.py",
     "touchstone_channel.py",
     "triggered_capture.py",

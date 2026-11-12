@@ -55,7 +55,12 @@ Modules / public API:
                 pulse-width or runt condition, keep the window (or segments, or an average)
   baseband      a channel stated at RF (lossy, sparam) applied to an I/Q record's envelope:
                 the same response read at fc_hz + f
-  recipes       arrangements of ops as plain functions returning a chain: fading(), multipath()
+  states        carrier("states"): a level that dwells in one of a few states for a time drawn
+                from a stated distribution and jumps to the next -- burst noise, or an
+                activity schedule for gate(by=) / switch(select=); intervals(), occupancy()
+  recipes       useful ARRANGEMENTS as plain functions returning a chain: fading(),
+                multipath() on an envelope; flicker() (1/f noise from superposed two-state
+                processes) and its spectrum flicker_psd()
   validate      run as `python -m wfmsynth.validate` — hard physics-property assertions
 
 A `Signal` chain is not just a serial link: `carrier()` also takes analog and CMOS/PWM
@@ -98,7 +103,7 @@ from . import (physics, impairments, events, grammar, pam4, grid, instrument, st
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
                tolerance, subchain, joins, sequence, channels, trigger, iqfile,
-               rf, baseband, recipes)
+               rf, baseband, states, recipes)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -216,7 +221,7 @@ __all__ = [
     "sinad_noise_rms", "converter_noise_rms",
     "quantisation_floor_db_per_hz",
     "tol", "corners", "unit_dataset", "unit_of", "tolerance", "subchain", "sequence",
-    "Channels", "channels",
+    "Channels", "channels", "states",
     "Signal", "dataset", "op_params", "rederive_anchor", "canonicalize", "op_kind",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",

@@ -154,6 +154,7 @@ SAID_AS = {
     ("iq", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
     ("carrier", "prbs"): "pattern='prbs7' (also 'prbs15', 'clock', ...), with seed= for its "
                          "phase; prbs=<order> is how `iq` and `coded` say it",
+    ("carrier", "transition_s"): "tr_s= (the 10-90 % time of an edge, in seconds)",
     ("trigger", "threshold"): "level= (a scope's word; `gate`, `switch` and "
                               "law('comparator') call it threshold=)",
     ("gate", "level"): _LEVEL, ("switch", "level"): _LEVEL, ("law", "level"): _LEVEL,

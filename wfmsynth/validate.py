@@ -4507,6 +4507,171 @@ check("multipath is a composition -- combine of delayed, scaled copies -- and it
       + " (stated " + " / ".join(f"{v ** 2:.4f}" for v in _cx_gn)
       + f"); worst complex tap error {np.abs(_cx_c - _cx_want).max():.1e}")
 
+# ---- carrier("states"): a level that dwells in a state and jumps (GitHub #90)
+# Each property against something that shares nothing with how the source draws: dwells
+# against scipy's distributions, occupancy against the eigenvector of the transition table,
+# jump times against crossings read off the samples, a telegraph spectrum against its
+# Lorentzian, a gated carrier against the intervals the source said it had.
+from scipy import stats as _hst
+from wfmsynth import states as _hS
+_hg = Grid(fs=1e8, n=1 << 19)                          # 10 ns per sample, 5.2 ms
+_hfix = {"dist": "fixed", "t_s": 1e-6}
+_hdists = {
+    "exponential": (3e-6, _hst.expon(scale=3e-6)),
+    "lognormal": ({"dist": "lognormal", "median_s": 2e-6, "sigma": 0.7},
+                  _hst.lognorm(s=0.7, scale=2e-6)),
+    "uniform": ({"dist": "uniform", "lo_s": 1e-6, "hi_s": 5e-6},
+                _hst.uniform(loc=1e-6, scale=4e-6))}
+_hks = {}
+for _hname, (_hspec, _hdist) in _hdists.items():
+    _hiv = _hS.intervals(Signal(seed=11, grid=_hg).carrier(
+        "states", dwell=[_hspec, _hfix]).event_list())
+    _hd = np.array([r["t_stop_s"] - r["t_start_s"] for r in _hiv
+                    if r["complete"] and r["state"] == 0])
+    _hks[_hname] = (_hd.size, _hst.kstest(_hd, _hdist.cdf).statistic * np.sqrt(_hd.size),
+                    _hst.kstest(_hd * 1.1, _hdist.cdf).statistic * np.sqrt(_hd.size))
+check("a state's dwell times follow the distribution stated for it: Kolmogorov-Smirnov "
+      "against scipy's CDF passes at the 1 % level for an exponential, a lognormal and a "
+      "uniform dwell, and the same dwells stretched by 10 % fail it",
+      all(k[0] > 1000 and k[1] < 1.628 < k[2] for k in _hks.values()),
+      "; ".join(f"{nm}: N={k[0]}, D*sqrt(N)={k[1]:.2f} (stretched 10 %: {k[2]:.2f})"
+                for nm, k in _hks.items()) + "; the 1 % critical value is 1.628")
+
+_hp3 = [[0, 0.3, 0.7], [0.5, 0, 0.5], [1, 0, 0]]
+_hd3 = [5e-6, {"dist": "lognormal", "median_s": 1e-6, "sigma": 0.8},
+        {"dist": "uniform", "lo_s": 2e-6, "hi_s": 6e-6}]
+_hw, _hv = np.linalg.eig(np.asarray(_hp3, float).T)
+_hnu = np.real(_hv[:, np.argmin(np.abs(_hw - 1))])
+_hwant = _hnu * np.array([5e-6, 1e-6 * np.exp(0.32), 4e-6])
+_hwant = _hwant / _hwant.sum()
+_hx3, _hev3 = Signal(seed=4, grid=Grid(fs=1e8, n=1 << 21)).carrier(
+    "states", levels=[0.0, 0.4, 1.0], dwell=_hd3, transitions=_hp3, tr_s=50e-9).realize()
+_hocc = np.zeros(3)
+for _hr in _hS.intervals(_hev3):
+    _hocc[_hr["state"]] += _hr["t_stop_s"] - _hr["t_start_s"]
+_hocc /= _hocc.sum()
+_hnear = np.bincount(np.argmin(np.abs(_hx3[:, None] - np.array([0.0, 0.4, 1.0])), axis=1),
+                     minlength=3) / _hx3.size
+_hplan = _hS._plan(levels=[0, 1, 2], dwell=_hd3, transitions=_hp3)
+_hfirst = np.bincount([_hS.draw(np.random.default_rng(k), 1e-9, *_hplan[1:])[0][0]
+                       for k in range(4000)], minlength=3) / 4000
+_hz0 = np.abs(_hfirst - _hwant) / np.sqrt(_hwant * (1 - _hwant) / 4000)
+check("three states with a transition table spend the time in each that theory says -- the "
+      "stationary vector of the table weighted by the mean dwells -- by the events, by the "
+      "samples, and in the state a stationary start finds the process in at t = 0",
+      np.abs(_hocc - _hwant).max() < 0.015 and np.abs(_hnear - _hwant).max() < 0.02
+      and _hz0.max() < 3.5
+      and np.allclose(_hS.occupancy(_hd3, _hp3), _hwant, atol=1e-12),
+      f"theory {np.round(_hwant, 4).tolist()}; events over 21 ms {np.round(_hocc, 4).tolist()}; "
+      f"samples nearest each level {np.round(_hnear, 4).tolist()} (bounds 0.015, 0.02); state "
+      f"at t=0 over 4000 draws {np.round(_hfirst, 4).tolist()}, worst {_hz0.max():.2f} sigma "
+      f"(bound 3.5)")
+
+
+def _hcross(x, level):
+    """Crossings of `level` in samples, by a cubic through the four samples about each."""
+    s = np.asarray(x, float) - level
+    out = []
+    for k in np.flatnonzero((s[:-1] < 0) != (s[1:] < 0)):
+        if 1 <= k < s.size - 2:
+            r = np.polynomial.Polynomial.fit(np.arange(-1, 3), s[k - 1:k + 3], 3).convert().roots()
+            r = r[np.abs(r.imag) < 1e-9].real
+            r = r[(r >= -1e-9) & (r <= 1 + 1e-9)]
+            if r.size:
+                out.append(k + r[0])
+    return np.array(out)
+
+
+_hgj = Grid(fs=1e8, n=1 << 17)
+_hxj, _hevj = Signal(seed=6, grid=_hgj).carrier(
+    "states", levels=[-1.0, 1.0], dwell=8e-6, tr_s=160e-9).realize()
+_hedge = np.array([e.t_s for e in _hevj][1:]) * _hgj.fs
+_hiso = _hedge[np.r_[True, np.diff(_hedge) > 64] & np.r_[np.diff(_hedge) > 64, True]]
+_hiso = _hiso[(_hiso > 64) & (_hiso < _hgj.n - 64)]
+_hgot = _hcross(_hxj, 0.0)
+_herr = np.array([np.abs(_hgot - e).min() for e in _hiso])
+_hsnap = np.abs(np.round(_hiso) - _hiso).max()
+_hfine = [e.t_s for e in Signal(seed=6, grid=Grid(fs=4e8, n=1 << 19)).carrier(
+    "states", levels=[-1.0, 1.0], dwell=8e-6, tr_s=160e-9).event_list()]
+check("a jump is at its own time, not on the grid: the level is half way at the instant its "
+      "`state` event states, between samples, and the same seed is the same process on a "
+      "grid four times as fast",
+      _hiso.size > 100 and _herr.max() < 2e-3 and _hsnap > 0.4
+      and _hfine == [e.t_s for e in _hevj],
+      f"{_hiso.size} isolated jumps with 16-sample edges, at fractions of a sample from "
+      f"{(_hiso % 1).min():.3f} to {(_hiso % 1).max():.3f}: |crossing - stated time| at most "
+      f"{_herr.max():.1e} sample (bound 2e-3; rounded to the grid it would be {_hsnap:.2f}); "
+      f"{len(_hfine)} interval times identical at 100 MSa/s and 400 MSa/s")
+
+_hbusy = dict(dwell=[5e-6, {"dist": "lognormal", "median_s": 2e-6, "sigma": 0.5}])
+_hgate = []
+_ht = np.arange(_hg.n) / _hg.fs
+for _htr, _hcausal in ((None, False), (100e-9, False), (100e-9, True)):
+    _hsig = Signal(seed=5, grid=_hg).carrier("dc", level=1.0).gate(by=Signal().carrier(
+        "states", causal=_hcausal, **_hbusy, **({} if _htr is None else {"tr_s": _htr})))
+    _hxg, _hevg = _hsig.realize()
+    _hivg = _hS.intervals(_hevg, at="gate/1/by")
+    _hw = 4 / _hg.fs if _htr is None else _htr
+    _hin = _hbad = 0
+    for _hr in _hivg:
+        _hm = (_ht >= _hr["t_start_s"] + _hw) & (_ht <= _hr["t_stop_s"] - _hw)
+        _hin += int(_hm.sum())
+        _hbad += int(np.sum(_hxg[_hm] != float(_hr["state"])))
+    _hopen = np.array([e.t_s for e in _hevg if e.kind == "transition"])
+    _hsaid = np.array([r["t_start_s"] for r in _hivg[1:]])
+    _hgate.append((_hin / _hg.n, _hbad, max(np.abs(_hsaid - c).min() for c in _hopen) / _hw,
+                   _hopen.size, _hsaid.size))
+check("a carrier gated by a state process is idle exactly where the intervals say: more "
+      "than tr_s inside an interval every sample is the carrier or zero as that state says, "
+      "and each instant the gate switched is within tr_s of a stated boundary",
+      all(g[0] > 0.9 and g[1] == 0 and g[2] <= 1.0 and g[3] <= g[4] for g in _hgate),
+      "; ".join(f"{nm}: {g[0] * 100:.1f} % of samples checked, {g[1]} wrong, switching "
+                f"within {g[2]:.2f} tr_s, {g[3]} switchings for {g[4]} boundaries"
+                for nm, g in zip(("default 4-sample edge", "tr_s=100 ns",
+                                  "tr_s=100 ns causal"), _hgate))
+      + " (a dwell shorter than the edge is a runt the gate does not see)")
+
+_hgn = Grid(fs=1e7, n=1 << 21)
+_ht0, _ht1, _hdv = 40e-6, 10e-6, 0.05
+_hclean = Signal(seed=8, grid=_hgn).carrier("sine", f_hz=1e5, amp=0.5)
+_hnoisy = _hclean.copy().combine(Signal().carrier("states", levels=[0.0, _hdv],
+                                                  dwell=[_ht0, _ht1]))
+_hrts = _hnoisy.subchain("combine/1/others/0")
+_hp0, _hp1, _hrate = _ht0 / (_ht0 + _ht1), _ht1 / (_ht0 + _ht1), 1 / _ht0 + 1 / _ht1
+_hf, _hpxx = sp.welch(_hrts, fs=_hgn.fs, nperseg=1 << 14)
+_hb = (_hf >= 1e3) & (_hf <= 2e5)
+_hlor = 4 * _hdv ** 2 * _hp0 * _hp1 * _hrate / (_hrate ** 2 + (2 * np.pi * _hf[_hb]) ** 2)
+_hldb = 10 * np.log10(_hpxx[_hb] / _hlor)
+check("burst noise added with `combine` is the telegraph process theory describes: the "
+      "record is the clean signal plus the sub-chain, its variance is dv^2 p0 p1, and its "
+      "spectrum is the Lorentzian with corner (1/t0 + 1/t1) / 2 pi",
+      np.array_equal(_hnoisy.waveform(), _hclean.waveform() + _hrts)
+      and abs(_hrts.var() / (_hdv ** 2 * _hp0 * _hp1) - 1) < 0.08
+      and abs(_hldb.mean()) < 0.5 and _hldb.std() < 1.0
+      and _hnoisy.roles() == ["combine/1/others/0/states/0"],
+      f"dwells 40 us / 10 us, step 50 mV: variance {_hrts.var():.3e} (theory "
+      f"{_hdv ** 2 * _hp0 * _hp1:.3e}, bound 8 %); Welch PSD against the Lorentzian (corner "
+      f"{_hrate / (2 * np.pi) / 1e3:.1f} kHz) over 1 kHz..200 kHz: mean {_hldb.mean():+.2f} dB "
+      f"(bound 0.5), rms {_hldb.std():.2f} dB (bound 1.0)")
+
+from wfmsynth import recipes as _hR
+_hgf = Grid(fs=1e6, n=1 << 21)
+_hfl = Signal(seed=3, grid=_hgf).carrier("dc", level=0.0).combine(
+    _hR.flicker(f_lo_hz=10.0, f_hi_hz=1e5, rms=0.1))
+_hxf = _hfl.waveform()
+_hf, _hpxx = sp.welch(_hxf, fs=_hgf.fs, nperseg=1 << 15)
+_hb = (_hf >= 100.0) & (_hf <= 1e4)
+_hslope = np.polyfit(np.log10(_hf[_hb]), np.log10(_hpxx[_hb]), 1)[0]
+_hfdb = 10 * np.log10(_hpxx[_hb] / _hR.flicker_psd(_hf[_hb], 10.0, 1e5, rms=0.1))
+check("1/f noise is a COMPOSITION of two-state processes (`recipes.flicker`), not an op: "
+      "nine of them with corners two per decade from 10 Hz to 100 kHz have a spectral "
+      "slope of -1 over 100 Hz..10 kHz and the spectrum of their Lorentzians summed",
+      abs(_hslope + 1.0) < 0.1 and abs(_hfdb.mean()) < 0.5 and _hfdb.std() < 1.0
+      and len(_hfl.roles()) == 9 and abs(_hxf.std() / 0.1 - 1) < 0.1,
+      f"slope {_hslope:.3f} (bound -1 +/- 0.1) by Welch over 2.1 s; against `flicker_psd` "
+      f"mean {_hfdb.mean():+.2f} dB (bound 0.5), rms {_hfdb.std():.2f} dB (bound 1.0); rms "
+      f"{_hxf.std():.4f} for 0.1 stated; {len(_hfl.roles())} roles, one per process")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

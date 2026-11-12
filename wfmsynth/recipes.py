@@ -5,6 +5,16 @@ expresses. Anything that can be written as a chain of existing ops is not an op:
 as a function that returns a `Signal()` sub-chain. Nothing is hidden by that -- `summary()`,
 the recipe, `roles()` and `contrast()` show the ops it is made of, and a caller can take the
 chain and change one of them. A function here adds no mechanism and no parameter to any op.
+Each states what it claims and over what range, and `wfmsynth.validate` measures it.
+
+    fading        a moving, scattering path's complex gain (Rayleigh, or Rician with a line
+                  of sight): complex noise through `filter("doppler")`. For `gain(by=)` on an
+                  I/Q record.
+    multipath     delayed, scaled (and optionally fading) copies of one transmitted envelope,
+                  joined by `combine`.
+    flicker       noise with a 1/f spectrum between two stated frequencies: two-state
+                  `carrier("states")` processes superposed, their corners spaced evenly in
+                  log frequency. `flicker_psd` is the spectrum the arrangement has.
 
     import wfmsynth as ws
     tx = ws.Signal(seed=1, grid=g).iq("qpsk", prbs=11)
@@ -12,8 +22,10 @@ chain and change one of them. A function here adds no mechanism and no parameter
                               doppler_hz=200.0).awgn(es_n0_db=20)
     print(rx.summary())                                    # every op of every path
 
-    fade = ws.recipes.fading(doppler_hz=200.0)             # a unit-power complex gain
-    tx.gain(by=fade)
+    tx.gain(by=ws.recipes.fading(doppler_hz=200.0))        # a unit-power complex gain
+
+    noise = ws.recipes.flicker(f_lo_hz=1e3, f_hi_hz=1e6, rms=0.02)
+    ws.Signal(seed=1, grid=g).carrier("sine", f_hz=1e5).combine(noise)
 """
 from __future__ import annotations
 
@@ -108,3 +120,48 @@ def multipath(tx, delays_s, gains, doppler_hz=None, shape="jakes"):
 
     paths = [path(d, g) for d, g in zip(delays_s, gains)]
     return paths[0].combine(paths[1:]) if len(paths) > 1 else paths[0]
+
+
+def _corners(f_lo_hz, f_hi_hz, per_decade):
+    if not (np.isfinite(f_lo_hz) and np.isfinite(f_hi_hz) and 0 < f_lo_hz < f_hi_hz):
+        raise ValueError(f"flicker: the band is 0 < f_lo_hz < f_hi_hz, got {f_lo_hz!r} and "
+                         f"{f_hi_hz!r}.")
+    if int(per_decade) != per_decade or per_decade < 1:
+        raise ValueError(f"flicker: per_decade is a whole number of processes per decade of "
+                         f"frequency, at least 1; got {per_decade!r}.")
+    m = int(round(per_decade * np.log10(f_hi_hz / f_lo_hz))) + 1
+    return np.geomspace(float(f_lo_hz), float(f_hi_hz), max(m, 2))
+
+
+def flicker(f_lo_hz, f_hi_hz, rms=1.0, per_decade=2, tr_s=None):
+    """Noise whose spectrum falls as 1/f between `f_lo_hz` and `f_hi_hz`, as a sub-chain.
+
+    It is what 1/f noise is in a small device: many traps, each a two-state telegraph process
+    with its own time constant. One symmetric process with mean dwell ``1 / (pi * fc)`` has a
+    Lorentzian spectrum with its corner at `fc`; `per_decade` of them per decade of corner
+    frequency, equal in amplitude, sum to 1/f between the lowest and highest corner, flat
+    below and 1/f^2 above (`flicker_psd`). The samples are a sum of `M` two-level signals, so
+    they are NOT Gaussian: `M + 1` discrete levels, which is the point of building it this
+    way. Each process has its own role (`states/0`, `combine/1/others/<k>/states/0`).
+
+    `rms` is the standard deviation of the whole sum. The record has to be long enough to
+    hold the slowest process -- several times ``1 / f_lo_hz`` -- and the grid fast enough to
+    sample the fastest: its mean dwell ``1 / (pi * f_hi_hz)`` must be at least one sample,
+    which `carrier("states")` enforces. `tr_s` is each jump's 10-90 % time."""
+    fc = _corners(f_lo_hz, f_hi_hz, per_decade)
+    a = float(rms) / np.sqrt(fc.size)
+    edge = {} if tr_s is None else {"tr_s": tr_s}
+    traps = [Signal().carrier("states", levels=[-a, a], dwell=float(1.0 / (np.pi * f)), **edge)
+             for f in fc]
+    return traps[0].combine(traps[1:])
+
+
+def flicker_psd(f_hz, f_lo_hz, f_hi_hz, rms=1.0, per_decade=2):
+    """The one-sided power spectral density of `flicker(...)` at `f_hz`, per hertz: the sum of
+    its processes' Lorentzians, ``(2 a^2 / (pi fc)) / (1 + (f / fc)^2)`` each. Away from the
+    ends of the band it is ``a^2 * per_decade / (ln(10) * f)``. Edge shaping (`tr_s`) and the
+    grid take it down further near Nyquist; this is the process itself."""
+    fc = _corners(f_lo_hz, f_hi_hz, per_decade)
+    a2 = float(rms) ** 2 / fc.size
+    f = np.asarray(f_hz, float)[..., None]
+    return np.sum((2.0 * a2 / (np.pi * fc)) / (1.0 + (f / fc) ** 2), axis=-1)

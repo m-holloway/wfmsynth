@@ -55,6 +55,8 @@ from .streams import Streams
 from .stages import LAW_KEYS as _LAW_KEYS, FILTER_KEYS as _FILTER_KEYS
 from . import rf as RF
 from .rf import AWGN_KEYS as _AWGN_KEYS, DAC_KEYS as _DAC_KEYS
+from . import states as STATES
+from .states import KEYS as _STATES_KEYS
 
 
 # --------------------------------------------------------------- op executors
@@ -119,8 +121,11 @@ def _carrier(p, streams, grid, idx):
         if p["kind"] == "noise" and "rng" in ok:
             kw2["rng"] = streams.role(f"carrier_noise/{idx}")
         return fn(**kw2)
+    if p["kind"] == "states":
+        return STATES.run(streams, grid, idx)         # refused: a bare spec has no event list
     raise ValueError(f"unknown carrier kind {p['kind']!r} (use 'nrz', 'pam4', 'pam<N>', "
-                     f"one of {P.ANALOG_KINDS}, one of {P.VOLTS_ANALOG_KINDS}, or 'arbitrary')")
+                     f"one of {P.ANALOG_KINDS}, one of {P.VOLTS_ANALOG_KINDS}, 'states', or "
+                     f"'arbitrary')")
 
 
 # ------------------------------------------------------------------ which roles an op draws
@@ -165,7 +170,7 @@ def _op_roles(op, i):
     """The role names op `op` at index `i` draws from, in a fixed order."""
     name = op["op"]
     if name == "carrier":
-        return _spec_roles(op, i)
+        return [f"states/{i}"] if op.get("kind") == "states" else _spec_roles(op, i)
     if name in ("symbols", "coded"):
         return [f"jitter/{i}"] if _rj(op.get("jitter")) else []
     if name == "crosstalk":
@@ -229,6 +234,10 @@ def _op_roles(op, i):
 
 
 def _op_carrier(x, p, streams, grid, idx):
+    if p.get("kind") == "states":                 # a renewal process (`wfmsynth/states.py`)
+        STATES.check(p)
+        return STATES.run(streams, grid, idx, n=_grid_n(grid, p),
+                          **{k: p[k] for k in _STATES_KEYS if k in p})
     _warn_default_n_ui(p, grid)
     return _carrier(p, streams, grid, idx)
 
@@ -2006,6 +2015,12 @@ def _lead_source_geometry(ops, grid):
                              f"lead-in because {_LEAD_REJECT[src['op']]}")
         raise ValueError(f"a lead-in needs the first op to be the source; ops[0] is "
                          f"{src['op']!r}. The lead-in is rendered BY the source.")
+    if src.get("kind") == "states":
+        raise ValueError(
+            "lead_in: a 'states' source has no pattern for a lead-in to extend, and the "
+            "interval in force when the record starts would lose its event. With "
+            "start='stationary' (the default) the process is already running at t = 0; for "
+            "the stages after it, render a longer record and discard its head.")
     n = _grid_n(grid, src)
     if n is None:
         raise ValueError("a lead-in needs the record length: pass grid=Grid(n=...) or n= on the "
@@ -2749,7 +2764,14 @@ class Signal:
         not the +/-1 amp/offset the rest of these share (tr_s is an absolute edge time in
         seconds, unlike every tr_frac above -- a real gate's edge does not shrink with
         frequency). Compose `probe(r_source=..., c_load_f=...)` after it for a loaded-output
-        RC pole rather than reaching for a knob here."""
+        RC pole rather than reaching for a knob here.
+
+        'states' is a level that dwells in one of a few states and jumps between them -- burst
+        noise when added with `combine`, an activity schedule as `gate(by=)` or
+        `switch(select=)`: levels, dwell (seconds: a mean, or a named distribution per state),
+        transitions, start, tr_s. Its intervals are `state` events. See `wfmsynth.states`."""
+        if kind == "states":
+            STATES.check(_stated(self._drawn(params)))
         return self._add("carrier", kind=kind, **params)
 
     def nonlinearity(self, **params):
