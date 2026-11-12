@@ -26,22 +26,29 @@ and `Signal().iq("qam16", ...)` an envelope whatever record they sit in. That is
 envelope be gated by a real enable or scaled by a real supply. A Signal that states a grid is
 still held to it: a voltage source on an I/Q grid is a contradiction and is refused.
 
-WHAT THE GENERAL STAGES MEAN ON AN ENVELOPE, each tested both ways in tests/test_iq_seams.py:
+WHAT THE GENERAL STAGES MEAN ON AN ENVELOPE, each tested both ways (tests/test_iq_seams.py,
+test_envelope_joins.py, test_envelope_law.py, test_baseband_channel.py):
 
     filter                 yes  its response is stated on the grid, about the centre frequency
-    gain(by=)              yes  a real factor scales I and Q alike (a supply, an AGC, a fade)
+    gain(by=)              yes  a real factor scales I and Q alike (a supply, an AGC); a
+                                COMPLEX one -- a number or an I/Q chain -- also turns the
+                                envelope (a path's phase, a fade)
     gate(by=)              yes  a real enable switches the envelope (a burst, a T/R switch)
     combine(how="sum")     yes  envelopes about the SAME centre add: an interferer, a blocker
     sequence, switch       yes  I/Q chains in time order (preamble then payload); `select` real
     use                    yes  a named chain is whatever domain its own ops make it
+    delay(by=)             yes  the envelope is shifted AND the carrier turned by
+                                -2*pi*fc*delay: the envelope of the delayed passband signal.
+                                Needs the centre frequency to have been stated
+    law                    yes  for the ENVELOPE laws `saleh` and `rapp` only: an amplifier's
+                                AM/AM and AM/PM on the magnitude. The voltage laws stay
+                                refused (and the envelope laws are refused on a voltage)
+    lossy, sparam          yes  the channel's response read at fc + f, its baseband
+                                equivalent (`wfmsynth.baseband`). The other channel ops no
     combine product/min/max no  a product of envelopes is not a mixer and an order of complex
                                 numbers does not exist
     offset                  no  a real number added to an envelope is a leak on the I rail
                                 only; `iq_offset(i=, q=)` says which rail
-    delay                   no  delaying a passband signal also turns its carrier by
-                                -2*pi*fc*delay, which an envelope-only shift leaves out
-    law                     no  the laws act on a voltage; `dac` is the quantiser of an
-                                envelope, and an amplifier acts on the passband record
     trigger                 no  a scope triggers on a voltage
 
 AN OP IS REAL-ONLY UNLESS IT SAYS OTHERWISE. That is the whole safety of the design: an op
@@ -81,14 +88,21 @@ table above read with "field" for "envelope", the same yes and the same no:
 
     filter                 yes  an optical filter about the carrier (a demux, an ASE filter)
     gain(by=)              yes  a real factor on the FIELD: a variable attenuator. Power goes
-                                as its square
+                                as its square. A complex NUMBER is an arm's loss and phase;
+                                a factor that moves stays real (an I/Q chain is no field's)
     gate(by=)              yes  a shutter, an optical switch
     combine(how="sum")     yes  a coupler: fields about the same carrier add COHERENTLY, so
                                 two equal fields give four times the power, or none
     sequence, switch       yes  field chains in time order; `select` real
     use, Channels          yes  a named chain is whatever its own ops make it
-    combine product/min/max, offset, delay, law, trigger    no, each for the reason above
-                                (a delayed field is also turned by its carrier's phase)
+    combine product/min/max, offset, trigger    no, each for the reason above
+    delay                   no  a delayed field is also turned by its carrier's phase, and
+                                a field's grid states no carrier to turn it by (an envelope's
+                                does, which is why `delay` is in for I/Q): delay the drive
+                                before `eo` or the photocurrent after `photodetect`
+    law                     no  the envelope laws are an RF amplifier's; a modulator's law is
+                                `eo(kind=)` and a detector's `photodetect`
+    lossy, sparam           no  a field's channel is `fiber`
 
 POLARISATION is two fields, and two chains of one record are what `Channels` is: no part of
 the domain. Both through one fibre, and a detector that sees both powers:
@@ -99,9 +113,11 @@ the domain. Both through one fibre, and a detector that sees both powers:
 
 "A linear filter is linear, so it works on complex too" is NOT sufficient reason to opt in. The
 general `filter` op is in because its response is stated relative to the grid. A channel stated
-at RF (`lossy(loss_at_ghz=26)`) applied to an envelope filters around DC, not
-around the carrier, which is a different channel -- its baseband equivalent is the response
-shifted down by `fc_hz`, and that is new physics to write and check, not a flag to flip.
+at RF (`lossy(loss_at_ghz=26)`) applied to an envelope's samples as they stand filters around
+DC, not around the carrier, which is a different channel -- its baseband equivalent is the
+response shifted down by `fc_hz`. `lossy` and `sparam` are opted in on exactly that footing:
+`wfmsynth.baseband` is the physics, and tests/test_baseband_channel.py checks it against the
+passband route. The channel ops built on a delay or a second signal are not.
 """
 from __future__ import annotations
 
@@ -132,6 +148,16 @@ ACCEPTS = {
     # a real enable, I/Q peers -- is checked where the op runs.
     # On an optical field they are an attenuator, a shutter, a coupler and a switch.
     "gain": ANY, "gate": ANY, "combine": ANY, "sequence": ANY, "switch": ANY,
+    # an envelope is shifted and its carrier turned by -2*pi*fc*delay: the envelope of the
+    # delayed passband signal (`wfmsynth/joins.py`, tests/test_envelope_joins.py). Not a
+    # field: its grid states no optical carrier to turn it by
+    "delay": BOTH,
+    # `law` has kinds for each: a voltage law on a voltage, an amplifier's AM/AM and AM/PM on
+    # an envelope's magnitude; the kind handed the other is refused by `stages.refuse_law`
+    "law": BOTH,
+    # a channel that is ONE stated frequency response is read about the envelope's centre,
+    # H(fc + f): the baseband equivalent (`wfmsynth/baseband.py`, tests/test_baseband_channel.py)
+    "lossy": BOTH, "sparam": BOTH,
     # a named chain of a several-channel record: whatever its own ops make it (`trace`)
     "use": ANY,
     # the optical field path (`wfmsynth/optical.py`): a modulator takes a real drive, the
@@ -146,11 +172,6 @@ _INSTEAD = {
     IQ: {
         "offset": "On an envelope a real number is a leak on the I rail alone: "
                   "iq_offset(i=, q=) states both rails.",
-        "delay": "A delay of a passband signal also turns its carrier by -2*pi*fc*delay, "
-                 "which shifting the envelope alone would leave out; delay the real passband "
-                 "record.",
-        "law": "The laws act on a voltage. dac(bits=) is the quantiser of an envelope, and an "
-               "amplifier's law acts on the passband record.",
         "trigger": "A scope triggers on a voltage.",
         "rx_noise": "Noise on an envelope is awgn(snr_db= | es_n0_db= | eb_n0_db=): circular, "
                     "and stated against the signal's power.",
@@ -176,8 +197,9 @@ _INSTEAD = {
                  "as a whole keeps its intensity), or the photocurrent after photodetect; a "
                  "delayed COPY beating with the field is optical_mpi(delay_samples=, "
                  "reflectivity=).",
-        "law": "The laws act on a voltage. The modulator's law is eo(kind=) and the detector's "
-               "is photodetect, which is square-law.",
+        "law": "The laws act on a voltage, or (saleh, rapp) on an RF amplifier's envelope. "
+               "The modulator's law is eo(kind=) and the detector's is photodetect, which is "
+               "square-law.",
         "trigger": "A scope triggers on a voltage.",
         "rx_noise": "Noise on a field is an amplifier's: edfa(gain_db=, nf_db=). The "
                     "receiver's own is photodetect(shot=True) and tia(thermal_rms=).",

@@ -127,7 +127,6 @@ def test_sequence_and_switch_join_iq_chains_and_keep_a_real_selector():
 # ------------------------------------------------------------------ the ones that are refused
 @pytest.mark.parametrize("build,says", [
     (lambda s: s.offset(by=0.1), "iq_offset(i=, q=)"),
-    (lambda s: s.delay(by=1e-9), "-2*pi*fc*delay"),
     (lambda s: s.law("tanh", gain=2.0), "dac(bits=)"),
     (lambda s: s.trigger(pre_s=1e-6, post_s=1e-6), "triggers on a voltage"),
 ])
@@ -153,9 +152,8 @@ def test_combine_on_iq_is_a_sum_only(how):
 def test_the_other_signal_is_refused_in_the_wrong_domain():
     with pytest.raises(ValueError, match="REAL waveform.*I/Q chain"):
         env().combine(Signal().carrier("sine", f_hz=1e6)).waveform()
-    for stage in ("gain", "gate"):                  # `by` is a real factor or enable, never I/Q
-        with pytest.raises(ValueError, match="COMPLEX"):
-            getattr(env(), stage)(by=env(seed=5)).waveform()
+    with pytest.raises(ValueError, match="COMPLEX"):     # an enable is real; a gain may be
+        env().gate(by=env(seed=5)).waveform()             # complex (tests/test_envelope_joins.py)
     with pytest.raises(ValueError, match="COMPLEX"):
         Signal(seed=1, grid=G).switch(select=env(), inputs=[env(), env(seed=5)]).waveform()
     # a Signal that STATES an I/Q grid is still held to it
@@ -227,9 +225,9 @@ def test_a_record_holds_an_iq_channel_and_the_real_supply_that_scales_it():
     iq_only = ws.Channels({"rf": Signal().iq("qpsk", prbs=9)}, seed=1, grid=G)
     assert rec.stored_grid("rf", x["rf"]).fs == FS
     assert iq_only.stored_grid("rf", iq_only.waveforms()["rf"]).domain == "iq"
-    with pytest.raises(ValueError, match="lossy.*complex baseband"):
+    with pytest.raises(ValueError, match="reflect.*complex baseband"):
         ws.Channels({"rf": Signal().iq("qpsk", prbs=9).use("line")},
-                    shared={"line": Signal().lossy(loss_db=3.0, loss_at_ghz=1.0)},
+                    shared={"line": Signal().reflect(td_ps=100.0, gamma_s=0.2, gamma_l=0.2)},
                     seed=1, grid=G)
 
 

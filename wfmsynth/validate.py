@@ -2935,10 +2935,10 @@ def _qrefusal(fn):
 
 
 _qmsg = _qrefusal(lambda: Signal(seed=1, grid=_qgs).iq("qpsk", prbs=9)
-                  .lossy(loss_db=3.0, loss_at_ghz=1.0))
+                  .reflect(td_ps=100.0, gamma_s=0.2, gamma_l=0.2))
 check("a real-only op handed an I/Q record refuses BY NAME, saying which op converts; complex "
       "samples offered to a real record are refused, not cast",
-      _qmsg.startswith("lossy") and "'iq'" in _qmsg and "upconvert(" in _qmsg
+      _qmsg.startswith("reflect") and "'iq'" in _qmsg and "upconvert(" in _qmsg
       and "complex (I/Q)" in _qrefusal(
           lambda: Signal(seed=0, grid=Grid(fs=_qfs, n=len(_qx), domain="real"))
           .capture(values=_qx)),
@@ -4327,6 +4327,185 @@ check("two polarisations are a Channels pair through one shared fibre, and a det
       f"|pd - (|Ex|^2 + |Ey|^2)| <= {_operr:.1e}; x, y stored as "
       f"{_opol.stored_grid('x', _opw['x']).domain}, pd as "
       f"{_opol.stored_grid('pd', _opw['pd']).domain}")
+
+# ============================================ complex joins and an envelope's channel (#89)
+# What an I/Q record could not say before: a channel stated at RF, a delay, a complex gain, an
+# amplifier's AM/PM, a fade. Each is checked against the PASSBAND route (upconvert -> the real
+# op -> downconvert) where one exists, and against a closed form or a statistical test where it
+# does not. Both routes are handed the envelope a passband record holds, so the mixers'
+# low-pass is common to them and the comparison is of the op.
+print("\n== complex joins and a baseband-equivalent channel on I/Q records (GitHub #89) ==")
+from scipy import stats as _cx_stats                                        # noqa: E402
+from wfmsynth import joins as _cx_jn, recipes as _cx_rc, stages as _cx_st   # noqa: E402
+
+_cx_F, _cx_fc = 16e9, 3e9
+_cx_g = Grid(fs=_cx_F, baud=250e6, n=1 << 15, fc_hz=_cx_fc)
+_cx_lpf = dict(pass_hz=1.0e9, stop_hz=2.5e9, atten_db=100)
+
+
+def _cx_pass():
+    return Signal(seed=1, grid=_cx_g).iq("qam16", prbs=11).upconvert()
+
+
+def _cx_down(s, fs_out_hz=_cx_F / 2):
+    return s.downconvert(fc_hz=_cx_fc, lpf=_cx_lpf, fs_out_hz=fs_out_hz)
+
+
+def _cx_worst(a, b, edge=400):
+    return float(np.abs(a - b)[edge:-edge].max() / np.abs(a).max())
+
+
+_cx_kw = dict(loss_db=12.0, loss_at_ghz=3.0, causal=True)
+_cx_ref = _cx_down(_cx_pass().lossy(**_cx_kw)).waveform()
+_cx_got = _cx_down(_cx_pass()).lossy(**_cx_kw).waveform()
+_cx_plain = _cx_down(_cx_pass()).waveform()
+_cx_e = _cx_worst(_cx_ref, _cx_got)
+check("lossy on an I/Q record is the channel read at fc + f: the envelope route agrees with "
+      "upconvert -> lossy -> downconvert to 3e-4 of peak, on a channel that moves the record "
+      "by most of its amplitude",
+      _cx_e < 3e-4 and _cx_worst(_cx_plain, _cx_got) > 0.5,
+      f"12 dB at 3 GHz, minimum phase: worst {_cx_e:.2e} of peak; the channel itself moved "
+      f"the record by {_cx_worst(_cx_plain, _cx_got):.2f}")
+_cx_g24 = Grid(fs=20e6, n=4000, fc_hz=2.4e9)
+_cx_tone = (Signal(seed=1, grid=_cx_g24).capture(values=np.ones(4000, complex))
+            .freq_offset(f_hz=3e6).lossy(loss_db=6.0, loss_at_ghz=2.4, linear=False).waveform())
+_cx_law = 10 ** (-P.insertion_loss_db(2.403, loss_db=6.0, loss_at_ghz=2.4) / 20)
+check("  ... on a grid that cannot hold the carrier: a tone 3 MHz above a 2.4 GHz centre, on a "
+      "20 MSa/s record, loses what the law says at 2.403 GHz",
+      np.allclose(np.abs(_cx_tone), _cx_law, rtol=1e-12),
+      f"|H| = {np.abs(_cx_tone).mean():.9f}, the law {_cx_law:.9f} "
+      f"({-20 * np.log10(_cx_law):.4f} dB; the same op about DC would lose "
+      f"{P.insertion_loss_db(0.003, loss_db=6.0, loss_at_ghz=2.4):.2f} dB)")
+
+_cx_wob = dict(f_hz=20e6, amp=40e-12, offset=200e-12)
+_cx_ref = _cx_down(_cx_pass().delay(by=Signal().carrier("sine", **_cx_wob)), None).waveform()
+_cx_got = _cx_down(_cx_pass(), None).delay(by=Signal().carrier("sine", **_cx_wob)).waveform()
+_cx_e = _cx_worst(_cx_ref, _cx_got, 800)
+_cx_bound = 2 * _cx_jn.describe_delay(_cx_F)["error"]
+_cx_gd = Grid(fs=1e6, n=1 << 14, fc_hz=2.4e9)
+_cx_y = (Signal(seed=1, grid=_cx_gd).capture(values=np.ones(_cx_gd.n, complex))
+         .delay(by=Signal().carrier("dc", level=1e-5).filter("integrate", tau_s=1.0)).waveform())
+_cx_f = np.polyfit(np.arange(_cx_gd.n)[64:-64] / 1e6,
+                   np.unwrap(np.angle(_cx_y[64:-64])), 1)[0] / (2 * np.pi)
+check("delay on an I/Q record shifts the envelope AND turns the carrier by -2*pi*fc*delay: a "
+      "moving delay agrees with upconvert -> delay -> downconvert to the interpolator's own "
+      "stated error, and a delay growing at 1e-5 s/s is a Doppler shift of -fc * 1e-5",
+      _cx_e < _cx_bound and abs(_cx_f + 24e3) < 24.0,
+      f"200 +/- 40 ps at 20 MHz on a 3 GHz carrier: worst {_cx_e:.2e} of peak (bound "
+      f"{_cx_bound:.1e}); Doppler measured {_cx_f:.2f} Hz against -24000")
+
+_cx_sal = dict(alpha_a=2.1587, beta_a=1.1517, alpha_phi_rad=4.0033, beta_phi=9.1040)
+_cx_ga = Grid(fs=8e6, n=4096, fc_hz=1e9)
+_cx_x = np.where(np.arange(4096) < 2048, 0.3 * np.exp(0.4j), 0.9 * np.exp(-1.1j))
+_cx_y = Signal(seed=1, grid=_cx_ga).capture(values=_cx_x).law("saleh", **_cx_sal).waveform()
+_cx_r = np.array([0.3, 0.9])
+_cx_amp = _cx_sal["alpha_a"] * _cx_r / (1 + _cx_sal["beta_a"] * _cx_r ** 2)
+_cx_phi = _cx_sal["alpha_phi_rad"] * _cx_r ** 2 / (1 + _cx_sal["beta_phi"] * _cx_r ** 2)
+_cx_gota = np.abs(_cx_y[[0, -1]])
+_cx_gotp = np.angle(_cx_y[[0, -1]] * np.conj(_cx_x[[0, -1]]))
+check("AM/PM is a mechanism: law('saleh') on a two-level envelope gives each level the "
+      "law's output magnitude and the law's phase, and the two levels are turned differently",
+      np.allclose(_cx_gota, _cx_amp, rtol=1e-12) and np.allclose(_cx_gotp, _cx_phi, atol=1e-12)
+      and np.degrees(_cx_phi[1] - _cx_phi[0]) > 5.0,
+      f"r = 0.3 / 0.9: |y| = {_cx_gota[0]:.4f} / {_cx_gota[1]:.4f}, phase added "
+      f"{np.degrees(_cx_gotp[0]):.2f} / {np.degrees(_cx_gotp[1]):.2f} deg")
+# the passband route, for the question the issue asked: fc = fs * 8/77 keeps the limiter's
+# aliased harmonics off the carrier (tests/test_envelope_law.py says why)
+_cx_lv = np.logspace(-1.5, 1.0, 13)
+_cx_w = np.hanning(129)
+_cx_st_r = np.convolve(np.pad(np.repeat(_cx_lv, 1024), 64, mode="edge"), _cx_w / _cx_w.sum(),
+                       mode="valid")
+_cx_gs = Grid(fs=1e9, n=len(_cx_st_r), fc_hz=1e9 * 8 / 77)
+
+
+def _cx_plateaus(y):
+    mid = y.reshape(13, 1024)[:, 384:640]
+    return np.abs(mid).mean(axis=1), np.angle(mid.mean(axis=1))
+
+
+def _cx_stairs():
+    return Signal(seed=1, grid=_cx_gs).capture(values=_cx_st_r.astype(complex))
+
+
+_cx_pa, _cx_pp = _cx_plateaus(
+    _cx_stairs().upconvert().law("tanh", gain=2.0, sat=0.8)
+    .downconvert(fc_hz=_cx_gs.fc_hz, lpf=dict(pass_hz=3e6, stop_hz=12e6, atten_db=90)).waveform())
+_cx_ea, _ = _cx_plateaus(_cx_stairs().law("rapp", gain=2.0, sat=4 * 0.8 / np.pi,
+                                          smoothness=1.12).waveform())
+_cx_er = np.abs(_cx_ea / _cx_pa - 1)
+check("  ... which a memoryless law on the PASSBAND does not have: tanh between the mixers "
+      "turns the carrier by under 1e-5 rad at every drive over 50 dB, and its AM/AM is the "
+      "envelope law rapp(sat=4*sat/pi, smoothness=1.12) to 1.2 %",
+      np.abs(_cx_pp).max() < 1e-5 and _cx_er.max() < 0.012 and _cx_er[0] < 2e-3
+      and _cx_er[-1] < 2e-3,
+      f"AM/PM {np.abs(_cx_pp).max():.1e} rad at worst; AM/AM against rapp: "
+      f"{100 * _cx_er.max():.2f} % at the knee, {100 * _cx_er[0]:.3f} % small-signal, "
+      f"{100 * _cx_er[-1]:.3f} % saturated")
+
+_cx_fs, _cx_n = 1e6, 1 << 18
+_cx_fd = _cx_fs / 32
+_cx_gf = Grid(fs=_cx_fs, n=_cx_n, fc_hz=2.4e9)
+
+
+def _cx_fade(shape, k_db=None):
+    s = _cx_rc.fading(_cx_fd, k_db=k_db, shape=shape)
+    s.seed, s.grid = 3, _cx_gf
+    return s.waveform()
+
+
+def _cx_cdf(shape, f):
+    u = np.clip(f / _cx_fd, -1, 1)
+    return 0.5 + (np.arcsin(u) / np.pi if shape == "jakes" else 0.5 * u)
+
+
+_cx_h = _cx_fade("jakes")
+_cx_P = np.abs(np.fft.fft(_cx_h)) ** 2
+_cx_fq = np.fft.fftfreq(_cx_n, 1 / _cx_fs)
+_cx_o = np.argsort(_cx_fq)
+_cx_below = np.cumsum(_cx_P[_cx_o]) / _cx_P.sum()
+_cx_top = _cx_fq[_cx_o] + 0.5 * _cx_fs / _cx_n
+_cx_dj = float(np.abs(_cx_below - _cx_cdf("jakes", _cx_top)).max())
+_cx_df = float(np.abs(_cx_below - _cx_cdf("flat", _cx_top)).max())
+check("a fading gain is a composition -- complex noise through filter('doppler') -- and its "
+      "spectrum is the stated one: the power below each frequency follows the Jakes arcsin "
+      "law, not a flat band's ramp, and none lies outside +/-f_d",
+      _cx_dj < 0.03 < 0.08 < _cx_df
+      and _cx_P[np.abs(_cx_fq) > _cx_fd + _cx_fs / _cx_n].sum() < 1e-20 * _cx_P.sum(),
+      f"8192 Doppler periods: worst departure from the Jakes law {_cx_dj:.4f} (limit 0.03), "
+      f"from a flat band {_cx_df:.3f}; mean power {np.mean(np.abs(_cx_h) ** 2):.4f}")
+# samples of a flat-spectrum gain 1/(2 f_d) apart are exactly uncorrelated, so KS is exact
+_cx_ray = _cx_stats.kstest(np.abs(_cx_fade("flat"))[::16], "rayleigh", args=(0, np.sqrt(0.5)))
+_cx_k = 10 ** 0.6
+_cx_rician = np.abs(_cx_fade("flat", k_db=6.0))[::16]
+_cx_ric = _cx_stats.kstest(_cx_rician, "rice",
+                           args=(np.sqrt(2 * _cx_k), 0, np.sqrt(0.5 / (1 + _cx_k))))
+_cx_not = _cx_stats.kstest(_cx_rician, "rayleigh", args=(0, np.sqrt(0.5)))
+check("  ... and its envelope is Rayleigh, or Rician at the stated K with a line of sight: "
+      "Kolmogorov-Smirnov on 16384 independent samples at significance 0.001, and the same "
+      "test rejects the Rician record as Rayleigh",
+      _cx_ray.pvalue > 1e-3 and _cx_ric.pvalue > 1e-3 and _cx_not.pvalue < 1e-12,
+      f"Rayleigh: D = {_cx_ray.statistic:.4f}, p = {_cx_ray.pvalue:.3f}; Rice K = 6 dB: "
+      f"D = {_cx_ric.statistic:.4f}, p = {_cx_ric.pvalue:.3f}; that record against Rayleigh: "
+      f"p = {_cx_not.pvalue:.0e}")
+
+_cx_gm = Grid(fs=1e6, baud=250e3, n=1 << 14, fc_hz=2.4e9 + 13e3)
+_cx_dl, _cx_gn = np.array([0.0, 8e-6, 22.5e-6]), np.array([1.0, 0.7, 0.4])
+_cx_tx = Signal(seed=1, grid=_cx_gm).iq("qpsk", prbs=11)
+_cx_mp = _cx_rc.multipath(_cx_tx, _cx_dl, _cx_gn)
+_cx_kk = np.fft.fftfreq(_cx_gm.n)
+_cx_X = np.fft.fft(_cx_tx.waveform())
+_cx_A = np.stack([np.fft.ifft(_cx_X * np.exp(-2j * np.pi * _cx_kk * d * 1e6)) for d in _cx_dl],
+                 axis=1)[256:-256]
+_cx_c = np.linalg.lstsq(_cx_A, _cx_mp.waveform()[256:-256], rcond=None)[0]
+_cx_want = _cx_gn * np.exp(-2j * np.pi * _cx_gm.fc_hz * _cx_dl)
+check("multipath is a composition -- combine of delayed, scaled copies -- and its power delay "
+      "profile is the taps: least-squares taps of the record are the stated gains, each "
+      "turned by its own delay's carrier phase",
+      np.abs(_cx_c - _cx_want).max() < 1e-4
+      and [o["op"] for o in _cx_mp.ops] == ["iq", "combine"],
+      "power at 0 / 8 / 22.5 us: " + " / ".join(f"{abs(v) ** 2:.4f}" for v in _cx_c)
+      + " (stated " + " / ".join(f"{v ** 2:.4f}" for v in _cx_gn)
+      + f"); worst complex tap error {np.abs(_cx_c - _cx_want).max():.1e}")
 
 print()
 if fails:

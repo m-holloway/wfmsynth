@@ -44,7 +44,7 @@ EXCEPTIONS = {
 # Every unit-suffixed parameter the public API currently has. Frozen deliberately: a new one
 # must be added here, which is the moment to check that its suffix is honest.
 KNOWN_UNIT_PARAMS = frozenset({
-    'D_ps_nm_km', 'ac_fc_hz', 'atten_db_km', 'band_hi_hz', 'band_lo_hz', 'bw_hz', 'c_bus_f',
+    'D_ps_nm_km', 'ac_fc_hz', 'alpha_phi_rad', 'atten_db_km', 'band_hi_hz', 'band_lo_hz', 'bw_hz', 'c_bus_f',
     'c_load_f', 'dev_hz', 'dev_rad', 'diode_on_ohm', 'drift_hz_per_s', 'drift_ppm_per_s',
     'eb_n0_db', 'echo_db', 'es_n0_db',
     'echo_f_hp_hz', 'echo_td_ps', 'edge_frac', 'er_db', 'f0_frac', 'f0_ghz', 'f0_hz', 'f1_hz',

@@ -274,6 +274,35 @@ def test_gain_on_a_field_is_an_attenuator_whose_power_goes_as_the_square():
     assert np.allclose(detected(sig), p0 * r ** 2, rtol=1e-13, atol=0)
 
 
+def test_a_complex_gain_on_a_field_is_an_arms_phase_and_a_moving_one_stays_real():
+    """An interferometer arm: one laser split, one arm turned by `phase`, and rejoined detects
+    2 (1 + cos phase) -- the same number a phase written into the captured field gives."""
+    for phase in (0.0, np.pi / 3, np.pi / 2, np.pi):
+        arm = Signal(grid=GO).capture(values=np.ones(N, complex)).gain(by=np.exp(1j * phase))
+        got = detected(cw().combine(arm)).mean()
+        assert abs(got - 2.0 * (1.0 + np.cos(phase))) < 1e-12, (phase, got)
+    sig = field().gain(by=0.5j)
+    assert sig.ops[-1] == {"op": "gain", "by": [0.0, 0.5]}          # data, as on an I/Q record
+    assert np.array_equal(Signal.from_recipe(json.loads(json.dumps(sig.recipe()))).waveform(),
+                          0.5j * field().waveform())
+    # a factor that MOVES is real on a field: an I/Q chain is an RF envelope, not light
+    for by in (ws.recipes.fading(doppler_hz=2e9), Signal().carrier("nrz", n_ui=N_UI).eo()):
+        with pytest.raises(ValueError, match="COMPLEX waveform"):
+            field().gain(by=by).waveform()
+    with pytest.raises(ValueError, match="real voltage here"):
+        drive().gain(by=0.5j)
+
+
+def test_the_envelope_ops_say_what_a_field_is_when_they_refuse_one():
+    for build, said in ((lambda s: s.law("rapp"), "eo(kind=)"),
+                        (lambda s: s.law("tanh"), "eo(kind=)"),
+                        (lambda s: s.delay(by=1e-10), "carrier's phase"),
+                        (lambda s: s.lossy(loss_db=3.0, loss_at_ghz=5.0), "fiber(")):
+        with pytest.raises(ValueError) as e:
+            build(field())
+        assert "optical field (domain 'optical')" in str(e.value) and said in str(e.value)
+
+
 def test_gate_on_a_field_is_a_shutter_and_emits_its_instants():
     sig = cw().gate(by=Signal().carrier("square", **ENABLE), threshold=0.0)
     x, ev = sig.photodetect(shot=False).realize()

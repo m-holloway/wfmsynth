@@ -53,7 +53,8 @@ THE CONVENTIONS, none of which is guessable:
                      eb_n0_db   (P_ref / baud / bits_per_symbol) / N0
                  P_ref is `ref_power=` if stated, else the mean of |x|**2 over the record as
                  it reaches this op. The total noise power added is N0*fs, split equally
-                 between the rails.
+                 between the rails. As the FIRST op of a chain it is noise with no signal
+                 under it -- a complex Gaussian source, `ref_power` then required.
   spur           y = x + A*exp(j*(2*pi*f_hz*t + phase_rad)), A**2 = P_ref * 10**(dbc/10):
                  one tone `f_hz` from the centre frequency, `dbc` relative to the same
                  reference power.
@@ -396,6 +397,23 @@ def awgn_levels(x, fs, baud=None, snr_db=None, es_n0_db=None, eb_n0_db=None, bw_
     return p, p / (band * ratio)
 
 
+def silence(n, ref_power):
+    """The record an `awgn` that STARTS a chain adds its noise to: `n` zeros. Noise with no
+    signal under it is a complex Gaussian source -- the scatter a fading process is made of
+    (`wfmsynth.recipes.fading`) -- and has nothing to be relative to, so `ref_power` is
+    required."""
+    if ref_power is None:
+        raise ValueError(
+            "awgn: this op starts the chain, so there is no signal for its level to be "
+            "relative to. State ref_power=<a power> with the ratio: "
+            "awgn(snr_db=0, bw_hz=<band>, ref_power=1.0) is noise with unit power in that "
+            "band. (To add noise TO a signal, start the chain with iq(...) or capture(...).)")
+    if n is None:
+        raise ValueError("awgn: a chain that starts with noise needs a record length -- "
+                         "Signal(grid=Grid(fs=..., n=...)).")
+    return np.zeros(int(n), complex)
+
+
 def awgn(x, fs, baud=None, rng=None, **request):
     x = _envelope(x, "awgn")
     _, n0 = awgn_levels(x, fs, baud, **request)
@@ -552,8 +570,12 @@ def report(sig):
     out = []
     for chain, i, op, upstream, before, st in _acting(sig):
         if op["op"] in OPS:
-            x = before()
-            grid = C._grid_now(upstream, sig.grid, x, *C.DOMAIN.trace(upstream, sig.grid)[-1])
+            if op["op"] == "awgn" and not upstream:     # noise that starts the chain
+                x, grid = silence(sig.grid.n, op.get("ref_power")), sig.grid
+            else:
+                x = before()
+                grid = C._grid_now(upstream, sig.grid, x,
+                                   *C.DOMAIN.trace(upstream, sig.grid)[-1])
             out.append({"op": i, "name": op["op"], **({} if chain is None else {"chain": chain}),
                         **_describe(op, x, grid, st.role(f"phase_noise/{i}"))})
     return out

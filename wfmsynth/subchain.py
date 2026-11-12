@@ -35,7 +35,8 @@ and nothing else: the namespace is `<op>/<idx>/<parameter>`, and the builder, `r
 same for a list parameter, and a list entry may hold one beside its own parameters
 (`sequence`'s `segments[k]["chain"]`, namespace `sequence/<idx>/segments/<k>/chain`). The result is a REAL waveform on the record's own grid: an I/Q
 sub-chain ends on `upconvert` (the domain rule, `wfmsynth.domain`, applies inside a sub-chain as
-it does outside). A sub-chain starts in the domain ITS OWN ops need, whatever record it sits in
+it does outside). The one exception is `gain(by=)` on an I/Q record, which takes a complex
+sub-chain as a complex gain (`domain=DOMAIN.BOTH`, see `same_grid`). A sub-chain starts in the domain ITS OWN ops need, whatever record it sits in
 -- `Signal().carrier("sine", ...)` is a voltage inside an I/Q record -- and the parameter that
 takes a PEER of an I/Q record (a `sequence` segment, a `combine` entry) asks for an envelope
 instead with `domain="iq"`, and the peer of an optical field (`domain="optical"`) is a field: a
@@ -249,8 +250,13 @@ def _chain(spec, streams, grid, at, who):
 def same_grid(y, n, who, sub=None, grid=None, domain=DOMAIN.REAL):
     """Refuse a rendered sub-chain that is not a waveform of `n` samples at the grid's rate, in
     the `domain` the parameter takes: a real voltage, (`"iq"`) a complex envelope or
-    (`"optical"`) a field."""
-    if domain == DOMAIN.OPTICAL:
+    (`"optical"`) a field. ONE parameter takes either of two (`domain.BOTH`): the `by` of a
+    `gain` on an I/Q record, where a real sub-chain is a factor on both rails and a complex one
+    a gain that also rotates."""
+    if domain == DOMAIN.BOTH:           # a complex gain on an I/Q record: a real factor or
+        y = np.asarray(y)               # an envelope, each kept as it is (`joins.gain`)
+        y = y if np.iscomplexobj(y) else y.astype(float)
+    elif domain == DOMAIN.OPTICAL:
         if not np.iscomplexobj(y):
             raise ValueError(
                 f"{who} renders a REAL waveform, and here it joins an optical field as its "

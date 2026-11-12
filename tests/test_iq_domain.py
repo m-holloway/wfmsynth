@@ -308,7 +308,7 @@ def test_a_real_record_is_untouched():
 
 
 @pytest.mark.parametrize("op,kw", [
-    ("lossy", dict(loss_db=3.0, loss_at_ghz=1.0)), ("probe", dict(bw_hz=1e9)),
+    ("reflect", dict(td_ps=100.0, gamma_s=0.2, gamma_l=0.2)), ("probe", dict(bw_hz=1e9)),
     ("digitize", dict(bits=8)), ("rx_noise", dict(rms=0.01)), ("scope", dict(bw_hz=1e9)),
     ("ac_couple", dict(fc_hz=1e5)), ("events", dict(kind="glitch", on="times", times=[1e-6])),
     ("eo", {}), ("modulate", dict(message=dict(f_hz=1e6))), ("carrier", dict(kind="nrz")),
@@ -332,7 +332,13 @@ def test_every_op_is_real_only_unless_it_is_listed():
                     "dac",
                     # the general stages that keep their meaning on an envelope, and a named
                     # chain of a several-channel record; each way in tests/test_iq_seams.py
-                    "gain", "gate", "combine", "sequence", "switch", "use"}
+                    "gain", "gate", "combine", "sequence", "switch", "use",
+                    # the envelope of a delayed passband signal, and an amplifier's AM/AM and
+                    # AM/PM (the voltage laws stay refused); tests/test_envelope_joins.py,
+                    # tests/test_envelope_law.py
+                    "delay", "law",
+                    # ONE stated response, read at fc + f; tests/test_baseband_channel.py
+                    "lossy", "sparam"}
     assert set(DOMAIN.ACCEPTS) | set(DOMAIN.EMITS) <= set(C._EXEC)
 
 
@@ -392,8 +398,8 @@ def test_the_converters_refuse_the_domain_they_do_not_convert():
 
 def test_the_refusal_also_guards_a_recipe_and_a_hand_edited_op_list():
     r = _src().recipe()
-    r["ops"].append({"op": "lossy", "loss_db": 3.0, "loss_at_ghz": 1.0})
-    with pytest.raises(ValueError, match="lossy.*'iq'"):
+    r["ops"].append({"op": "reflect", "td_ps": 100.0, "gamma_s": 0.2, "gamma_l": 0.2})
+    with pytest.raises(ValueError, match="reflect.*'iq'"):
         Signal.from_recipe(r).waveform()
 
 

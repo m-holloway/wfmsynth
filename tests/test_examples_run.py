@@ -33,6 +33,7 @@ DEMOS = [
     "composed_capture.py",
     "confounder_sweep.py",
     "events.py",
+    "fading_multipath.py",
     "ground_truth.py",
     "i2c_bus.py",
     "inductive_handover.py",

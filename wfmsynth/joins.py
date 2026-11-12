@@ -17,12 +17,25 @@ A SIGNAL-DRIVEN PARAMETER is one stage whose single parameter `by` is a number o
     gate(by=)     x where by > threshold   an enable from somewhere else
     delay(by=)    x(t - by(t))             a path whose length moves: jitter, Doppler
 
-ON AN OPTICAL FIELD (`wfmsynth.domain`) the same three keep their meaning, as an attenuator,
-a shutter and a coupler: a `combine` of fields is COHERENT, |E1 + E2|^2 and not P1 + P2.
+ON AN I/Q RECORD (`wfmsynth.domain`) four of these keep a meaning:
 
-ON AN I/Q RECORD (`wfmsynth.domain`) three of these keep their meaning: `gain` and `gate`, whose
-`by` stays a REAL signal acting on both rails alike, and `combine(how="sum")`, whose `others`
-are then I/Q signals about the same centre frequency. The rest are refused there by name.
+    gate          `by` stays a REAL enable, switching both rails.
+    gain          `by` is a real factor acting on both rails alike, OR A COMPLEX ONE: a number
+                  (`gain(by=0.5j)`, stored as [re, im]) or an I/Q sub-chain. A complex gain
+                  scales and ROTATES the envelope -- a path's amplitude and carrier phase, and
+                  when it moves, a fade (`wfmsynth.recipes.fading`).
+    combine       `how="sum"` only; `others` are I/Q signals about the same centre frequency.
+    delay         the envelope is shifted AND the carrier is turned: see THE DELAY ON AN
+                  ENVELOPE below.
+
+`offset` and the other `combine` joins are refused there by name.
+
+ON AN OPTICAL FIELD (`wfmsynth.domain`) `gain`, `gate` and `combine(how="sum")` keep their
+meaning, as an attenuator, a shutter and a coupler: a `combine` of fields is COHERENT,
+|E1 + E2|^2 and not P1 + P2. A `gain` by a complex NUMBER is an arm's loss and phase; a
+factor that moves stays real (an I/Q sub-chain is an envelope about an RF centre, not a
+field's). The rest are refused there by name: a delayed field is also turned by its
+carrier's phase, and the grid of a field states no carrier to turn it by.
 
 WHERE A SUM STOPS BEING TRUE. Adding two waveforms is superposition, and superposition holds
 exactly when neither source changes what the other one does: a coupled ripple, an interferer, a
@@ -66,6 +79,26 @@ What it promises, all measured on the kernel itself by `delay_error`:
     has to stay under Nyquist.
   - before the record starts the line holds the record's first sample, so the first `max(by)`
     seconds are that value; within 16 samples of either end the kernel sees the held edge.
+
+THE DELAY ON AN ENVELOPE. A real passband record carries its carrier in its samples, so
+delaying the samples delays the carrier with them. An I/Q record holds only the envelope
+about `fc_hz`, so the op does both halves itself:
+
+    y(t) = x(t - by(t)) * exp(-j * 2*pi * fc_hz * by(t))
+
+the first factor through the same interpolator and the same three promises (its error bound
+now covers the envelope's band, |f| below 0.4 of the sample rate), the second exact. It is
+the envelope of the delayed passband signal, checked against `upconvert` -> `delay` ->
+`downconvert` in tests/test_envelope_joins.py. Two consequences a real delay does not have:
+
+  - a CONSTANT delay is a constant phase, 360 degrees per carrier period: 1 ns at 2.4 GHz is
+    2.4 turns. Paths that differ by a fraction of a nanosecond add with any phase at all,
+    which is what multipath is.
+  - a MOVING delay is a frequency shift, -fc_hz * d(by)/dt: Doppler. It has to stay inside
+    the grid, so `fc_hz * |d(by)/dt|` at or above fs/2 is refused.
+
+The centre has to have been stated (`Grid(fc_hz=)`, or the `downconvert` that made the
+envelope); without one there is no rotation to apply and the op refuses rather than shift only.
 """
 from __future__ import annotations
 
@@ -185,9 +218,24 @@ def _by(x, by, who):
 
 
 def gain(x, by):
-    """`x * by`: `by` is the factor itself (1 leaves `x` alone), a number or a waveform."""
+    """`x * by`: `by` is the factor itself (1 leaves `x` alone), a number or a waveform. On an
+    envelope it may be complex -- a number or an I/Q waveform -- and then rotates as well."""
     x = _envelope_ok(x)
-    return x * _by(x, by, "gain")
+    if not np.iscomplexobj(by):
+        return x * _by(x, by, "gain")
+    if not np.iscomplexobj(x):
+        raise ValueError("gain: `by` is complex and the record is a real voltage, which has "
+                         "no phase to turn. A complex gain acts on an I/Q record or an optical "
+                         "field; on a voltage "
+                         "give a real factor.")
+    by = np.asarray(by)
+    if by.ndim and by.shape != x.shape:
+        raise ValueError(f"gain: `by` has {by.shape[0] if by.ndim == 1 else by.shape} samples "
+                         f"and the waveform it scales has {x.shape[0]}. They must be on the "
+                         f"same grid; nothing is resampled or truncated to fit.")
+    if not np.all(np.isfinite(by)):
+        raise ValueError("gain: `by` is not finite.")
+    return x * by
 
 
 def offset(x, by):
@@ -286,13 +334,23 @@ def check_delay(max_rate=DELAY_MAX_RATE):
                          f"input would play backwards.")
 
 
-def delay(x, by, fs, max_rate=DELAY_MAX_RATE):
+def delay(x, by, fs, max_rate=DELAY_MAX_RATE, fc_hz=None):
     """`x(t - by(t))`: `by` in SECONDS, a number or a waveform on `x`'s grid.
 
     Causal (`by >= 0`), band-limited (see `delay_error`), and bounded in rate: `by` may not
     change by `max_rate` seconds per second or more. All three are refused by name when broken.
-    A delay of a whole number of samples is an exact shift."""
-    x = _real(x, "delay")
+    A delay of a whole number of samples is an exact shift.
+
+    A complex `x` is an envelope about `fc_hz`, and comes out shifted and turned by
+    ``exp(-j*2*pi*fc_hz*by)`` (the module docstring, THE DELAY ON AN ENVELOPE)."""
+    x = _envelope_ok(x)
+    iq = np.iscomplexobj(x)
+    if iq and fc_hz is None:
+        raise ValueError(
+            "delay: this I/Q record's centre frequency was never stated, and delaying a "
+            "passband signal turns its carrier by -2*pi*fc*delay as well as shifting its "
+            "envelope. State it on the grid (Grid(..., fc_hz=...)); shifting the envelope "
+            "alone would be a different signal.")
     check_delay(max_rate)
     if fs is None:
         raise ValueError("delay: `by` is in seconds, which needs the sample rate -- give the "
@@ -315,17 +373,26 @@ def delay(x, by, fs, max_rate=DELAY_MAX_RATE):
             f"{float(max_rate):g}. At that rate a tone moves by up to {100 * rate:.3g} % in "
             f"frequency. Smooth `by` (a `filter` in its sub-chain), or raise max_rate (below "
             f"1) if the waveform's band leaves the room.")
+    if iq and rate * fc_hz >= 0.5 * fs:
+        raise ValueError(
+            f"delay: `by` changes at up to {rate:.4g} seconds per second, which moves a "
+            f"carrier at {fc_hz:g} Hz by {rate * fc_hz:.4g} Hz -- past this grid's +/-"
+            f"{0.5 * fs:g} Hz. A Doppler shift has to fit in the envelope's band: slow the "
+            f"delay's change, or raise Grid(fs=).")
     n = len(x)
     pos = np.arange(n) - d * fs
     base = np.floor(pos)
     mu = pos - base
     base = base.astype(np.int64)
     if not mu.any():
-        return x[np.clip(base, 0, n - 1)]
-    k = np.arange(-DELAY_TAPS // 2 + 1, DELAY_TAPS // 2 + 1)
-    y = np.empty(n)
-    for a in range(0, n, _CHUNK):
-        b = min(a + _CHUNK, n)
-        taps = x[np.clip(base[a:b, None] + k[None, :], 0, n - 1)]
-        y[a:b] = np.einsum("ij,ij->i", taps, _kernel(mu[a:b]))
-    return y
+        y = x[np.clip(base, 0, n - 1)]
+    else:
+        k = np.arange(-DELAY_TAPS // 2 + 1, DELAY_TAPS // 2 + 1)
+        y = np.empty(n, x.dtype)
+        for a in range(0, n, _CHUNK):
+            b = min(a + _CHUNK, n)
+            taps = x[np.clip(base[a:b, None] + k[None, :], 0, n - 1)]
+            y[a:b] = np.einsum("ij,ij->i", taps, _kernel(mu[a:b]))
+    # the carrier's turn. fc*d is reduced to its fraction of a turn first: at 2.4 GHz a
+    # microsecond is 2400 turns, and the phase that matters is what is left over
+    return y * np.exp(-2j * np.pi * np.mod(fc_hz * d, 1.0)) if iq else y

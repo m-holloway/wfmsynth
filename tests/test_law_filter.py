@@ -80,6 +80,7 @@ FILTERS = {
             dict(poles=[-3e8], zeros=[-8e8], gain=0.5, zero_phase=True)),
     "integrate": (dict(tau_s=1e-8), dict(tau_s=2e-8)),
     "differentiate": (dict(tau_s=1e-8), dict(tau_s=2e-8)),
+    "doppler": (dict(f_hz=40e6, shape="jakes"), dict(f_hz=60e6, shape="flat")),
 }
 
 
@@ -88,7 +89,9 @@ def _knobs(table):
 
 
 def test_the_sweep_names_every_kind_and_every_parameter_of_each():
-    assert set(LAWS) == set(ws.LAW_KINDS) and set(FILTERS) == set(ws.FILTER_KINDS)
+    # the envelope laws act on an I/Q record and are swept in tests/test_envelope_law.py
+    assert set(LAWS) | set(ST.ENVELOPE_LAWS) == set(ws.LAW_KINDS)
+    assert set(FILTERS) == set(ws.FILTER_KINDS)
     for table, spec in ((LAWS, ST._LAW), (FILTERS, ST._FILTER)):
         for kind, (base, other) in table.items():
             assert set(base) == set(other) == set(spec[kind]), kind

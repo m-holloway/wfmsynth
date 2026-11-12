@@ -150,10 +150,9 @@ def test_a_different_domain_is_refused_by_name():
     real = Signal(seed=1, grid=gr).carrier("sine", f_hz=1e6)
     with pytest.raises(ValueError, match="COMPLEX"):
         real.combine({"from": Signal(seed=1, grid=gi).iq("qpsk", prbs=7).recipe()}).waveform()
-    for stage, instead in (("offset", "iq_offset"), ("delay", "carrier")):
-        with pytest.raises(ValueError, match="complex baseband") as e:
-            getattr(Signal(seed=1, grid=gi).iq("qpsk", prbs=7), stage)(by=1.0)
-        assert instead in str(e.value)
+    with pytest.raises(ValueError, match="complex baseband") as e:
+        Signal(seed=1, grid=gi).iq("qpsk", prbs=7).offset(by=1.0)
+    assert "iq_offset" in str(e.value)
 
 
 def test_the_joins_have_no_home_in_canonical_order():

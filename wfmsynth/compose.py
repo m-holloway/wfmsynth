@@ -41,6 +41,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from . import physics as P
+from . import baseband as BB
 from . import opkeys as OPKEYS
 from . import subchain as SUB
 from . import tolerance as TOL
@@ -617,6 +618,8 @@ def _op_lossy(x, p, streams, grid, idx):
                             "method", "linear", "guard") if k in p}
     if "trend" in kw and kw["trend"] is not None:
         kw["trend"] = tuple(float(t) for t in kw["trend"])   # JSON round-trips it as a list
+    if np.iscomplexobj(x):                   # an envelope: the same law, read at fc + f
+        return BB.lossy(x, grid.fs, grid.fc_hz, **kw)
     return P.lossy_channel(x, grid=grid, **kw)
 
 
@@ -1214,6 +1217,13 @@ def _op_sample_clock(x, p, streams, grid, idx):
 def _op_sparam(x, p, streams, grid, idx):
     from . import sparam as SP
     common = {k: p[k] for k in ("band", "dc", "band_tol", "linear", "guard", "method") if k in p}
+    if np.iscomplexobj(x):                   # an envelope: the measured transfer at fc + f
+        if "path" in p:
+            kw = {k: p[k] for k in ("n_ports", "mode", "term", "check", "z0", "ports") if k in p}
+            freqs, s21 = SP.touchstone_transfer(p["path"], **kw)
+        else:
+            freqs, s21 = p["freqs"], p["s21"]
+        return BB.sparam(x, grid.fs, grid.fc_hz, freqs, s21, **common)
     if "path" in p:
         # `ports` is passed THROUGH, not coerced: a mixed-mode pairing can be a STRING
         # ("13_24") or a tuple of pairs, and `tuple(...)`-wrapping a string shreds it into
@@ -1500,12 +1510,24 @@ def _by_given(op, by):
     return float(by) if isinstance(by, (int, float, np.integer, np.floating)) else by
 
 
-def _by(p, streams, grid, idx, n):
+def _by(p, streams, grid, idx, n, domain=DOMAIN.REAL):
     """A signal-driven parameter: `by` is a number, or a sub-chain rendered on this grid."""
     by = _by_given(p["op"], p.get("by"))
     if isinstance(by, float):
         return by
-    return SUB.signal(p, "by", streams, grid, idx, n=n)
+    return SUB.signal(p, "by", streams, grid, idx, n=n, domain=domain)
+
+
+def _complex_by(by):
+    """A complex gain as the recipe holds it: ``[re, im]``, two finite numbers. None for
+    anything else."""
+    if isinstance(by, (complex, np.complexfloating)):
+        by = [by.real, by.imag]
+    if (isinstance(by, (list, tuple)) and len(by) == 2 and all(
+            isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool)
+            for v in by)):
+        return [float(by[0]), float(by[1])]
+    return None
 
 
 def _joined(x, p):
@@ -1529,8 +1551,18 @@ def _op_combine(x, p, streams, grid, idx):
 
 
 def _op_gain(x, p, streams, grid, idx):
+    """On an I/Q record `by` may be complex: ``[re, im]``, or a sub-chain that renders an
+    envelope (`wfmsynth/joins.py`). On an optical field the complex NUMBER is an arm's loss
+    and phase; a factor that moves there is real, as it is on a voltage, since an I/Q
+    sub-chain is not a field's."""
     from . import joins as JN
-    return JN.gain(_joined(x, p), _by(p, streams, grid, idx, len(x)))
+    x = _joined(x, p)
+    pair = _complex_by(p.get("by"))
+    if pair is not None:
+        return JN.gain(x, complex(*pair))
+    is_iq = DOMAIN.held(x, grid)[0] == DOMAIN.IQ
+    return JN.gain(x, _by(p, streams, grid, idx, len(x),
+                          domain=DOMAIN.BOTH if is_iq else DOMAIN.REAL))
 
 
 def _op_offset(x, p, streams, grid, idx):
@@ -1556,7 +1588,8 @@ def _op_delay(x, p, streams, grid, idx):
     upstream = list(sink or ())               # before `by` renders: its own events stay put
     by = _by(p, streams, grid, idx, len(_joined(x, p)))
     y = JN.delay(x, by, None if grid is None else grid.fs,
-                 max_rate=p.get("max_rate", JN.DELAY_MAX_RATE))
+                 max_rate=p.get("max_rate", JN.DELAY_MAX_RATE),
+                 fc_hz=getattr(grid, "fc_hz", None))
     if upstream:
         gone = {id(e) for e in upstream}
         EV.shift(upstream, by, grid.fs, len(y))
@@ -1604,6 +1637,8 @@ def _op_phase_noise(x, p, streams, grid, idx):
 
 
 def _op_awgn(x, p, streams, grid, idx):
+    if x is None:                   # it starts the chain: noise with no signal under it
+        x = RF.silence(getattr(grid, "n", None), p.get("ref_power"))
     return RF.awgn(x, grid.fs, grid.baud, rng=streams.role(f"awgn/{idx}"),
                    **{k: p[k] for k in _AWGN_KEYS if k in p})
 
@@ -2145,6 +2180,8 @@ def _stored_rate(ops, fs, n, peak_ok=False):
 # general stages and the I/Q impairments; the named link and instrument ops are placed before
 # an acquisition and keep the synthesis grid.
 _RATE_NOW = RF.RATE_AWARE + ("filter", "law", "delay", "gate", "gain", "offset", "combine")
+# ... and the channel ops that, on an ENVELOPE, are read about its centre frequency
+_CENTRE_NOW = ("lossy", "sparam")
 
 
 def _grid_now(ops, grid, x, dom, fc):
@@ -2625,7 +2662,10 @@ class Signal:
 
         The signal power is the record's mean |x|**2 where the op sits, or `ref_power=` to
         state it (a burst's idle time, or noise already added, would otherwise count). Role
-        `awgn/<op index>`. `rf_report()` gives the reference power and noise density used."""
+        `awgn/<op index>`. `rf_report()` gives the reference power and noise density used.
+
+        As the FIRST op it is a complex Gaussian noise SOURCE, with `ref_power` required:
+        `Signal().awgn(snr_db=0, bw_hz=B, ref_power=1.0)` has unit power in a band B."""
         if params.get("eb_n0_db") is not None and "bits_per_symbol" not in params:
             from . import iq as IQ
             cons = _constellations(self.ops, self.grid)
@@ -2782,6 +2822,8 @@ class Signal:
         kind: tanh (gain, sat) | poly (coeffs) | limiter (lo, hi) | deadzone (width, center) |
               rectify (mode) | quantize (bits, lo, hi) | comparator (threshold, hysteresis,
               v_lo, v_hi, initial) | diode (r_load_ohm, i_sat, ideality, v_thermal)
+        on an I/Q record, an amplifier's AM/AM and AM/PM acting on the envelope's magnitude:
+              saleh (alpha_a, beta_a, alpha_phi_rad, beta_phi) | rapp (gain, sat, smoothness)
 
         A kind is a name with parameters, never a callable, so the recipe stays data. Every
         kind is memoryless except `comparator`, whose state is the level it is holding; its
@@ -2792,6 +2834,11 @@ class Signal:
         from . import stages as ST
         params = self._drawn(ST.plain(params))
         ST.check_law(kind, **_stated(params))
+        if self.ops:                 # a voltage law on a voltage, an envelope law on I/Q;
+            # on an optical field no law applies, which the domain trace says in `_add`
+            dom = DOMAIN.trace(self.ops, self.grid)[-1][0]
+            if dom in DOMAIN.BOTH and (kind in ST.ENVELOPE_LAWS) != (dom == DOMAIN.IQ):
+                raise ValueError(ST.refuse_law(kind, dom))
         return self._add("law", kind=kind, **params)
 
     def filter(self, kind, **params):
@@ -2802,7 +2849,8 @@ class Signal:
         kind: butter | bessel | cheby1 (ripple_db) | elliptic (ripple_db, stop_db) -- each
               with f_hz, order=4, btype="low"|"high"|"bandpass"|"bandstop";
               rrc (beta, span_ui=16, baud) | fir (taps) | sos (sos) | zpk (zeros, poles, gain) |
-              integrate (tau_s) | differentiate (tau_s)
+              integrate (tau_s) | differentiate (tau_s) |
+              doppler (f_hz, shape="jakes"|"flat") -- a fading process's spectrum, for noise
 
         Causal by default, and a causal filter DELAYS: `filter_delays()` reports by how much
         (a slow feature by its group delay, a fast edge by its step delay), so the time of an
@@ -2886,8 +2934,24 @@ class Signal:
             sig.gain(by=ripple)                    # a gain riding on a supply ripple
 
         `by` is the factor itself, so 1 leaves the signal alone. `drift(kind="gain")` is this
-        with a ramp or half-sine across the record. See `wfmsynth.joins`."""
+        with a ramp or half-sine across the record.
+
+        On an I/Q record `by` may be COMPLEX -- `gain(by=0.5j)`, or an I/Q sub-chain -- and
+        then turns the envelope as well as scaling it: a path's amplitude and phase, or a
+        fade (`wfmsynth.recipes.fading`). On an optical field the complex number is an arm's
+        loss and phase (`gain(by=1j)` before a `combine` is a quarter-wave arm). See
+        `wfmsynth.joins`."""
         OPKEYS.check("gain", params)
+        pair = _complex_by(by) if isinstance(by, (complex, np.complexfloating)) else None
+        if pair is not None:
+            if not all(np.isfinite(pair)):
+                raise ValueError(f"gain: by={by!r} is not a finite number.")
+            if self.ops and DOMAIN.trace(self.ops, self.grid)[-1][0] not in DOMAIN.COMPLEX:
+                raise ValueError(
+                    f"gain: by={by!r} is complex and the record is a real voltage here, which "
+                    f"has no phase to turn. A complex gain acts on an I/Q record or an optical "
+                    f"field; on a voltage give a real factor.")
+            return self._add("gain", by=pair)
         return self._add("gain", by=_by_given("gain", by))
 
     def offset(self, by=None, **params):
@@ -2921,7 +2985,11 @@ class Signal:
         Causal and band-limited: `by` is never negative, changes by less than `max_rate`
         seconds per second (default 0.5), and the interpolation error is stated by
         `delay_errors()`. Each of those is refused by name when it does not hold. `timing` is
-        the named op for clock jitter about zero. See `wfmsynth.joins`."""
+        the named op for clock jitter about zero.
+
+        On an I/Q record the envelope is shifted AND the carrier turned by
+        -2*pi*fc_hz*by, as delaying the passband signal would: a constant delay is also a
+        phase, and a moving one a Doppler shift of -fc_hz * d(by)/dt. See `wfmsynth.joins`."""
         from . import joins as JN
         OPKEYS.check("delay", params)
         JN.check_delay(max_rate)
@@ -3252,7 +3320,11 @@ class Signal:
         1.2x, which is what decides whether a deep record renders in a GUI at all. It is not the
         default because the two paths differ by about 1e-5 of peak-to-peak -- a behaviour change
         by this repo's own gate, not round-off -- so it is recorded in the recipe and replays on
-        the path it was rendered with. See `physics.apply_transfer`."""
+        the path it was rendered with. See `physics.apply_transfer`.
+
+        On an I/Q record the same law is read at fc_hz + f -- the channel's baseband
+        equivalent, so `loss_at_ghz` still means RF and the grid need not hold the carrier
+        (`wfmsynth.baseband`; `method` is then refused)."""
         return self._add("lossy", **params)
 
     def sparam(self, **params):
@@ -3265,7 +3337,10 @@ class Signal:
         Reproduces resonances/structure the analytic model can't.
 
         `method="auto"|"overlap"` trades a ~1e-5 behaviour change for a large cut in peak
-        memory -- see `Signal.lossy` and `physics.apply_transfer`."""
+        memory -- see `Signal.lossy` and `physics.apply_transfer`.
+
+        On an I/Q record the file is read at fc_hz + f: a transfer measured around the
+        carrier is applied to the envelope as it is (`wfmsynth.baseband`)."""
         return self._add("sparam", **params)
 
     def cascade(self, path, **params):
@@ -3645,7 +3720,10 @@ class Signal:
             elif was is None:
                 was = (DOMAIN.of(grid), getattr(grid, "fc_hz", None))
             name = op["op"]
-            if name in DOMAIN.MIXERS or name in _RATE_NOW or name == "trigger":
+            # a channel stated at RF needs the centre the envelope has reached (`baseband`)
+            at_now = (name in DOMAIN.MIXERS or name in _RATE_NOW
+                      or (name in _CENTRE_NOW and was[0] == DOMAIN.IQ))
+            if at_now or name == "trigger":
                 # the rate the record is at NOW, which after an `acquire` or a decimating
                 # `downconvert` is not the synthesis grid's: what a mixer needs, and anything
                 # stated in Hz or seconds (a corner, a delay, a crossing's time)
@@ -3655,7 +3733,7 @@ class Signal:
                 x = _op_trigger(x, op, st, now, i, sink=sink)
             elif name == "law":
                 x = _op_law(x, op, st, now, i, sink=sink)
-            elif name in DOMAIN.MIXERS or name in _RATE_NOW:
+            elif at_now:
                 x = _EXEC[name](x, op, st, now, i)
             elif name == "use":                # a stage it names acts in the domain reached
                 x = CH.use(x, op["name"], st, dom=was[0])

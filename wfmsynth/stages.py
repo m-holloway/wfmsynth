@@ -35,6 +35,30 @@ WHAT EACH LAW IS (x in, y out, in the units the chain carries; `diode` needs vol
     diode       a Shockley diode in series with `r_load_ohm`; y is the load voltage. Exact
                 (Lambert W), so the knee is the exponential's and not a fixed drop.
 
+ON AN I/Q RECORD the laws above do not apply -- they act on a voltage, and a memoryless law on
+the passband record turns into AM/AM only (its output phase follows its input's). What an RF
+amplifier does to an ENVELOPE x = r*exp(j*theta) is two curves of the magnitude r alone,
+
+    y = A(r) * exp(j*(theta + phi(r)))        A: AM/AM        phi: AM/PM, in radians
+
+and the two envelope laws are named amplifier models (`am_am_pm` returns both curves):
+
+    saleh       A = alpha_a*r / (1 + beta_a*r**2)     phi = alpha_phi_rad*r**2 / (1 + beta_phi*r**2)
+                A travelling-wave tube (Saleh 1981). Small-signal gain alpha_a; the output
+                PEAKS at r = 1/sqrt(beta_a), at alpha_a/(2*sqrt(beta_a)), and falls beyond it.
+                The phase grows as r**2 and settles at alpha_phi_rad/beta_phi. Saleh's own
+                fit, input and output normalised to saturation: 2.1587, 1.1517, 4.0033, 9.1040.
+    rapp        A = gain*r / (1 + (gain*r/sat)**(2*smoothness))**(1/(2*smoothness)),  phi = 0
+                A solid-state amplifier (Rapp 1991): linear, then a knee, then flat at `sat`.
+                `smoothness` is the knee: 1 soft, 3 nearly a hard limiter. No AM/PM, which is
+                the model's statement, not an omission: AM/PM is `saleh`.
+
+`rapp` is also what `law("tanh")` on the PASSBAND record does to the envelope: the carrier's
+fundamental through a tanh of small-signal gain g and rails +/-s has the AM/AM of
+rapp(gain=g, sat=4*s/pi, smoothness=1.12) to within 0.9 % at every drive level (the worst is
+at the knee; 0.07 % small-signal, 0.01 % saturated), and no AM/PM at all -- measured through
+`upconvert` -> `law("tanh")` -> `downconvert` in tests/test_envelope_law.py.
+
 Every law but `comparator` is memoryless. The comparator's state before the record is decided
 by the first sample; only when that sample lies inside the hysteresis band does `initial` (or,
 by default, which side of `threshold` it is on) decide instead. Its transitions are GROUND
@@ -56,6 +80,17 @@ WHAT EACH FILTER IS
                 bilinear transform: H_grid(f) = H_analog(j * 2 fs * tan(pi f / fs)).
     integrate   the running integral from the record's first sample, trapezoid rule, / tau_s.
     differentiate   the backward difference, * tau_s.
+    doppler     the spectrum a moving scatterer gives a carrier: nothing outside +/-f_hz, and
+                inside it `shape="jakes"` (the classic U, 1/sqrt(1 - (f/f_hz)**2): scatterers
+                all round, in a plane) or "flat" (uniform). Its MEAN power gain over that band
+                is 1, so white noise with unit power in 2*f_hz comes out with unit power and
+                exactly that spectrum: `awgn(snr_db=0, bw_hz=2*f_hz, ref_power=1)` then
+                `filter("doppler", f_hz=f_hz)` is a unit-power fading process. Each FFT bin
+                carries the shape's power over its own width, so the edge singularity of the
+                U is integrated, not sampled. ZERO-PHASE and applied to the record AS ONE
+                PERIOD: right for a stationary noise (every sample has the same statistics,
+                with no start-up), and a wrap for anything else. Fewer than 4 Doppler periods
+                in the record (f_hz * duration < 4) is refused: there is no spectrum to shape.
 
 CAUSAL BY DEFAULT. A causal filter delays, and `describe_filter` / `Signal.filter_delays()`
 REPORT that group delay so an event time upstream of the filter can be corrected instead of
@@ -96,7 +131,10 @@ _LAW = {
     "comparator": {"threshold": 0.0, "hysteresis": 0.0, "v_lo": 0.0, "v_hi": 1.0,
                    "initial": None},
     "diode": {"r_load_ohm": _REQ, "i_sat": 1e-12, "ideality": 1.0, "v_thermal": 0.025852},
+    "saleh": {"alpha_a": _REQ, "beta_a": _REQ, "alpha_phi_rad": _REQ, "beta_phi": _REQ},
+    "rapp": {"gain": 1.0, "sat": 1.0, "smoothness": 2.0},
 }
+ENVELOPE_LAWS = ("saleh", "rapp")      # act on |x| of an I/Q record; every other law on a voltage
 _IIR = {"f_hz": _REQ, "order": 4, "btype": "low", "zero_phase": False}
 _FILTER = {
     "butter": dict(_IIR),
@@ -109,7 +147,10 @@ _FILTER = {
     "zpk": {"poles": _REQ, "zeros": (), "gain": 1.0, "zero_phase": False},
     "integrate": {"tau_s": 1.0},
     "differentiate": {"tau_s": 1.0},
+    "doppler": {"f_hz": _REQ, "shape": "jakes"},
 }
+DOPPLER_SHAPES = ("jakes", "flat")
+DOPPLER_MIN_PERIODS = 4.0    # f_hz * duration below this has no spectrum to shape
 LAW_KINDS = tuple(_LAW)
 FILTER_KINDS = tuple(_FILTER)
 # The parameter names each op accepts, for `compose` and the generated `opkeys` table.
@@ -128,8 +169,9 @@ _NAMED_ELSEWHERE = {
 }
 _NOT_READ = {
     "zero_phase": "an integrator or a differentiator is its 90-degree phase, so there is no "
-                  "zero-phase form of it. `integrate` has no group delay to remove; "
-                  "`differentiate` delays by half a sample, which filter_delays() reports.",
+                  "zero-phase form of it (`integrate` has no group delay to remove; "
+                  "`differentiate` delays by half a sample, which filter_delays() reports), "
+                  "and a Doppler spectrum is a magnitude, always applied with zero phase.",
 }
 ZERO_PHASE_MAX = 1 << 22     # samples of impulse response a zero-phase render will pad for
 DESIGN_TOL = 1e-3            # a designed corner gain must be realised to this, relative
@@ -231,7 +273,44 @@ def _law_params(kind, params):
         for k in ("r_load_ohm", "i_sat", "ideality", "v_thermal"):
             if not q[k] > 0:
                 raise ValueError(f"law('diode'): {k} must be positive, got {q[k]!r}")
+    if kind == "saleh":
+        if not q["alpha_a"] > 0:
+            raise ValueError(f"law('saleh'): alpha_a is the small-signal gain and must be "
+                             f"positive, got {q['alpha_a']!r}")
+        for k in ("beta_a", "beta_phi"):
+            if not q[k] >= 0:
+                raise ValueError(f"law('saleh'): {k} sets where the curve bends and cannot be "
+                                 f"negative (the curve would have a pole), got {q[k]!r}")
+        if not np.isfinite(q["alpha_phi_rad"]):
+            raise ValueError(f"law('saleh'): alpha_phi_rad must be a finite number of radians, "
+                             f"got {q['alpha_phi_rad']!r}")
+    if kind == "rapp":
+        for k in ("gain", "sat", "smoothness"):
+            if not q[k] > 0:
+                raise ValueError(f"law('rapp'): {k} must be positive, got {q[k]!r}")
     return q
+
+
+def am_am_pm(kind, r, **params):
+    """``(A, phi_rad)``: an envelope law's AM/AM and AM/PM curves at input magnitudes `r` --
+    the output magnitude and the phase added, which is the ground truth for what
+    `law(kind, ...)` did to an I/Q record. See the module docstring for each law."""
+    r = np.asarray(r, float)
+    gain, phi = _envelope_gain(kind, _law_params(kind, params), r)
+    return gain * r, phi
+
+
+def _envelope_gain(kind, q, r):
+    """``(A(r)/r, phi(r))`` of an envelope law: the real gain, finite at r = 0, and the phase."""
+    if kind not in ENVELOPE_LAWS:
+        raise ValueError(
+            f"law({kind!r}) is a law on a voltage, with no AM/AM or AM/PM curve of its own. "
+            f"The envelope laws are {', '.join(ENVELOPE_LAWS)}.")
+    if kind == "saleh":
+        return (q["alpha_a"] / (1.0 + q["beta_a"] * r ** 2),
+                q["alpha_phi_rad"] * r ** 2 / (1.0 + q["beta_phi"] * r ** 2))
+    p2 = 2.0 * q["smoothness"]
+    return q["gain"] / (1.0 + (q["gain"] * r / q["sat"]) ** p2) ** (1.0 / p2), np.zeros_like(r)
 
 
 def _diode(x, r, i_sat, a):
@@ -312,15 +391,16 @@ def apply_law(x, kind, fs=None, events=None, placement="law", **params):
     """
     q = _law_params(kind, params)
     x = np.asarray(x)
-    if np.iscomplexobj(x):
-        raise ValueError(
-            f"law({kind!r}): the waveform here is complex (an optical field or a baseband "
-            f"envelope) and a transfer law is defined on a real voltage. Detect it first "
-            f"(photodetect()), or apply the law to the real and imaginary parts as two chains; "
-            f"taking one part silently would drop the other.")
-    x = x.astype(float)
     if x.size == 0:
         raise ValueError(f"law({kind!r}): the waveform is empty")
+    if kind in ENVELOPE_LAWS:
+        if not np.iscomplexobj(x):
+            raise ValueError(refuse_law(kind, "real"))
+        gain, phi = _envelope_gain(kind, q, np.abs(x))
+        return x * gain * np.exp(1j * phi) if kind == "saleh" else x * gain
+    if np.iscomplexobj(x):
+        raise ValueError(refuse_law(kind, "iq"))
+    x = x.astype(float)
     if kind == "tanh":
         return q["sat"] * np.tanh(q["gain"] * x / q["sat"])
     if kind == "poly":
@@ -339,6 +419,25 @@ def apply_law(x, kind, fs=None, events=None, placement="law", **params):
     if kind == "comparator":
         return _comparator(x, q, fs, events, placement)
     return _diode(x, q["r_load_ohm"], q["i_sat"], q["ideality"] * q["v_thermal"])
+
+
+def refuse_law(kind, domain):
+    """Why `law(kind)` does not apply to a record in `domain`, and what does."""
+    if domain == "iq":
+        return (
+            f"law({kind!r}): the waveform here is complex -- a complex baseband record (domain "
+            f"'iq'), or an optical field -- and {kind!r} is a law on a real voltage. On an "
+            f"envelope the laws are {' and '.join(ENVELOPE_LAWS)}, which act on its magnitude "
+            f"(an amplifier's AM/AM and AM/PM), and dac(bits=) is its quantiser. To apply a "
+            f"voltage law to the passband signal, upconvert(fc_hz=...) first; an optical "
+            f"field is detected first (photodetect()). Taking one part silently would drop "
+            f"the other.")
+    return (
+        f"law({kind!r}): the record is a real voltage here, and {kind!r} is an ENVELOPE law -- "
+        f"an amplifier's AM/AM and AM/PM as functions of the magnitude of a complex baseband "
+        f"record, which a voltage does not have. On a voltage the saturating law is "
+        f"law('tanh', gain=, sat=); to use {kind!r}, downconvert(fc_hz=..., lpf=...) first or "
+        f"start the chain with .iq(...).")
 
 
 def window_events(events, window, fs):
@@ -529,6 +628,17 @@ def design_filter(fs, kind, grid_baud=None, **params):
             q["sos"], "filter('sos')", "For a pole AT z = 1 use filter('integrate').")}
     if kind == "zpk":
         return {**out, "form": "sos", "sos": _design_zpk(q, fs)}
+    if kind == "doppler":
+        f_hz = float(q["f_hz"])
+        if q["shape"] not in DOPPLER_SHAPES:
+            raise ValueError(f"filter('doppler'): shape is 'jakes' (the classic U: scatterers "
+                             f"all round, in a plane) or 'flat' (uniform), got {q['shape']!r}")
+        if not 0.0 < f_hz < 0.5 * fs:
+            raise ValueError(
+                f"filter('doppler'): f_hz={q['f_hz']!r} is the largest Doppler shift and must "
+                f"lie between 0 and the Nyquist frequency {0.5 * fs:.6g} Hz of this grid.")
+        # zero-phase by construction: a spectrum's magnitude, with no delay to report
+        return {**out, "zero_phase": True, "form": "doppler", "f_hz": f_hz, "shape": q["shape"]}
     if kind in ("integrate", "differentiate"):
         tau = float(q["tau_s"])
         if not tau > 0:
@@ -631,6 +741,32 @@ def describe_filter(fs, kind, at_hz=None, grid_baud=None, **params):
             "at_hz": float(at_hz), "step_delay_s": None if step is None else step / fs}
 
 
+def doppler_gain(n, fs, f_hz, shape="jakes"):
+    """The `doppler` filter's gain at each ``np.fft.fftfreq(n, 1/fs)`` bin: the square root of
+    the shape's power over that bin's own width, scaled so the mean power gain across
+    +/-f_hz is 1."""
+    df = fs / n
+    f = np.fft.fftfreq(n, 1.0 / fs)
+
+    def cdf(v):                       # the fraction of the spectrum's power below v
+        u = np.clip(v / f_hz, -1.0, 1.0)
+        return 0.5 + (np.arcsin(u) / np.pi if shape == "jakes" else 0.5 * u)
+    return np.sqrt((cdf(f + 0.5 * df) - cdf(f - 0.5 * df)) * (2.0 * f_hz / df))
+
+
+def _doppler(x, d, fs):
+    n = len(x)
+    if d["f_hz"] * n / fs < DOPPLER_MIN_PERIODS:
+        raise ValueError(
+            f"filter('doppler'): f_hz={d['f_hz']:g} Hz is {d['f_hz'] * n / fs:.3g} Doppler "
+            f"periods in this record of {n / fs:.6g} s, and under {DOPPLER_MIN_PERIODS:g} "
+            f"there is no spectrum to shape -- the process barely moves. Lengthen the record "
+            f"to at least {DOPPLER_MIN_PERIODS / d['f_hz']:.6g} s; a fade that is constant "
+            f"over the record is one complex number, gain(by=<complex>).")
+    y = _fft.ifft(_fft.fft(x) * doppler_gain(n, fs, d["f_hz"], d["shape"]))
+    return y if np.iscomplexobj(x) else y.real
+
+
 def _impulse_extent(sos):
     """Samples until a stable filter's impulse response has fallen 200 dB below its peak."""
     m = 1024
@@ -672,6 +808,8 @@ def apply_filter(x, fs, kind, grid_baud=None, **params):
     x = x if np.iscomplexobj(x) else x.astype(float)
     if x.ndim != 1 or x.size == 0:
         raise ValueError(f"filter({kind!r}): the waveform must be one non-empty record")
+    if d["form"] == "doppler":
+        return _doppler(x, d, fs)
     if d["form"] == "integrate":
         return d["scale"] * np.concatenate([x[:1] * 0.0, np.cumsum(0.5 * (x[1:] + x[:-1]))])
     if d["form"] == "sos":
