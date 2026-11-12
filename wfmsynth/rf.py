@@ -590,6 +590,12 @@ WINDOWS = ("hann", "hamming", "blackman", "blackmanharris", "flattop", "boxcar")
 CORRECTIONS = ("timing", "frequency", "offset", "gain", "phase", "equalizer")
 MIN_SEGMENT = 16          # samples: the shortest Welch segment `spectrum` will use
 DECIDED_PASSES = 3        # decide, fit, correct -- this many times -- for reference="decided"
+# A decided-reference frequency correction is ACQUIRED blind before any decision is made, from
+# the carrier line in the M-th power of the symbols (M the constellation's rotational order:
+# 2 for BPSK, 4 for QPSK and square QAM). Two numbers say whether it locked, and outside them
+# `evm` refuses rather than return a figure:
+LOCK_LINE = 6.0           # the line's height over the incoherent level sqrt(sum |s^M|^2)
+LOCK_TURN = 0.25          # turns of s^M left across the counted symbols after correction
 
 
 def _record(x, who):
@@ -868,6 +874,57 @@ def _frequency(r, s, t):
     return float(best.x)
 
 
+def symmetry_order(constellation):
+    """The rotational order M of a constellation: the smallest power whose mean over the
+    points is not zero, so that ``s**M`` of any symbol stream carries a line at M times the
+    carrier offset. 1 for an alphabet with a DC term, 2 for BPSK, 4 for QPSK and square QAM."""
+    pts = constellation_points(constellation)
+    for m in range(1, 9):
+        if abs(np.mean(pts ** m)) > 1e-6 * np.mean(np.abs(pts) ** m):
+            return m
+    raise ValueError("evm: this constellation has no rotational order up to 8, so its "
+                     "carrier cannot be found blind; give reference='truth' with sent=")
+
+
+def carrier_line(r, t, constellation):
+    """The carrier of a symbol stream found WITHOUT decisions, from the line in its M-th power.
+
+    Returns ``(frequency_hz, phase_rad, line, order)``: the offset (unambiguous within
+    ``+/- baud / (2 * M)``; a larger one comes back modulo ``baud / M``), the phase at `t[0]`
+    that puts the constellation upright (modulo ``2*pi / M``), the line's height over the
+    incoherent level -- about ``c * sqrt(n)`` for n symbols, with c = 0.36 for clean QAM-16
+    and 1 for QPSK, and about ``sqrt(ln n)`` when there is no line at all -- and M."""
+    pts = constellation_points(constellation)
+    m = symmetry_order(pts)
+    z = np.asarray(r, complex) ** m
+    f = _frequency(z, np.ones(z.size, complex), t)
+    tt = t - t[0]
+    peak = np.sum(z * np.exp(-2j * np.pi * f * tt))
+    level = float(np.sqrt(np.sum(np.abs(z) ** 2)))
+    phase = (np.angle(peak) - np.angle(np.mean(pts ** m))) / m
+    phase = (phase + np.pi / m) % (2 * np.pi / m) - np.pi / m
+    return f / m, float(phase), (float(abs(peak)) / level if level > 0 else 0.0), m
+
+
+def _upright(r, constellation):
+    """The rotation (modulo ``2*pi / M``) that puts a symbol stream with no frequency offset
+    upright on its constellation, from the phase of the mean of its M-th power."""
+    pts = constellation_points(constellation)
+    m = symmetry_order(pts)
+    phase = (np.angle(np.mean(np.asarray(r, complex) ** m)) - np.angle(np.mean(pts ** m))) / m
+    return float((phase + np.pi / m) % (2 * np.pi / m) - np.pi / m)
+
+
+def _refuse_unlocked(why, baud, order, n):
+    return ValueError(
+        f"evm: reference='decided' with correct='frequency' did not lock: {why}. The carrier "
+        f"is acquired blind from the line in the {order}th power of the symbols, which finds "
+        f"an offset within +/- baud/(2*{order}) = +/-{baud / (2 * order):.6g} Hz given enough "
+        f"symbols for the noise ({n} counted here). No figure is returned, because it would "
+        f"describe the failure to lock and not the signal. Give reference='truth' with "
+        f"sent=, or take the known offset out first (sig.lo_phase()).")
+
+
 def _equalizer(y, s, keep, taps):
     """Least-squares symbol-spaced FIR: the `taps` weights that best turn `y` into `s` over the
     kept symbols. Returns ``(weights, equalised y)``; the centre weight multiplies the symbol
@@ -914,8 +971,23 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
       ``"equalizer"``  a symbol-spaced linear equaliser of `equalizer_taps` taps (odd, stated)
     They are estimated in that order, each by least squares against the reference. With
     `reference="decided"` the reference depends on the correction, so decide / fit / correct
-    is run three times; it pulls in only from a record whose decisions are mostly right
-    already.
+    is run three times -- which only REFINES. A carrier is therefore acquired first, blind,
+    from the line in the M-th power of the symbols (`carrier_line`; M = 2 for BPSK, 4 for
+    QPSK and square QAM), when ``"frequency"`` or ``"phase"`` is named:
+
+      * the frequency is found within ``+/- baud / (2 * M)`` -- 3.125 MHz for QAM-16 at
+        25 MBd -- whatever the phase and without one right decision; a larger offset comes
+        back modulo ``baud / M``, a quarter-turn per symbol being invisible at the symbol
+        instants (and by then the matched filter has lost much of the signal);
+      * the phase is found modulo ``2*pi / M``, the constellation's own symmetry;
+      * with ``"frequency"`` named the lock is CHECKED on the corrected symbols: a carrier
+        line at least `LOCK_LINE` high, turning less than `LOCK_TURN` across the record.
+        A record that fails either is REFUSED, saying which -- too few symbols for the noise,
+        or not this constellation. ``["acquisition"]`` reports the line, the residual and
+        the pull-in range of a record that passed.
+
+    A ``reference="decided"`` figure still reads LOW once decisions fail in noise; give
+    `sent` to count them.
 
     Returns a dict:
       ``evm``, ``evm_pct``, ``evm_db``   RMS, as a fraction, a percentage and 20*log10
@@ -926,7 +998,15 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
                                          ``gain_db``, ``phase_rad``, ``equalizer_taps``
       ``received``, ``reference_symbols``  the corrected symbols and what they were compared
                                            with (after `skip`), for a plot or a bit count
-      ``decision_errors``                only for "decided" with `sent` given
+      ``decision_errors``                only for "decided" with `sent` given. Where a carrier
+                                         was acquired blind the count is taken with the
+                                         decided points ``symmetry_steps`` steps of
+                                         ``2*pi / M`` ahead of the sent ones, whichever
+                                         explains them best: a constellation locked a
+                                         quarter-turn round has every decision right
+      ``acquisition``                    only for "decided" with ``"frequency"``: ``order``,
+                                         ``pull_in_hz``, ``coarse_frequency_hz``, ``line``,
+                                         ``residual_turn``
     """
     a = _measured_envelope(x, "evm")
     fs, baud = IQ._rate(grid, "evm")
@@ -992,9 +1072,9 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
     raw = receive(delay_s)
     t = IQ.symbol_times(n_sym, grid)
 
-    def corrected(ref):
-        """`raw` with every named correction estimated against `ref` and taken out."""
-        y, out = raw.copy(), {}
+    def corrected(ref, src=None):
+        """`raw` (or `src`) with every named correction estimated against `ref` and taken out."""
+        y, out = (raw if src is None else src).copy(), {}
         if "frequency" in correct:
             out["frequency_hz"] = _frequency(y[keep], ref[keep], t[keep])
             y = y * np.exp(-2j * np.pi * out["frequency_hz"] * (t - t[keep][0]))
@@ -1019,13 +1099,47 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
         ref = truth
         y, fitted = corrected(ref)
     else:
-        y = raw
+        # ACQUIRE before deciding. A decision-directed fit only refines: started on a record
+        # that turns a fraction of a symmetry step across its length, its decisions are wrong,
+        # the fit follows them, and the figure that comes out is neither the signal's nor a
+        # sign that anything failed. So the carrier is found blind first.
+        base, pre, order = raw, {}, None
+        if "frequency" in correct:
+            f0, _, line, order = carrier_line(raw[keep], t[keep], pts)
+            if line < LOCK_LINE:
+                raise _refuse_unlocked(
+                    f"the symbols' {order}th power has no carrier line to acquire (height "
+                    f"{line:.1f} over the incoherent level, {LOCK_LINE:g} needed)", baud, order,
+                    n_sym - 2 * skip)
+            pre["frequency_hz"] = f0
+            base = base * np.exp(-2j * np.pi * f0 * (t - t[keep][0]))
+        if "phase" in correct:
+            pre["phase_rad"] = carrier_line(base[keep], t[keep], pts)[1] \
+                if "frequency" in correct else _upright(base[keep], pts)
+            base = base * np.exp(-1j * pre["phase_rad"])
+        y = base
         if "gain" in correct:            # a level to decide at; the fit below states the gain
-            y = raw * np.sqrt(np.mean(np.abs(pts) ** 2) / np.mean(np.abs(raw[keep]) ** 2))
+            y = base * np.sqrt(np.mean(np.abs(pts) ** 2) / np.mean(np.abs(base[keep]) ** 2))
         fitted = {}
         for _ in range(DECIDED_PASSES if correct else 0):
-            y, fitted = corrected(decide(y, pts))
+            y, fitted = corrected(decide(y, pts), base)
         ref = decide(y, pts)
+        for k, v in pre.items():
+            fitted[k] = fitted.get(k, 0.0) + v
+        if "phase_rad" in fitted:
+            fitted["phase_rad"] = float((fitted["phase_rad"] + np.pi) % (2 * np.pi) - np.pi)
+        if "frequency" in correct:       # ... and CHECK it held, on the symbols as corrected
+            f1, _, line, _ = carrier_line(y[keep], t[keep], pts)
+            turn = abs(f1) * order * float(t[keep][-1] - t[keep][0])
+            if line < LOCK_LINE or turn > LOCK_TURN:
+                raise _refuse_unlocked(
+                    f"after correction the symbols' {order}th power still turns {turn:.2f} of "
+                    f"a turn across the record (limit {LOCK_TURN:g}), line height {line:.1f} "
+                    f"(needs {LOCK_LINE:g})", baud, order, n_sym - 2 * skip)
+            acquisition = {"method": f"line in the {order}th power of the symbols",
+                           "order": order, "pull_in_hz": baud / (2 * order),
+                           "coarse_frequency_hz": pre["frequency_hz"], "line": line,
+                           "residual_turn": turn}
     removed.update(fitted)
     err = y[keep] - ref[keep]
     scale = float(np.sqrt(np.mean(np.abs(ref[keep]) ** 2)))
@@ -1041,5 +1155,14 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
            "delay_s": float(delay_s), "removed": removed,
            "received": y[keep], "reference_symbols": ref[keep]}
     if reference == "decided" and truth is not None:
-        out["decision_errors"] = int(np.sum(~np.isclose(ref[keep], truth[keep])))
+        # a blind carrier is found modulo the constellation's own symmetry, so the decided
+        # points may sit a whole number of symmetry steps from the sent ones with every
+        # decision right: count the errors at the step that explains them best, and say it
+        steps = symmetry_order(pts) if {"frequency", "phase"} & set(correct) else 1
+        errs = [int(np.sum(~np.isclose(ref[keep] * np.exp(-2j * np.pi * k / steps), truth[keep])))
+                for k in range(steps)]
+        out["decision_errors"] = min(errs)
+        out["symmetry_steps"] = int(np.argmin(errs))
+    if reference == "decided" and "frequency" in correct:
+        out["acquisition"] = acquisition
     return out

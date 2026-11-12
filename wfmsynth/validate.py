@@ -4090,6 +4090,45 @@ check("roles() lists exactly what the record draws from: every listed role was d
       f"asked for and not drawn {sorted(_rst.asked - _rst.drawn())}; "
       f"{len(_rmoved)} of {len(_rchain.roles())} re-rolls changed samples")
 
+# ---- rf.evm(reference="decided"): a carrier is acquired before deciding, or refused (0.46.0)
+# The reference is the truth-referenced EVM, which uses the transmitted symbols and none of
+# the blind estimator. Before this, the 2 kHz record below returned 24.5 % / 24.9 %.
+_vg = Grid(fs=400e6, baud=25e6, n=1 << 16, fc_hz=2.4e9)
+
+
+def _vacq(f_hz, es_n0_db):
+    s = Signal(seed=1, grid=_vg).iq("qam16", prbs=15, prbs_phase=100).freq_offset(f_hz=f_hz)
+    if es_n0_db is not None:
+        s = s.awgn(es_n0_db=es_n0_db, ref_power=1.0)
+    x, sent = s.waveform(), s.transmitted()[0]
+    kw = dict(skip=16, correct=("frequency", "phase"))
+    return (_sws.rf.evm(x, _vg, sent, **kw),
+            _sws.rf.evm(x, _vg, sent, reference="decided", constellation="qam16", **kw))
+
+
+_vrep = [_vacq(2e3, e) for e in (None, 24)]
+_vsweep = [(f, _vacq(f, 24)) for f in (-3.0e6, -1.234e6, -2e4, 150.0, 2e5, 2e6, 3.0e6)]
+_vworst = max(abs(b["evm_pct"] - t["evm_pct"]) for _, (t, b) in _vsweep)
+_vferr = max(abs(b["removed"]["frequency_hz"] - f) for f, (_, b) in _vsweep)
+_vrng = np.random.default_rng(0)
+_vnoise = _vrng.standard_normal(1 << 16) + 1j * _vrng.standard_normal(1 << 16)
+_vref = _qrefusal(lambda: _sws.rf.evm(_vnoise, _vg, reference="decided", constellation="qam16",
+                                      correct=("frequency",)))
+check("a decided-reference EVM acquires its carrier blind before deciding: a QAM-16 record "
+      "2 kHz off reads what the truth-referenced EVM reads, any offset within +/- baud/8 is "
+      "found, and a record with no carrier to find is refused, not measured",
+      all(abs(b["evm_pct"] - t["evm_pct"]) < 0.01 and b["decision_errors"] == 0
+          for t, b in _vrep)
+      and _vworst < 0.02 and _vferr < 25.0 and "did not lock" in _vref
+      and "No figure is returned" in _vref,
+      f"2 kHz offset, decided against truth: {_vrep[0][1]['evm_pct']:.2f} % / "
+      f"{_vrep[0][0]['evm_pct']:.2f} % clean, {_vrep[1][1]['evm_pct']:.2f} % / "
+      f"{_vrep[1][0]['evm_pct']:.2f} % at Es/N0 24 dB (carrier line "
+      f"{_vrep[1][1]['acquisition']['line']:.1f}, {_sws.rf.LOCK_LINE:g} needed); offsets "
+      f"-3 .. +3 MHz at 24 dB: worst EVM difference {_vworst:.3f} points, worst frequency "
+      f"error {_vferr:.1f} Hz (pull-in +/-{_vrep[0][1]['acquisition']['pull_in_hz'] / 1e6:.3f}"
+      f" MHz); noise alone: refused")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
