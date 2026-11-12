@@ -219,21 +219,52 @@ def attributes(x, grid, levels=4):
 
 
 # ------------------------------------------------------------- a swept-wavelength record
-def _fringe_end(c, guess, x):
-    """The phase of ``c = cos(phase)`` over the part fringe at one end of a record, where
-    only a rough `guess` of it is known. Each sample's arccosine allows two phases a turn;
-    the one nearest the guess is taken, and what those say the guess is out by is fitted as
-    a smooth curve in `x`, the distance from the whole fringes it joins (zero there), so one
-    noisy sample near a crest does not decide the answer."""
-    a = np.arccos(np.clip(c, -1.0, 1.0))
-    two_pi = 2 * np.pi
-    plus = a + two_pi * np.round((guess - a) / two_pi)
-    minus = -a + two_pi * np.round((guess + a) / two_pi)
-    off = np.where(np.abs(plus - guess) <= np.abs(minus - guess), plus, minus) - guess
-    if len(c) < 8:
+def _fringe_end(c, guess, x, rising):
+    """The phase of ``c = cos(phase)`` over the part fringe at one end of a record, WALKING
+    AWAY from the whole fringes it joins: `c`, the rough `guess` of the phase and `x`, the
+    distance walked (zero at the join), all in that order, with the phase taken as growing
+    along the walk. `rising` says whether the walk sets out up a fringe (after the last
+    counted rise) or down one (backwards from the first).
+
+    Each sample's arccosine allows two phases a turn. Which one is read from the fringe's own
+    SHAPE and not from the guess, which a sweep whose rate changes here (a ripple, a bow)
+    puts out by more than the quarter turn that would decide it: a part fringe is under one
+    turn, so it climbs to at most one crest and falls to at most one trough, in an order the
+    end it is at fixes, and the phase is -a before a crest, +a after it, and a turn on past
+    a trough. The crest is the highest sample of the stretch that stands above half height
+    and the trough the lowest of the stretch below minus half, as the whole fringes are
+    counted. What those phases say the guess is out by is then fitted as a smooth curve in
+    `x` (zero at the join), weighted by the fringe's slope, so one noisy sample near a crest
+    does not decide the answer."""
+    c = np.clip(c, -1.0, 1.0)
+    n, a = len(c), np.arccos(c)
+    side = np.sign(c) * (np.abs(c) > 0.5)
+    held = side[np.maximum.accumulate(np.where(side != 0, np.arange(n), 0))]
+    # until it first stands below minus half, the walk is on the stretch it set out on:
+    # up to the crest, or down to that trough
+    below = np.flatnonzero(side < 0)
+    held[:below[0] if len(below) else n] = 1.0 if rising else -1.0
+    hi, lo = np.flatnonzero(held > 0), np.flatnonzero(held < 0)
+    crest = int(hi[np.argmax(c[hi])]) if len(hi) else None
+    trough = int(lo[np.argmin(c[lo])]) if len(lo) else None
+    i = np.arange(n)
+    if rising:                       # ... crest, then trough
+        turn = np.zeros(n) if trough is None else (i > trough).astype(float)
+        sign = np.where((i <= (n if crest is None else crest)) | (turn > 0), -1.0, 1.0)
+    else:                            # ... trough, then crest
+        after = np.zeros(n, bool) if crest is None else i > crest
+        turn = (np.zeros(n) if trough is None else (i > trough).astype(float))
+        sign = np.where((i <= (n if trough is None else trough)) | after, 1.0, -1.0)
+    read = sign * a + 2 * np.pi * turn
+    if n:
+        read += 2 * np.pi * np.round((guess[0] - read[0]) / (2 * np.pi))
+    off = read - guess
+    if n < 8:
         return guess + off
     x = np.asarray(x, float)
-    lin, quad = np.linalg.lstsq(np.stack([x, x * x], axis=1), off, rcond=None)[0]
+    w = np.sqrt(1.0 - c * c) + 1e-3
+    lin, quad = np.linalg.lstsq(np.stack([x, x * x], axis=1) * w[:, None], off * w,
+                                rcond=None)[0]
     return guess + lin * x + quad * x * x     # not `basis @ coef`: numpy 2.0 on macOS warns
 
 
@@ -256,7 +287,11 @@ def swept_map(ref, grid, delay_s, at_s, wavelength_nm, rising=True):
     The analytic signal is taken over a WHOLE number of fringes -- from the first upward
     crossing of the mid level to the last, where the record joins onto itself -- because
     over a cut fringe it is wrong by a large part of a fringe at both ends. The part
-    fringe left at each end is read from the fringe's own shape (`_fringe_end`)."""
+    fringe left at each end is read from the fringe's own shape, its crest and its trough
+    (`_fringe_end`), so a sweep whose rate is changing there is still followed: measured
+    0.02 of a fringe at worst with a ripple that moves the rate by 30 % inside the last
+    fringe (tests/test_swept.py). An anchor inside the first part fringe (`at_s=0`) rests on
+    that reading, and so does every sample."""
     from scipy.signal import hilbert
     ref = np.asarray(voltage(ref, "swept_map"), float)
     n, fs = len(ref), grid.fs
@@ -290,11 +325,14 @@ def swept_map(ref, grid, delay_s, at_s, wavelength_nm, rising=True):
     # the whole fringe beside it, then read off the fringe itself
     j0 = i0 + int(np.argmax(phase[i0:i1] >= phase[i0] + 2 * np.pi))
     j1 = i1 - 1 - int(np.argmax(phase[i0:i1][::-1] <= phase[i1 - 1] - 2 * np.pi))
-    before, after = np.arange(i0) - i0, np.arange(i1, n) - (i1 - 1)
-    phase[:i0] = _fringe_end(
-        c[:i0], phase[i0] + (phase[j0] - phase[i0]) / (j0 - i0) * before, before)
+    before, after = np.arange(i0)[::-1] - i0, np.arange(i1, n) - (i1 - 1)
+    # the head is walked BACKWARDS from the first rise, where minus the phase is what rises
+    phase[:i0] = -_fringe_end(
+        c[:i0][::-1], -(phase[i0] + (phase[j0] - phase[i0]) / (j0 - i0) * before),
+        -before, rising=False)[::-1]
     phase[i1:] = _fringe_end(
-        c[i1:], phase[i1 - 1] + (phase[i1 - 1] - phase[j1]) / (i1 - 1 - j1) * after, after)
+        c[i1:], phase[i1 - 1] + (phase[i1 - 1] - phase[j1]) / (i1 - 1 - j1) * after, after,
+        rising=True)
     turns = (phase - np.interp(k, np.arange(n), phase)) / (2 * np.pi)
     c_nm = 299792458.0e9
     return c_nm / (c_nm / float(wavelength_nm) + (-1.0 if rising else 1.0) * turns / delay_s)
@@ -306,8 +344,12 @@ def transmission(x, wavelength_nm, power=1.0):
 
     `x` is the detector's record and `wavelength_nm` the wavelength at each of its samples:
     the truth (`ws.swept.wavelength_map(sig)["wavelength_nm"]`) or what the reference
-    channel recovered (`swept_map`). `power` is what the detector reads with no device in
-    the path -- a number, or a record of a tap on the laser, sample for sample."""
+    channel recovered (`swept_map`). `power` is what the detector reads with NO DEVICE in
+    the path -- a number, or a record of a tap on the laser, sample for sample -- so it
+    holds the laser's power, the detector's responsivity and every loss that is not the
+    device's. With it right, `t` is 1 away from a resonance and `resonances(level=1.0)`
+    is the honest call; left at 1.0 on a bench with any of those, `t` is in the detector's
+    units and `resonances` is called WITHOUT `level` (it then takes the spectrum's own)."""
     x = np.asarray(voltage(x, "transmission"), float)
     lam = np.asarray(wavelength_nm, float)
     if lam.shape != x.shape:
@@ -326,11 +368,15 @@ def resonances(wavelength_nm, t, depth=0.1, level=None):
     parabola through the three lowest samples; its width the distance between the two
     crossings (interpolated) of half way from the bottom up to `level`, the transmission
     away from resonance; ``q = wavelength / width`` and ``extinction_db`` is `level` over
-    the bottom. `level` left out is the spectrum's median, which a fringe does not move
-    but a dip's own skirts pull down: on a span of 30 widths the width reads 0.4 % narrow,
-    so state `level` (1.0 for a normalised record) when it is known. The free spectral
-    range is the spacing of successive `wavelength_nm`. It needs several samples across a
-    dip, and a dip clear of its neighbours at half depth."""
+    the bottom. `level` is the OFF-RESONANCE BASELINE of `t`, in `t`'s own units: 1.0 only
+    for a spectrum already divided by what the detector reads without the device
+    (`transmission(power=)`). Left out it is the spectrum's median, which a fringe does not
+    move but a dip's own skirts pull down: on a span of 30 widths the width reads 0.4 %
+    narrow, so state `level` when it is known. A stated `level` the spectrum never comes
+    half way up to from a dip is refused: it is the baseline of some other record (an
+    insertion loss not divided out), and the width would have no crossing to be read from.
+    The free spectral range is the spacing of successive `wavelength_nm`. It needs several
+    samples across a dip, and a dip clear of its neighbours at half depth."""
     from scipy.signal import find_peaks
     lam, t = np.asarray(wavelength_nm, float), np.asarray(t, float)
     base = float(np.median(t)) if level is None else float(level)
@@ -341,6 +387,15 @@ def resonances(wavelength_nm, t, depth=0.1, level=None):
         t_min = b - 0.25 * (a - c) * dx
         centre = lam[i] + dx * (lam[i + 1] - lam[i] if dx >= 0 else lam[i] - lam[i - 1])
         half, edges = 0.5 * (base + t_min), []
+        if level is not None and not t.max() >= half:
+            raise ValueError(
+                f"resonances: level={level!r} is the transmission away from resonance, and "
+                f"this spectrum never rises above {t.max():.4g}: half way up from the dip at "
+                f"{centre:.6g} nm ({half:.4g}) is not on it. The record carries a loss or a "
+                f"scale that is not the device's (insertion loss, responsivity, laser "
+                f"power). Divide it out -- transmission(x, wavelength_nm, power=<what the "
+                f"detector reads with no device>) -- or leave level= out, and the "
+                f"spectrum's own median is the baseline.")
         for step in (-1, 1):
             j = i
             while 0 < j < len(t) - 1 and t[j] < half:

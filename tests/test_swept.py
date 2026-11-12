@@ -583,6 +583,29 @@ def test_the_map_recovered_from_the_reference_channel_matches_the_truth():
     assert np.abs(got - lam_of(down.signal("ref"))).max() < 3e-3 * fringe_nm
 
 
+@pytest.mark.parametrize("ripple_hz, bow", [(150.0, 0.02), (150.0, 0.0), (200.0, 0.004),
+                                            (60.0, 0.02)])
+def test_the_part_fringe_at_each_end_is_read_where_the_sweep_rate_is_changing(ripple_hz, bow):
+    """A ripple makes the rate at a record's end differ from the whole fringe beside it by
+    tens of percent, so the part fringe is read from its own shape (its crest and trough),
+    not from an extrapolation. Four starts put the record's first sample at four places in
+    a fringe; an error in the FIRST part fringe would move every sample, the anchor being
+    there. Measured: 0.02 fringe at worst (it was 0.7)."""
+    g, tau = Grid(fs=1e6, n=1 << 17), 2e-9
+    fringe_nm = 1550.0 ** 2 / C_NM / tau
+    worst = 0.0
+    for start in (1549.8, 1549.801, 1549.802, 1549.803):
+        las = Signal(seed=1, grid=g).laser(start_nm=start, stop_nm=1550.2, bow_nm=bow,
+                                           ripple_nm=1e-3, ripple_hz=ripple_hz)
+        truth = lam_of(las)
+        assert np.all(np.diff(truth) > 0)                          # it never reverses
+        ref = pd(R.mzi(las, delay_s=tau))
+        got = M.swept_map(ref, g, tau, at_s=0.0, wavelength_nm=start)
+        worst = max(worst, float(np.abs(got - truth).max()) / fringe_nm)
+    print(f"ripple {ripple_hz:g} Hz, bow {bow:g} nm: worst map error {worst:.4f} fringe")
+    assert worst < 0.04
+
+
 def test_transmission_on_the_recovered_axis_gives_the_stated_ring():
     rec = bench(dict(start_nm=1549.0, stop_nm=1551.0, bow_nm=0.02, ripple_nm=3e-3,
                      ripple_hz=40.0))
@@ -710,5 +733,18 @@ def test_the_swept_measures_refuse_what_they_cannot_read():
         M.swept_map(np.cos(np.arange(1000.0)), G, 2e-9, at_s=1.0, wavelength_nm=1550.0)
     with pytest.raises(ValueError, match="one wavelength per sample"):
         M.transmission(np.ones(10), np.ones(9))
+    # a stated baseline the record never comes up to: 6 dB of insertion loss, level=1.0
+    ring = R.ring(laser(start_nm=1549.9, stop_nm=1550.1), wavelength_nm=1550.0, q=1e5,
+                  extinction_db=15.0)
+    lam = lam_of(ring)
+    wl, t = M.transmission(pd(ring) * 10 ** -0.6, lam)
+    with pytest.raises(ValueError, match=r"level=1.0 is the transmission away from resonance"
+                                         r".*never rises above 0.2497.*power=.*leave level= out"):
+        M.resonances(wl, t, level=1.0)
+    own = M.resonances(wl, t)[0]                # its own median: 13 widths of span, 2 % narrow
+    assert abs(own["q"] / 1e5 - 1) < 0.04 and abs(own["extinction_db"] - 15.0) < 0.2
+    out = M.resonances(*M.transmission(pd(ring) * 10 ** -0.6, lam, power=10 ** -0.6),
+                       level=1.0)[0]            # the loss divided out: the stated ring
+    assert abs(out["q"] / 1e5 - 1) < 5e-3 and abs(out["extinction_db"] - 15.0) < 0.05
     with pytest.raises(ValueError, match="no `laser`"):
         SW.wavelength_map(Signal(grid=G).carrier("sine", f_hz=1e3))

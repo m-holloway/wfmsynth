@@ -109,6 +109,32 @@ def test_a_causal_envelope_response_is_the_passband_minimum_phase_read_at_fc_plu
     assert BB.passband_top(8e9, 3e9) == 8e9 and BB.passband_top(20e6, 2.4e9) == 2.41e9
 
 
+def test_the_causal_phase_far_above_the_sample_rate_is_a_stated_choice_with_a_stated_cost():
+    """2.4 GHz on 20 MSa/s: the envelope's band is at the very top of the axis the minimum
+    phase is built on. Against the same law's minimum phase on an axis 64 times wider (its
+    cepstrum written out here) the response differs by a constant phase and a bulk delay --
+    the group delay is a small ADVANCE -- and by little else."""
+    fs, fc, law = 20e6, 2.4e9, dict(loss_db=20.0, loss_at_ghz=2.4)
+    f = np.linspace(-0.4 * fs, 0.4 * fs, 801)
+    got = np.unwrap(np.angle(BB.lossy_response(f, fs, fc, causal=True, **law)))
+    n, top = 1 << 23, 64 * BB.passband_top(fs, fc)
+    fa = np.fft.rfftfreq(n) * 2 * top
+    la = np.log(10 ** (-P.insertion_loss_db(fa / 1e9, **law) / 20))
+    c = np.fft.ifft(np.concatenate([la, la[-2:0:-1]])).real
+    w = np.zeros(n)
+    w[0], w[1:n // 2], w[n // 2] = 1, 2, 1
+    wide = np.interp(fc + f, fa, np.fft.fft(c * w).imag[:n // 2 + 1])
+    delay = lambda p: float(np.mean(-np.gradient(p, f)) / (2 * np.pi))       # noqa: E731
+    d = got - wide
+    rest = float(np.abs(d - np.polyval(np.polyfit(f, d, 1), f)).max())
+    print(f"phase at fc {np.interp(0, f, got):+.3f} rad (wide axis {np.interp(0, f, wide):+.3f}); "
+          f"group delay {delay(got) * 1e9:+.3f} ns (wide {delay(wide) * 1e9:+.3f}); apart from "
+          f"a constant and a delay they differ by {rest:.1e} rad")
+    assert abs(np.interp(0, f, got) + 0.025) < 0.005 and abs(np.interp(0, f, wide) + 3.50) < 0.02
+    assert abs(delay(got) * 1e9 + 0.35) < 0.02 and abs(delay(wide) * 1e9 - 0.15) < 0.02
+    assert rest < 2e-3                                           # measured 1.2e-3
+
+
 # ------------------------------------------------------------------ sparam
 FREQS = np.linspace(1.5e9, 4.5e9, 601)
 S21 = 0.8 * np.exp(-2j * np.pi * FREQS * 0.4e-9) * (1 + 0.3 * np.exp(-2j * np.pi * FREQS * 1.3e-9))

@@ -31,8 +31,19 @@ WHAT IS EXACT AND WHAT IS A CHOICE.
     envelope has no such band, so one is stated: the phase is the minimum phase of the loss
     law from 0 to `passband_top(fs, fc_hz)`, the first whole multiple of fs/2 that holds
     fc + fs/2. That is what the passband route computes on a real grid whose Nyquist is that
-    frequency, and the two agree to the bound tests/test_baseband_channel.py states. Another
-    top frequency is, to first order, another bulk delay.
+    frequency, and the two agree to the bound tests/test_baseband_channel.py states.
+    THE TOP IS A CHOICE THAT SHOWS. A loss that grows with frequency without end has no
+    minimum phase of its own: taken over an axis k times wider, the phase at fc and the group
+    delay both keep growing, as log k. Across the envelope's band another top is another
+    CONSTANT PHASE AND BULK DELAY, and what is left over is small: the shape of the phase
+    across the band, the dispersion, is the channel's. So with fc far above fs the band sits
+    at the very top of the axis, where a sampled minimum phase is pulled back to zero, and
+    the "causal" channel has almost no carrier phase and a small ADVANCE. Measured for
+    `lossy(loss_db=20, loss_at_ghz=2.4, causal=True)` at fc = 2.4 GHz on fs = 20 MSa/s
+    (top 2.41 GHz): -0.025 rad at fc and a group delay of -0.35 ns (0.007 of a sample),
+    against -3.50 rad and +0.15 ns on an axis 64 times wider; the two differ by a constant
+    and a delay to 1.2e-3 rad. Read the group delay of such a record as "none stated", not
+    as the line's: a line's delay is a `delay`, and its carrier phase a complex `gain`.
   * a frequency the envelope's band reaches below 0 Hz (fc < fs/2) is read at |f| and
     conjugated, as a real channel's response is there.
 
