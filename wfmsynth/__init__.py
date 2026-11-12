@@ -111,6 +111,32 @@ def _read_version():
 
 __version__ = _read_version()
 
+
+def _numpy_floor(version):
+    """The warning for a numpy below the declared floor, or None. pip enforces the floor on an
+    install; a source tree on PYTHONPATH gets no such check, so the import makes it."""
+    try:
+        major = int(str(version).split(".")[0])
+    except ValueError:
+        return None
+    if major >= 2:
+        return None
+    return (f"wfmsynth needs numpy >= 2.0 and this is numpy {version}. Real-valued records "
+            f"render as on numpy 2, but a complex record (I/Q or an optical field) does not "
+            f"replay to the byte here, so its sample digest cannot be relied on. "
+            f"Install numpy>=2.0 (and scipy>=1.13).")
+
+
+def _warn_numpy_floor():
+    import warnings
+    import numpy
+    msg = _numpy_floor(numpy.__version__)
+    if msg:
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+_warn_numpy_floor()
+
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,

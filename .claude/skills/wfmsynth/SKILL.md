@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); a record can be complex baseband (I/Q, OFDM, fading and multipath) with RF impairments and measures, or an optical field with a swept laser and resonators; and wfmsynth.recipes ships realistic clutter (hum, ripple, 1/f, contact bounce) as visible chains. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
-version: 10
+version: 11
 ---
 
 # wfmsynth
@@ -15,7 +15,7 @@ cd wfmsynth && pip install -e .          # or: export PYTHONPATH=$PWD
 python -c "import wfmsynth; print(wfmsynth.__version__)"
 ```
 
-Python 3.9+, numpy, scipy. `h5py` only for HDF5 export.
+Python 3.9+, numpy 2.0+, scipy 1.13+. `h5py` only for HDF5 export.
 
 **`REFERENCE.md`, beside this file, has the worked examples** — a record end to end, the sizing
 arithmetic, recipes and digests, the pattern registry, chains that meet, I/Q, export, and
