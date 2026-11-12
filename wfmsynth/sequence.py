@@ -56,6 +56,10 @@ envelope: a preamble then a payload about one centre frequency. `select` stays a
 A segment boundary is still a `segment` event, so `iqfile.to_interleaved(events=)` writes it
 into the marker channel and `to_sigmf` into an annotation.
 
+ON AN OPTICAL FIELD the parts are field chains (each ends on `eo` or a field op) and the joined
+record is a field: a burst after an idle, an optical switch between two sources. A grid that
+states no domain follows them, as it follows I/Q parts.
+
 One mechanism or two? Two. A sequence is a statement about TIME (durations, written in the
 recipe, on the grid); a switch is a statement about a SIGNAL (the instants are an outcome, and
 are emitted). A sequence written as a switch would need a staircase selector invented to carry

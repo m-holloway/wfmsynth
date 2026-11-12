@@ -17,6 +17,9 @@ A SIGNAL-DRIVEN PARAMETER is one stage whose single parameter `by` is a number o
     gate(by=)     x where by > threshold   an enable from somewhere else
     delay(by=)    x(t - by(t))             a path whose length moves: jitter, Doppler
 
+ON AN OPTICAL FIELD (`wfmsynth.domain`) the same three keep their meaning, as an attenuator,
+a shutter and a coupler: a `combine` of fields is COHERENT, |E1 + E2|^2 and not P1 + P2.
+
 ON AN I/Q RECORD (`wfmsynth.domain`) three of these keep their meaning: `gain` and `gate`, whose
 `by` stays a REAL signal acting on both rails alike, and `combine(how="sum")`, whose `others`
 are then I/Q signals about the same centre frequency. The rest are refused there by name.
@@ -94,7 +97,13 @@ def _envelope_ok(x):
 
 
 def check_domain(how, domain):
-    """`combine` on an I/Q record is a sum only."""
+    """`combine` on an I/Q record or an optical field is a sum only."""
+    if domain == "optical" and how != "sum":
+        raise ValueError(
+            f"combine: how={how!r} on an optical field. Fields about the same carrier ADD (a "
+            f"coupler, a reflection, a second source): how='sum'. A product of two fields is "
+            f"not a detector (`photodetect` is, and `gain(by=)` scales a field by a real "
+            f"signal), and complex samples have no order for min/max.")
     if domain == "iq" and how != "sum":
         raise ValueError(
             f"combine: how={how!r} on an I/Q record. Envelopes about the same centre ADD (an "
@@ -110,7 +119,8 @@ def _same(x, y, who, peer=False):
         if not np.iscomplexobj(y):
             raise ValueError(f"{who} is a real waveform and the record it joins is I/Q. A "
                              f"voltage cannot be added to an envelope: give an I/Q signal "
-                             f"about the same centre frequency.")
+                             f"about the same centre frequency (or, for an optical field, a "
+                             f"field: a chain that ends on `eo`).")
         y = np.asarray(y)
     else:
         y = _real(y, who)

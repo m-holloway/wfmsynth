@@ -114,6 +114,19 @@ def _chains(tmp):
         "coded": lambda: Signal(seed=7, grid=ga).coded("64b66b", prbs=13, n_bits=1024),
         "optical": lambda: Signal(seed=9, grid=ga).carrier("pam4", n_ui=ga.n // 8).eo(kind="mzm")
         .fiber(length_km=2.0).edfa().photodetect().tia(bw_hz=8e9),
+        # the rest of the optical field path, which became a stated domain in 0.46 (#92): the
+        # chirped laser, the coherent reflection, every noise source, and a record that ENDS
+        # in the field (complex samples on a real grid, as it always was)
+        "optical dml": lambda: Signal(seed=4, grid=ga).carrier("nrz", n_ui=ga.n // 8).eo(
+            kind="dml", alpha=3.0, er_db=8, adiabatic=0.1).fiber(length_km=4.0, D_ps_nm_km=17.0)
+        .photodetect(shot=False).tia(),
+        "optical mpi": lambda: Signal(seed=5, grid=ga).carrier("pam4", n_ui=ga.n // 8).eo(
+            kind="mzm", er_db=10, alpha=0.3, linewidth_hz=1e6).fiber(
+            length_km=10.0, gamma_per_w_km=1.3).optical_mpi(delay_samples=37, reflectivity=0.05)
+        .edfa(gain_db=12, nf_db=5).photodetect(responsivity=0.8, photons_per_unit=5e3)
+        .tia(gain=2.0, bw_hz=8e9, thermal_rms=0.01).digitize(bits=8),
+        "optical field": lambda: Signal(seed=6, grid=ga).carrier("nrz", n_ui=ga.n // 8).eo(
+            kind="mzm", linewidth_hz=2e6).fiber(length_km=2.0).edfa(),
         "square": lambda: Signal(seed=1, grid=Grid(fs=10e9, n=4096)).carrier("square", f_hz=10e6),
         "cmos": lambda: Signal(seed=5, grid=Grid(fs=10e9, n=4096)).carrier(
             "cmos", v_lo=0.0, v_hi=3.3, duty=0.5, f_hz=10e6, tr_s=2e-9),

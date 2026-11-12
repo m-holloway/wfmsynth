@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .domain import REBUILT as _REBUILT
+from .domain import COMPLEX as _COMPLEX, REBUILT as _REBUILT
 
 
 def digest(values):
@@ -49,8 +49,8 @@ _COMPLEX_MSG = (
     "capture: {what} complex (I/Q) samples, and this chain's record is real: its Grid states "
     "domain='real', or it has no Grid. A real record cannot hold them and nothing drops the "
     "imaginary part for you. Give the chain a Grid that does not state a domain (the record "
-    "then follows the file) or one that says domain='iq', or pass the part you mean "
-    "(values=x.real). " + _REBUILT)
+    "then follows the file) or one that says domain='iq' (domain='optical' when they are an "
+    "optical field), or pass the part you mean (values=x.real). " + _REBUILT)
 
 
 def holds_complex(path):
@@ -76,7 +76,7 @@ def encode(values, domain="real"):
     ``[[re, im], ...]`` for a complex one, since JSON has no complex number."""
     a = np.asarray(values)
     if np.iscomplexobj(a):
-        if domain != "iq":
+        if domain not in _COMPLEX:
             raise ValueError(_COMPLEX_MSG.format(what="values= holds"))
         return [[float(v.real), float(v.imag)] for v in a.ravel()]
     return [float(v) for v in values]
@@ -86,7 +86,7 @@ def decode(values, domain="real"):
     """A recipe's `values` -> samples in the record's domain."""
     a = np.asarray(values)
     paired = np.iscomplexobj(a) or (a.ndim == 2 and a.shape[-1] == 2)
-    if domain != "iq":
+    if domain not in _COMPLEX:
         if paired:
             raise ValueError(_COMPLEX_MSG.format(what="values= holds"))
         return np.asarray(values, float)
@@ -115,8 +115,9 @@ def _load_plain(p, path):
 
 def load_values(path, domain="real"):
     """Read a capture file's samples. Raises with the path named on any failure -- a missing or
-    unreadable file is an error to fix, never a record of zeros. `domain="iq"` reads complex
-    samples; a complex file read as real is refused rather than cast."""
+    unreadable file is an error to fix, never a record of zeros. `domain="iq"` (an envelope)
+    or `"optical"` (a field) reads complex samples; a complex file read as real is refused
+    rather than cast."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"capture: no such file {path!r}")
@@ -141,7 +142,7 @@ def load_values(path, domain="real"):
     elif suffix == ".csv":
         raw = np.loadtxt(p, delimiter=",")
         raw = np.atleast_2d(raw)
-        if domain == "iq":
+        if domain in _COMPLEX:
             if raw.shape[1] < 3:
                 raise ValueError(f"capture: {path!r} has {raw.shape[1]} column(s); an I/Q "
                                  f".csv is three -- time, I, Q")
@@ -151,9 +152,9 @@ def load_values(path, domain="real"):
     else:
         raise ValueError(f"capture: unsupported file type {suffix!r} for {path!r} "
                          f"(use .npy, .npz with a 'values' array, or a two-column .csv)")
-    if np.iscomplexobj(y) and domain != "iq":
+    if np.iscomplexobj(y) and domain not in _COMPLEX:
         raise ValueError(_COMPLEX_MSG.format(what=f"{path!r} holds"))
-    y = np.asarray(y, dtype=complex if domain == "iq" else float).ravel()
+    y = np.asarray(y, dtype=complex if domain in _COMPLEX else float).ravel()
     if y.size == 0:
         raise ValueError(f"capture: {path!r} contains no samples")
     return y

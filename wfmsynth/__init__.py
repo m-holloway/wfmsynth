@@ -14,7 +14,8 @@ Modules / public API:
   iq            complex baseband: a constellation source with known symbols (map_bits, shape),
                 upconvert / downconvert between I/Q and a real passband record, the stated
                 low-pass (lowpass, lowpass_error), and the receiver (demodulate)
-  domain        which domain ('real' | 'iq') each op accepts -- ACCEPTS is where an op opts in
+  domain        which domain ('real' | 'iq' | 'optical') each op accepts -- ACCEPTS is where
+                an op opts in
   rf            what a transmitter, an oscillator and a channel do to an I/Q record, one op
                 per effect: iq_imbalance, iq_offset, freq_offset, phase_noise, awgn, spur, dac
                 -- and the measures that read a radio record back: spectrum / band_power /

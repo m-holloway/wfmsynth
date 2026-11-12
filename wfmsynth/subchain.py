@@ -38,7 +38,9 @@ sub-chain ends on `upconvert` (the domain rule, `wfmsynth.domain`, applies insid
 it does outside). A sub-chain starts in the domain ITS OWN ops need, whatever record it sits in
 -- `Signal().carrier("sine", ...)` is a voltage inside an I/Q record -- and the parameter that
 takes a PEER of an I/Q record (a `sequence` segment, a `combine` entry) asks for an envelope
-instead with `domain="iq"`.
+instead with `domain="iq"`, and the peer of an optical field (`domain="optical"`) is a field: a
+chain that ends on `eo` or on a field op. The two complex domains are not interchangeable, and
+which one a sub-chain ends in is read from its ops, never from its samples being complex.
 
 A TOLERANCE inside a sub-chain (`wfmsynth.tolerance`) belongs to the record it joins: a Signal's
 resolved tolerances are restated on the way in and drawn under the outer seed, so `unit()` moves
@@ -246,8 +248,16 @@ def _chain(spec, streams, grid, at, who):
 
 def same_grid(y, n, who, sub=None, grid=None, domain=DOMAIN.REAL):
     """Refuse a rendered sub-chain that is not a waveform of `n` samples at the grid's rate, in
-    the `domain` the parameter takes: a real voltage, or (`"iq"`) a complex envelope."""
-    if domain == DOMAIN.IQ:
+    the `domain` the parameter takes: a real voltage, (`"iq"`) a complex envelope or
+    (`"optical"`) a field."""
+    if domain == DOMAIN.OPTICAL:
+        if not np.iscomplexobj(y):
+            raise ValueError(
+                f"{who} renders a REAL waveform, and here it joins an optical field as its "
+                f"peer. Give a field: a chain that ends on `eo` (or on a field op after it), "
+                f"not on `photodetect`.")
+        y = np.asarray(y, complex)
+    elif domain == DOMAIN.IQ:
         if not np.iscomplexobj(y):
             raise ValueError(
                 f"{who} renders a REAL waveform, and here it joins an I/Q record as a peer of "
@@ -285,7 +295,8 @@ def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domai
     """One nested-signal spec -> a real waveform of `n` samples. The resolver.
 
     `domain="iq"` is for the parameter that takes a PEER of an I/Q record (a segment, a
-    `combine` entry): the sub-chain must then render a complex envelope instead.
+    `combine` entry): the sub-chain must then render a complex envelope instead. `"optical"`
+    is the same for the peer of an optical field, which must be a field.
 
     `at` is the namespace (`crosstalk/2/aggressor`): the prefix of every role the sub-chain
     draws and the `Event.at` of every event it places. `who` names the parameter in a refusal.
@@ -334,6 +345,15 @@ def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domai
                              f"has arrived. Put a carrier before it, or give it its own 'ops'.")
         return np.asarray(chain, float)
     sub, st = _chain(spec, streams, grid, at, who)
+    if domain in DOMAIN.COMPLEX and sub.ops:
+        ends = DOMAIN.trace(sub.ops, sub.grid)[-1][0]
+        if ends in DOMAIN.COMPLEX and ends != domain:
+            words = {DOMAIN.IQ: "an I/Q envelope", DOMAIN.OPTICAL: "an optical field"}
+            raise ValueError(
+                f"{who} ends as {words[ends]} and the record it joins is {words[domain]}. "
+                f"Both are complex and they are not the same thing: an envelope is about an "
+                f"RF centre frequency, a field about an optical carrier, and nothing here "
+                f"converts one to the other. Give {words[domain]}.")
     if domain == DOMAIN.IQ and grid is not None and sub.ops:
         fc, own = getattr(grid, "fc_hz", None), DOMAIN.trace(sub.ops, sub.grid)[-1][1]
         if fc is not None and own is not None and own != fc:
@@ -516,7 +536,22 @@ def _held(v):
         for e in v))
 
 
-def _tree(sig, pre, indent, parts=None):
+def _start(sig):
+    """The domain a chain starts in: its grid's, or with no grid the one its ops need."""
+    return DOMAIN.of(sig.grid) if sig.grid is not None else (DOMAIN.needs(sig.ops) or DOMAIN.REAL)
+
+
+def _named(sig):
+    """True for a chain that starts by naming another (`use`): it is whatever that one is."""
+    return bool(sig.ops) and sig.ops[0].get("op") == "use"
+
+
+def _starts(sig):
+    """`'  domain=iq'` for a chain that does not start as a voltage, else nothing."""
+    return "" if _named(sig) or _start(sig) == DOMAIN.REAL else f"  domain={_start(sig)}"
+
+
+def _tree(sig, pre, indent, parts=None, expand=None):
     # `parts`: where each toleranced value sits -> its role, for this chain and those inside
     # it (a nested part is recorded on the outer op that holds the sub-chain)
     parts = dict(parts or {})
@@ -528,13 +563,23 @@ def _tree(sig, pre, indent, parts=None):
         subs.setdefault(i, []).append((at, label, spec))
     wi = len(str(max(len(sig.ops) - 1, 0)))
     wo = max((len(str(o.get("op"))) for o in sig.ops), default=0)
+    # the domain after each op, so the line of a bridge says where it leaves the record
+    # (`-> optical`); a chain that cannot be traced alone is shown without
+    try:
+        doms = [DOMAIN.REAL if _named(sig) else _start(sig)] + [
+            d for d, _ in DOMAIN.trace(sig.ops, sig.grid, expand=expand)]
+    except (ValueError, KeyError):
+        doms = None
     lines = []
     for i, o in enumerate(sig.ops):
         part = {k: parts[f"{pre}unit/{i}/{k}"] for k in o if f"{pre}unit/{i}/{k}" in parts}
         shown = ", ".join(f"{k}={_short(v)}" + (f" ({part[k]})" if k in part else "")
                           for k, v in o.items()
                           if k != "op" and not k.startswith("_") and not _held(v))
-        lines.append(f"{indent}{i:>{wi}}  {str(o.get('op')):<{wo}}  {shown}".rstrip())
+        line = f"{indent}{i:>{wi}}  {str(o.get('op')):<{wo}}  {shown}"
+        if doms and doms[i + 1] != doms[i]:
+            line = (line if shown else line[:-2]) + f"  -> {doms[i + 1]}"
+        lines.append(line.rstrip())
         for at, label, spec in subs.get(i, ()):
             ops = spec.get("ops") or ()
             if len(ops) == 1 and ops[0].get("op") == "use":
@@ -545,16 +590,17 @@ def _tree(sig, pre, indent, parts=None):
             own = (f"  its own record: seed={sub.seed}" + (
                 f", {_grid_words(sub.grid)}" if sub.grid is not None else "")
                    if "from" in spec else "")
-            lines.append(f"{indent}{'':>{wi}}    {label}  [{pre}{at}]{own}")
-            lines += _tree(sub, f"{pre}{at}/", indent + " " * (wi + 6), parts)
+            lines.append(f"{indent}{'':>{wi}}    {label}  [{pre}{at}]{own}{_starts(sub)}")
+            lines += _tree(sub, f"{pre}{at}/", indent + " " * (wi + 6), parts, expand)
     return lines
 
 
 def tree(sig):
     """`sig`'s chain as text: one op per line, each sub-chain indented under the parameter that
     holds it and headed by its namespace -- the prefix of its role names in `roles()` and the
-    argument `subchain()` takes."""
-    head = f"Signal  seed={sig.seed}  " + _grid_words(sig.grid)
+    argument `subchain()` takes. A chain that does not start as a voltage says so
+    (`domain=iq`), and the op that moves the record to another domain ends `-> <domain>`."""
+    head = f"Signal  seed={sig.seed}  " + _grid_words(sig.grid) + _starts(sig)
     if sig.lead_in:
         head += f"  lead_in={sig.lead_in!r}"
     return "\n".join([head] + _tree(sig, "", "  "))

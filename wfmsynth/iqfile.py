@@ -645,6 +645,11 @@ def to_sigmf(path, x, grid, events=None, dtype="float32", scale=None, descriptio
     `core:sample_count`, `core:label`, `core:generator`. Returns ``{"meta", "data",
     "datatype", "scale", "n"}``."""
     x = _iq_record(x, "to_sigmf")
+    if getattr(grid, "domain", "real") == "optical":
+        raise ValueError(
+            "to_sigmf: the grid is an optical field's (domain 'optical'), and SigMF describes "
+            "an I/Q recording about an RF centre frequency, which a field does not have. "
+            "Export the photocurrent after photodetect, or save the field with np.save.")
     if getattr(grid, "domain", "real") != "iq":
         raise ValueError(
             "to_sigmf: the grid is a real record's (domain 'real'), so it has no centre "

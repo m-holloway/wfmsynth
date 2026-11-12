@@ -91,7 +91,8 @@ def counts_for(volts, full_scale=None, bits=16):
         raise ValueError(
             "this exporter writes one voltage channel, and the record is complex baseband "
             "(I/Q), which is two. Nothing takes the real part for you: write x.real and x.imag "
-            "as two records, or export the real passband record before downconvert.")
+            "as two records, or export the real passband record before downconvert. (An "
+            "optical field is exported after photodetect, as the photocurrent.)")
     v = np.asarray(volts, dtype=float).ravel()
     if v.size == 0:
         raise ValueError("no samples to write")

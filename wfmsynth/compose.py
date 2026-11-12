@@ -1520,8 +1520,9 @@ def _op_combine(x, p, streams, grid, idx):
     from . import joins as JN
     x = _joined(x, p)
     JN.check_combine(p.get("how", "sum"), p.get("gains"), len(p.get("others") or ()))
-    # on an envelope the peers are envelopes about the same centre; on a voltage, voltages
-    dom = DOMAIN.IQ if np.iscomplexobj(x) else DOMAIN.REAL
+    # on an envelope the peers are envelopes about the same centre; on a field, fields; on a
+    # voltage, voltages
+    dom = DOMAIN.held(x, grid)[0]
     JN.check_domain(p.get("how", "sum"), dom)
     return JN.combine(x, SUB.signals(p, "others", streams, grid, idx, n=len(x), domain=dom),
                       how=p.get("how", "sum"), gains=p.get("gains"))
@@ -2409,7 +2410,9 @@ class Signal:
         I/Q: on a `Grid(domain="iq", fc_hz=...)` the same call starts a COMPLEX BASEBAND chain
         -- `values=<complex array>` (recorded as ``[[re, im], ...]``), a complex ``.npy`` /
         ``.npz``, or a three-column ``.csv`` (time, I, Q). Complex samples offered to a real
-        record are refused by name; nothing takes the real part for you.
+        record are refused by name; nothing takes the real part for you. On a
+        `Grid(domain="optical")` complex samples are an OPTICAL FIELD instead (one rendered
+        elsewhere, or by a chain that ended before `photodetect`), and the field ops follow.
 
         An I/Q RECORDING in an exchange format is read with `format=`:
 
@@ -2954,6 +2957,9 @@ class Signal:
 
     def eo(self, **params):
         """Electro-optic modulation: electrical drive -> COMPLEX optical field (start of an E/O/E link).
+        The record is in domain 'optical' from here to `photodetect` (`wfmsynth.domain`): the
+        field ops and the general stages that mean something on a field (`filter`, `gain`,
+        `gate`, `combine`, `use`) act on it, and an electrical op is refused by name.
         params: kind('mzm'|'dml'), vpi, bias, er_db, p_avg, alpha (chirp), adiabatic. Follow with
         `fiber`/`edfa`/`photodetect` — NOT the real-valued electrical ops."""
         return self._add("eo", **params)
@@ -3628,9 +3634,7 @@ class Signal:
             st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
         # where the chain starts: on its grid's domain, or -- a shared stage applied by `use`
         # -- on whatever the waveform it is handed is; a `use` in it is whatever it names
-        was = None if _x is None else (
-            (DOMAIN.IQ, getattr(grid, "fc_hz", None)) if np.iscomplexobj(_x)
-            else (DOMAIN.REAL, None))
+        was = None if _x is None else DOMAIN.held(_x, grid)
         rec = getattr(st, "record", None)
         doms = DOMAIN.trace(ops, grid, start=was,
                             expand=None if rec is None else rec.rec.expand)
@@ -3641,7 +3645,7 @@ class Signal:
             elif was is None:
                 was = (DOMAIN.of(grid), getattr(grid, "fc_hz", None))
             name = op["op"]
-            if name in DOMAIN.EMITS or name in _RATE_NOW or name == "trigger":
+            if name in DOMAIN.MIXERS or name in _RATE_NOW or name == "trigger":
                 # the rate the record is at NOW, which after an `acquire` or a decimating
                 # `downconvert` is not the synthesis grid's: what a mixer needs, and anything
                 # stated in Hz or seconds (a corner, a delay, a crossing's time)
@@ -3651,8 +3655,10 @@ class Signal:
                 x = _op_trigger(x, op, st, now, i, sink=sink)
             elif name == "law":
                 x = _op_law(x, op, st, now, i, sink=sink)
-            elif name in DOMAIN.EMITS or name in _RATE_NOW:
+            elif name in DOMAIN.MIXERS or name in _RATE_NOW:
                 x = _EXEC[name](x, op, st, now, i)
+            elif name == "use":                # a stage it names acts in the domain reached
+                x = CH.use(x, op["name"], st, dom=was[0])
             elif collect_events and name == "events":
                 x = _op_events(x, op, st, grid, i, sink=sink)
             elif win is not None and name in _LEAD_WINDOW_RANGED:
@@ -3664,11 +3670,11 @@ class Signal:
                 was_fs, now_fs = (_stored_rate(ops[:k], float(grid.fs), int(grid.n),
                                                peak_ok=True)[0] for k in (i, i + 1))
                 EV.rescale(sink, now_fs / was_fs, x.shape[-1])
-            if doms[i][0] == DOMAIN.IQ and not np.iscomplexobj(x):
+            if doms[i][0] in DOMAIN.COMPLEX and not np.iscomplexobj(x):
                 raise ValueError(f"{op['op']} (op {i}) returned a real array for a complex "
                                  f"baseband record: it dropped the imaginary part. An op "
-                                 f"listed in wfmsynth.domain.ACCEPTS for 'iq' must return "
-                                 f"complex samples.")
+                                 f"listed in wfmsynth.domain.ACCEPTS for 'iq' or 'optical' "
+                                 f"must return complex samples.")
         if x is None:
             raise ValueError("empty Signal: add a carrier first")
         if win is not None:
@@ -3849,9 +3855,11 @@ class Signal:
         """The stage kind of each op, in order (source/shape/supply/channel/instrument).
 
         `domains=True` returns ``(kind, domain)`` pairs instead, the domain being what the
-        record is AFTER that op -- 'real' or 'iq' -- so a chain's mixers show as the points
-        where it changes: ``[('source', 'iq'), ('shape', 'real'), ..., ('instrument', 'iq')]``.
-        The last pair's domain is what `waveform()` returns."""
+        record is AFTER that op -- 'real', 'iq' or 'optical' -- so a chain's mixers show as
+        the points where it changes: ``[('source', 'iq'), ('shape', 'real'), ...,
+        ('instrument', 'iq')]``, and an optical link reads ``[('source', 'real'),
+        ('shape', 'optical'), ('channel', 'optical'), ('instrument', 'real')]`` from `eo` to
+        `photodetect`. The last pair's domain is what `waveform()` returns."""
         kinds = [op_kind(o["op"]) for o in self.ops]
         if not domains:
             return kinds

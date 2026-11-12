@@ -4184,6 +4184,150 @@ check("a voltage measure handed an I/Q record, and an envelope measure handed a 
       f"{len(_vmsgs)} voltage measures and {len(_vback)} envelope measures refused; e.g. "
       f"{_vmsgs[0][:96]}...")
 
+print("\n== the optical field is a stated domain: eo is its source, photodetect the bridge "
+      "(GitHub #92) ==")
+from wfmsynth import compose as _oC, domain as _oD
+from wfmsynth.streams import Streams as _oStreams
+_og = Grid(fs=80e9, baud=10e9, n=4096)                       # states no domain
+_ogo = Grid(fs=80e9, baud=10e9, n=4096, domain="optical")    # a chain that starts in the field
+_ot = np.arange(_og.n) / _og.fs
+
+
+def _odrive(seed=1):
+    return Signal(seed=seed, grid=_og).carrier("nrz", n_ui=512)
+
+
+def _ocw(phase=0.0, f_hz=0.0):
+    """A captured field of power 1 at `phase`, `f_hz` off the optical carrier."""
+    return Signal(grid=_ogo).capture(values=np.exp(1j * (phase + 2 * np.pi * f_hz * _ot)))
+
+
+# ---- an existing link is what it was: the same functions called by hand, to the bit
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _olink = (_odrive(7).eo(kind="mzm", er_db=10, alpha=0.3, linewidth_hz=1e6)
+              .fiber(length_km=10.0).optical_mpi(delay_samples=37, reflectivity=0.05)
+              .edfa(gain_db=12, nf_db=5).photodetect(responsivity=0.8).tia(bw_hz=8e9))
+    _ox = _olink.waveform()
+    _ost = _oStreams(7)
+    _oh = _OPT.modulate_field(_odrive(7).waveform(), kind="mzm", er_db=10, alpha=0.3,
+                              linewidth_hz=1e6, grid=_og, rng=_ost.role("linewidth/1"))
+    _oh = _OPT.field_mpi(_OPT.fiber(_oh, length_km=10.0, grid=_og), delay_samples=37,
+                         reflectivity=0.05)
+    _oh = _OPT.edfa(_oh, gain_db=12, nf_db=5, rng=_ost.role("ase/4"))
+    _oh = _OPT.tia(_OPT.photodetect(_oh, responsivity=0.8, rng=_ost.role("shot/5")), bw_hz=8e9,
+                   grid=_og, rng=_ost.role("tia/6"))
+_okinds = _olink.stage_kinds(domains=True)
+check("an optical link renders exactly what wfmsynth.optical's functions make by hand, its "
+      "recipe's grid never mentions a domain, and stage_kinds reports the field between eo "
+      "and photodetect",
+      np.array_equal(_ox, _oh) and "domain" not in _olink.recipe()["grid"]
+      and not _olink.grid.domain_stated
+      and [d for _, d in _okinds] == ["real", "optical", "optical", "optical", "optical",
+                                      "real", "real"],
+      f"max |composed - by hand| = {np.abs(_ox - _oh).max():.1e}; recipe grid keys "
+      f"{sorted(_olink.recipe()['grid'])}; domains {[d for _, d in _okinds]}")
+
+# ---- an electrical op on the field is refused by name, every one of them
+_onot = sorted(op for op in _oC._EXEC if "optical" not in _oD.accepts(op))
+_omsgs = [_qrefusal(lambda op=op: _oD.trace(
+    [{"op": "carrier"}, {"op": "eo"}, {"op": op}], _og)) for op in _onot]
+_ocast = Signal(seed=1, grid=_og)
+_ocast.ops = [{"op": "carrier", "kind": "nrz", "n_ui": 512}, {"op": "eo"},
+              {"op": "lossy", "loss_db": 3.0, "loss_at_ghz": 5.0}]
+_ocmsg = _qrefusal(_ocast.waveform)
+check("every op that does not act on a field refuses one by name and names photodetect as "
+      "the bridge, in a hand-written recipe too (which used to be cast to float under a "
+      "numpy warning)",
+      all(m.startswith(f"{op} (op 2)") and "optical field (domain 'optical')" in m
+          and "photodetect(" in m for op, m in zip(_onot, _omsgs))
+      and "photodetect(responsivity=...) is the bridge" in _ocmsg
+      and len(_onot) == len(_oC._EXEC) - 12,
+      f"{len(_onot)} of {len(_oC._EXEC)} ops refused; {len(_oC._EXEC) - len(_onot)} accept a "
+      f"field: {sorted(set(_oC._EXEC) - set(_onot))}; e.g. {_ocmsg[:92]}...")
+
+# ---- combine on a field is a coupler: |E1 + E2|^2, not P1 + P2
+_ophis = np.array([0.0, np.pi / 3, np.pi / 2, 2 * np.pi / 3, np.pi])
+_opow = np.array([_ocw().combine(_ocw(p)).photodetect(shot=False).waveform().mean()
+                  for p in _ophis])
+_oerr = np.abs(_opow - 2.0 * (1.0 + np.cos(_ophis))).max()
+check("combine on a field is a coupler: two unit fields a phase apart detect as "
+      "2 (1 + cos phase), from four times one field's power to none (a sum of intensities "
+      "would be 2 throughout)",
+      _oerr < 1e-12 and abs(_opow[0] - 4.0) < 1e-12 and _opow[-1] < 1e-12,
+      f"detected power at 0/60/90/120/180 deg: {np.round(_opow, 6).tolist()}; worst error "
+      f"against 2 (1 + cos) {_oerr:.1e}")
+
+# ---- two lasers: each its own linewidth role, and the beat averages to the incoherent sum
+_odv = 200e6
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _obeat = [(_odrive(s).eo(linewidth_hz=_odv)
+               .combine(Signal().carrier("nrz", n_ui=512).eo(linewidth_hz=_odv))
+               .photodetect(shot=False)) for s in range(1, 25)]
+    _oratio = np.array([b.waveform().mean() / _odrive(s).eo().photodetect(shot=False)
+                        .waveform().mean() for s, b in zip(range(1, 25), _obeat)])
+_oa = 2 * np.pi * _odv * _og.n / _og.fs
+_owant = 2.0 * (1.0 + (1.0 - np.exp(-_oa)) / _oa)
+_ose = _oratio.std(ddof=1) / np.sqrt(len(_oratio))
+check("two lasers of 200 MHz linewidth each are incoherent over a 51 ns record: the mean "
+      "power is 2 P (1 + (1 - exp(-a)) / a), a = 2 pi dv T, not the 4 P of one laser split "
+      "and rejoined; the second laser's phase walk is a role of its own",
+      abs(_oratio.mean() - _owant) < 3 * _ose and _ose < 0.08
+      and _obeat[0].roles() == ["linewidth/1", "combine/2/others/0/linewidth/1"],
+      f"mean power ratio over {len(_oratio)} seeds {_oratio.mean():.3f} +/- {_ose:.3f} "
+      f"(standard error) against {_owant:.3f} analytic; roles {_obeat[0].roles()}")
+
+# ---- filter and gain on a field: the closed forms, and the I/Q counterpart to the bit
+_ofp = {f: _ocw(f_hz=f).filter("butter", f_hz=4e9, order=3).photodetect(shot=False)
+        .waveform()[_og.n // 2:].mean() for f in (-8e9, -4e9, 4e9, 8e9)}
+_ofw = {f: 1.0 / (1.0 + (np.tan(np.pi * abs(f) / _og.fs) / np.tan(np.pi * 4e9 / _og.fs)) ** 6)
+        for f in _ofp}
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _oe = _odrive().eo(kind="dml", alpha=3.0, er_db=8).waveform()         # chirped: Im != 0
+    _ogi = Grid(fs=80e9, baud=10e9, n=4096, domain="iq")
+    _osame = [np.array_equal(st(Signal(grid=_ogo).capture(values=_oe)).waveform(),
+                             st(Signal(grid=_ogi).capture(values=_oe)).waveform())
+              for st in (lambda s: s.filter("butter", f_hz=4e9, order=3),
+                         lambda s: s.gain(by=0.5),
+                         lambda s: s.gate(by=Signal().carrier("square", f_hz=40e6),
+                                          threshold=0.0),
+                         lambda s: s.combine(Signal(grid=s.grid).capture(values=_oe[::-1]),
+                                             gains=[0.25]))]
+    _op0 = _odrive().eo().photodetect(shot=False).waveform()
+    _op1 = _odrive().eo().gain(by=0.5).photodetect(shot=False).waveform()
+_ovoa = 10 * np.log10(_op1.mean() / _op0.mean())
+check("on a field, filter is an optical filter about the carrier (half the power at its "
+      "corner, the same either side), gain(by=0.5) an attenuator of 6.02 dB in power, and "
+      "filter / gain / gate / combine give the samples their I/Q counterparts give",
+      all(abs(_ofp[f] - _ofw[f]) < 1e-9 for f in _ofp)
+      and abs(10 * np.log10(_ofp[4e9]) + 3.0103) < 1e-4 and abs(_ovoa + 6.0206) < 1e-4
+      and all(_osame),
+      f"butter-3 at 4 GHz: {10 * np.log10(_ofp[4e9]):+.4f} dB at +4 GHz, "
+      f"{10 * np.log10(_ofp[-4e9]):+.4f} dB at -4 GHz, {10 * np.log10(_ofp[8e9]):+.3f} dB at "
+      f"+8 GHz (closed form {10 * np.log10(_ofw[8e9]):+.3f}); gain(by=0.5) detects "
+      f"{_ovoa:+.4f} dB; bit-identical to I/Q: {_osame}")
+
+# ---- polarisation is two named chains through one fibre, not part of the domain
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _opol = _sws.Channels(
+        {"x": Signal().carrier("nrz", n_ui=512).eo().use("span"),
+         "y": Signal().carrier("nrz", n_ui=512, pattern="prbs9").eo().use("span"),
+         "pd": Signal().use("x").photodetect(shot=False).combine(
+             Signal().use("y").photodetect(shot=False))},
+        shared={"span": Signal().fiber(length_km=10.0)}, seed=1, grid=_og)
+    _opw = _opol.waveforms()
+_operr = np.abs(_opw["pd"] - np.abs(_opw["x"]) ** 2 - np.abs(_opw["y"]) ** 2).max()
+check("two polarisations are a Channels pair through one shared fibre, and a detector that "
+      "does not resolve them sees the sum of their powers",
+      _opw["x"].dtype == np.complex128 and _opw["pd"].dtype == np.float64 and _operr < 1e-12
+      and _opol.stored_grid("x", _opw["x"]).domain == "optical",
+      f"|pd - (|Ex|^2 + |Ey|^2)| <= {_operr:.1e}; x, y stored as "
+      f"{_opol.stored_grid('x', _opw['x']).domain}, pd as "
+      f"{_opol.stored_grid('pd', _opw['pd']).domain}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

@@ -213,14 +213,16 @@ class Channels:
         `domain.trace` needs to follow a `use`."""
         return self.is_signal(name), self._flat(name)
 
-    def _signal(self, name, like=None):
+    def _signal(self, name, like=None, dom=None):
         """The chain as a Signal on the record's grid, in the domain ITS ops need: a record may
         hold an I/Q channel and the real supply that scales it. A stage is put in the domain
-        of the waveform `like` that it is being applied to."""
+        of the waveform `like` that it is being applied to: `dom` where the chain using it
+        knows (a complex waveform is an envelope or an optical field), else what `like` and
+        the stage's own ops say."""
         from .compose import Signal
         grid = DOMAIN.grid_for(self._flat(name), self.grid)
         if like is not None and grid is not None:
-            dom = DOMAIN.IQ if np.iscomplexobj(like) else DOMAIN.REAL
+            dom = dom or DOMAIN.held(like, grid)[0]
             if dom != DOMAIN.of(grid):
                 grid = dataclasses.replace(grid, domain=dom, fc_hz=None)
         s = Signal(seed=self.seed, grid=grid)
@@ -394,8 +396,9 @@ class Channels:
         lines = [f"Channels  seed={self.seed}  " + SUB._grid_words(self.grid)]
         for kind, names in (("channel", self.names), ("shared", self.shared)):
             for name in names:
-                lines.append(f"  {kind} [{name}]")
-                lines += SUB._tree(self._signal(name), f"{name}/", "    ")
+                sig = self._signal(name)
+                lines.append(f"  {kind} [{name}]" + SUB._starts(sig))
+                lines += SUB._tree(sig, f"{name}/", "    ", expand=self.expand)
         return "\n".join(lines)
 
     # ------------------------------------------------------------ export
@@ -451,8 +454,9 @@ class _Render:
         return self.done[name]
 
 
-def use(x, name, streams):
-    """The `use` op: the chain `name` of the record being rendered, at this point in a chain."""
+def use(x, name, streams, dom=None):
+    """The `use` op: the chain `name` of the record being rendered, at this point in a chain.
+    `dom` is the domain the waveform `x` is in."""
     r = getattr(streams, "record", None)
     if r is None:
         raise ValueError(
@@ -482,7 +486,7 @@ def use(x, name, streams):
                 f"use({name!r}): {name!r} is a stage (it starts with `{first}`), which acts "
                 f"on a waveform, and none has arrived: it is the first op here. Put a source "
                 f"before it.")
-        sig = rec._signal(name, like=x)
+        sig = rec._signal(name, like=x, dom=dom)
         if sink is None:
             return sig._run(r.view(name), _x=x)
         # the stage sees the events already on the waveform it is handed, so a `trigger` in

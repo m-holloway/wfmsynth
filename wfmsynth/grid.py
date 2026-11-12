@@ -51,7 +51,9 @@ class Grid:
     # a voltage. "iq" is COMPLEX BASEBAND: each sample is I + jQ, the envelope of a signal centred
     # on `fc_hz`, and `waveform()` returns complex128. This is the domain the chain STARTS in;
     # `upconvert` / `downconvert` move between the two mid-chain, and every op states which it
-    # accepts (`wfmsynth.domain`) and refuses the other by name.
+    # accepts (`wfmsynth.domain`) and refuses the other by name. "optical" is an OPTICAL FIELD,
+    # also complex128: a chain reaches it through `eo` from a real drive, so it is stated here
+    # only for a chain that STARTS in the field (a captured field, a shared field stage).
     #
     # LEFT OUT, the domain follows the chain's source: a voltage for `carrier` / `symbols` /
     # `coded` / a real capture, complex baseband for `iq` or an I/Q capture -- or "iq" at once
@@ -63,8 +65,14 @@ class Grid:
     def __post_init__(self):
         if self.domain is None:
             object.__setattr__(self, "domain", "iq" if self.fc_hz is not None else _FOLLOWS_REAL)
-        if self.domain not in ("real", "iq"):
-            raise ValueError(f"Grid: unknown domain {self.domain!r} (use 'real' or 'iq')")
+        if self.domain not in ("real", "iq", "optical"):
+            raise ValueError(f"Grid: unknown domain {self.domain!r} (use 'real', 'iq' or "
+                             f"'optical')")
+        if self.domain == "optical" and self.fc_hz is not None:
+            raise ValueError(
+                "Grid: fc_hz is the centre frequency of an I/Q record. An optical field's "
+                "carrier is not a property of the grid -- nothing would read it -- and is "
+                "stated where it acts: fiber(wavelength_nm=). Drop fc_hz.")
         if self.domain == "real" and self.fc_hz is not None:
             raise ValueError(
                 "Grid: fc_hz is the centre frequency of a complex baseband record and means "

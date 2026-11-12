@@ -32,7 +32,8 @@ def voltage(x, who):
             f"wfmsynth.rf: rf.evm (error against the symbols), rf.constellation_density, "
             f"rf.spectrum, rf.ccdf. To measure the modulated carrier as a voltage, "
             f"upconvert(fc_hz=...) first; to measure one rail on purpose, pass x.real or "
-            f"x.imag.")
+            f"x.imag. (If this complex record is an OPTICAL FIELD, none of that applies: "
+            f"photodetect() turns it into the real photocurrent a receiver measures.)")
     return x
 
 
