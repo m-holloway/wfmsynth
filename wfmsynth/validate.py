@@ -4129,6 +4129,25 @@ check("a decided-reference EVM acquires its carrier blind before deciding: a QAM
       f"error {_vferr:.1f} Hz (pull-in +/-{_vrep[0][1]['acquisition']['pull_in_hz'] / 1e6:.3f}"
       f" MHz); noise alone: refused")
 
+# ---- a measure handed the wrong kind of record refuses by name (0.46.0)
+from wfmsynth import measure as _vmeas, eye as _veye
+_vz = Signal(seed=1, grid=Grid(fs=400e6, baud=25e6, n=1 << 12)).iq("qpsk", prbs=9).waveform()
+_vrg = Grid(fs=400e6, baud=25e6, n=1 << 12)
+_vmsgs = [_qrefusal(f) for f in (
+    lambda: _vmeas.eye_height(_vz, _vrg, levels=2),
+    lambda: _vmeas.attributes(_vz, _vrg, levels=2),
+    lambda: _veye.eye(_vz, _vrg),
+    lambda: _veye.crossings(_vz, 0.0, 0.1))]
+_vback = [_qrefusal(f) for f in (
+    lambda: _sws.rf.ccdf(_vz.real),
+    lambda: _sws.rf.evm(_vz.real, _vrg, sent=np.ones(8, complex)))]
+check("a voltage measure handed an I/Q record, and an envelope measure handed a voltage, "
+      "refuse by name and say which measure or converter is the right one",
+      all("complex baseband (I/Q)" in m and "rf.evm" in m and "upconvert(" in m for m in _vmsgs)
+      and all("downconvert(" in m for m in _vback),
+      f"{len(_vmsgs)} voltage measures and {len(_vback)} envelope measures refused; e.g. "
+      f"{_vmsgs[0][:96]}...")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

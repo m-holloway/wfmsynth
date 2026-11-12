@@ -47,6 +47,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from . import cdr as _cdr
+from .measure import voltage as _voltage
 
 # The loop bandwidth a receiver is assumed to run, as a fraction of the symbol rate.
 # 1/1667 is the PCIe Gen-3 figure and the usual textbook starting point.
@@ -105,6 +106,7 @@ def levels(x, threads=None):
     the edges, min and max again for the picture). Each reduction is numpy's own,
     unsplit, so the summation order and therefore the last bit of the mean is
     unchanged; they are merely computed at the same time. 14.0 ms -> 6.1 ms."""
+    _voltage(x, "eye.levels")
     x = np.asarray(x, float).reshape(-1)
     if x.size == 0:
         return 0.0, 0.0, 0.0
@@ -163,6 +165,7 @@ def crossings(x, level, hyst, threads=None):
 
     Returns ``(positions, directions)``: fractional sample indices and +1/-1.
     """
+    _voltage(x, "eye.crossings")
     x = np.asarray(x, float)
     n = int(x.size)
     empty = (np.zeros(0), np.zeros(0, np.int8))
@@ -305,6 +308,7 @@ def recover(x, fs, spb_nominal, order=2, damping=0.707, loop_bw_hz=None,
     the very clock whose imperfection the eye exists to reveal, and it keeps drawing a
     confident picture when the waveform is no longer running at that rate at all.
     """
+    _voltage(x, "eye.recover")
     x = np.asarray(x, float).reshape(-1)
     n = int(x.size)
     nt = _threads(threads)
@@ -501,6 +505,7 @@ def density(x, centres, ui, w=128, h=96, ui_span=2.0, v_min=None, v_max=None,
     None when the window leaves nothing to draw. The counts are integers, so the
     per-worker partial images sum to the same picture in any order.
     """
+    _voltage(x, "eye.density")
     x = np.asarray(x, float).reshape(-1)
     n = int(x.size)
     v_min = float(np.min(x)) if v_min is None else float(v_min)
@@ -540,6 +545,7 @@ def eye(x, grid, w=128, h=96, ui_span=2.0, max_traces=400, order=2, damping=0.70
     picture therefore shows. Read the picture against it; an eye without its clock is
     a claim without its units.
     """
+    _voltage(x, "eye_density")
     x = np.asarray(x, float).reshape(-1)
     n = int(x.size)
     nt = _threads(threads)

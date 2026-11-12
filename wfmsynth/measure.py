@@ -20,8 +20,25 @@ from __future__ import annotations
 import numpy as np
 
 
+def voltage(x, who):
+    """`x` as it is, unless it is COMPLEX: every measure in this module and in `wfmsynth.eye`
+    folds, thresholds or clusters a real voltage, and handed an I/Q record it would cast it
+    to float -- drop Q under a numpy warning -- and return a plausible number for the I rail
+    alone. So a complex record is refused by name, with what measures one."""
+    if np.iscomplexobj(x):
+        raise ValueError(
+            f"{who}: the record is complex baseband (I/Q), and {who} measures a real voltage "
+            f"-- it would silently keep the I rail and drop Q. An I/Q record is measured by "
+            f"wfmsynth.rf: rf.evm (error against the symbols), rf.constellation_density, "
+            f"rf.spectrum, rf.ccdf. To measure the modulated carrier as a voltage, "
+            f"upconvert(fc_hz=...) first; to measure one rail on purpose, pass x.real or "
+            f"x.imag.")
+    return x
+
+
 def sample_at_phase(x, spb, phase):
     """Sample one point per symbol at ``round(k*spb + phase)``. ``spb`` may be non-integer."""
+    voltage(x, "sample_at_phase")
     n_sym = int((len(x) - 1 - phase) / spb)
     idx = np.round(np.arange(n_sym) * spb + phase).astype(int)
     idx = idx[(idx >= 0) & (idx < len(x))]
@@ -97,6 +114,7 @@ def eye_height(x, grid, levels, defn="contour", n_phases=32):
     look plausible either way -- MEASURED on one NRZ record, reading it as four levels gave 0.0017
     against the 0.0432 it actually has, a 25x understatement with nothing to say so.
     """
+    voltage(x, "eye_height")
     spb = grid.samples_per_ui
     return max(_eye_at_phase(x, spb, ph, levels, defn)
                for ph in np.linspace(0, spb, n_phases, endpoint=False))
@@ -106,6 +124,7 @@ def best_phase(x, grid, levels, defn="contour", n_phases=32):
     """The sampling phase (in samples, within one UI) that maximizes the eye opening.
 
     ``levels`` is required, for the reason `eye_height` gives."""
+    voltage(x, "best_phase")
     spb = grid.samples_per_ui
     phases = np.linspace(0, spb, n_phases, endpoint=False)
     return float(phases[int(np.argmax([_eye_at_phase(x, spb, ph, levels, defn)
@@ -118,6 +137,11 @@ def pattern_period(symbols, max_lag=None):
     claiming a standard pattern must lock to a single sharp peak at its declared period;
     that peak is what an analyser pattern-locks onto. Returns ``(period, peak, ac)`` where
     ``ac`` is the normalized autocorrelation (ac[0] == 1). FFT-based, O(n log n)."""
+    if np.iscomplexobj(symbols):
+        raise ValueError(
+            "pattern_period: the symbols are complex (an I/Q constellation), and the period "
+            "is found from a real autocorrelation, which would keep I and drop Q. Pass the "
+            "bits, or one rail (symbols.real), whichever repeats.")
     s = np.asarray(symbols, float)
     s = s - s.mean()
     n = len(s)
@@ -146,6 +170,7 @@ def align_symbols(x, grid, tx, levels=4, defn="contour", n_phases=32):
     is negative, and a plain argmax locks onto noise instead. The magnitude identifies the
     alignment and the returned sign identifies the polarity — the only way to detect a swapped
     pair, since eye height, peak-to-peak and RMS are all identical under negation."""
+    voltage(x, "align_symbols")
     spb = grid.samples_per_ui
     y = sample_at_phase(x, spb, best_phase(x, grid, levels, defn, n_phases))
     m = min(len(y), len(tx))
@@ -164,6 +189,7 @@ def ground_truth(x, grid, tx=None, levels=4):
     eye height under both named definitions, the realized sampling phase, and — when the
     transmitted stream ``tx`` is supplied — the realized integer-symbol alignment offset.
     ``Signal.ground_truth()`` fills ``tx`` in automatically from the recipe."""
+    voltage(x, "ground_truth")
     gt = attributes(x, grid, levels=levels)
     gt["best_phase"] = best_phase(x, grid, levels=levels)
     if tx is not None:
@@ -177,6 +203,7 @@ def ground_truth(x, grid, tx=None, levels=4):
 def attributes(x, grid, levels=4):
     """A dict of realized attributes measured from ``x`` — both eye definitions plus basic
     amplitude stats. Use as the ``metrics`` source for realized-vs-requested labelling."""
+    voltage(x, "attributes")
     return {
         "eye_contour": eye_height(x, grid, levels=levels, defn="contour"),
         "eye_sigma": eye_height(x, grid, levels=levels, defn="sigma"),
