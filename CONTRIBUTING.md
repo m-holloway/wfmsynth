@@ -71,6 +71,19 @@ The short version of the part people miss — a change that moves output beyond 
 cannot be made opt-in must add an entry to `compose.NUMERIC_CHANGES`, so that a *stored recipe*
 predating it warns on replay instead of quietly rendering something else.
 
+To show a change moved nothing that already existed, digest the tree before and after and
+compare — a fixed set of chains and every render every example makes:
+
+```bash
+git worktree add ../before main          # or: git archive <rev> | tar -x -C ../before
+python tools/digest_compare.py write before.json --tree ../before
+python tools/digest_compare.py write after.json
+python tools/digest_compare.py compare before.json after.json   # exit 1 if anything moved
+```
+
+Quote its counts in the commit ("482 renders in common, 0 differ"), and for anything that did
+move, which examples and why.
+
 ## Adding or changing an op
 
 - Every op must appear in `_EXEC`, in `OP_KIND`, and in **exactly one** lead-in bucket
