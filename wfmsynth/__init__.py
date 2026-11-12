@@ -72,7 +72,8 @@ __version__ = _read_version()
 
 from . import (physics, impairments, events, grammar, pam4, grid, instrument, streams, compose,
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
-               acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain)
+               acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
+               tolerance)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -96,6 +97,7 @@ from .instrument import (interleave_adc, shaped_noise_floor, clip_adc, quantize_
 from .compose import Signal, dataset, op_params, rederive_anchor, canonicalize, op_kind
 from .measure import (eye_height, best_phase, attributes, align_symbols, ground_truth,
                       pattern_period)
+from .tolerance import tol, corners, unit_dataset, unit_of
 from .sweep import hold_constant, realized_table, solve_monotonic
 from .cdr import (recover_clock, jitter_transfer, tracked_out_fraction, ssc_phase,
                   apply_ssc, timing_source, apply_phase, phase_noise, recover_and_fold)
@@ -184,6 +186,7 @@ __all__ = [
     "scope_bandwidth", "probe_loading", "timebase_jitter", "store_record",
     "sinad_noise_rms", "converter_noise_rms",
     "quantisation_floor_db_per_hz",
+    "tol", "corners", "unit_dataset", "unit_of", "tolerance",
     "Signal", "dataset", "op_params", "rederive_anchor", "canonicalize", "op_kind",
     "eye_height", "best_phase", "attributes", "align_symbols", "ground_truth", "pattern_period",
     "hold_constant", "realized_table", "solve_monotonic", "__version__",

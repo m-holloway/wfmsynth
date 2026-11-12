@@ -377,7 +377,7 @@ def test_a_signal_that_cannot_become_part_of_this_record_is_refused_when_it_is_a
     ({"ops": [{"op": "carrier", "kind": "nrz", "n_ui": N_UI, "n": 1000}]}, "rendered 1000"),
     # an optical field: its imaginary part is not dropped
     ({"ops": [{"op": "carrier", "kind": "nrz", "n_ui": N_UI}, {"op": "eo"}]},
-     "COMPLEX.*photodetect"),
+     "COMPLEX.*`photodetect`"),
     # malformed
     ({"ops": []}, "empty `ops`"),
     ({"ops": [{"op": "carier", "kind": "nrz"}]}, "op 'carier'.*does not exist"),

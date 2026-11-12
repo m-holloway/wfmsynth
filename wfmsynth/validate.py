@@ -2929,6 +2929,100 @@ check("waveform() of an I/Q record is complex128 and replays bit for bit from it
       f"{_qy.dtype}, {len(_qy)} samples; real grid keys {sorted(_qreal.recipe()['grid'])}")
 
 
+# ---- unit-to-unit variation: parameters drawn from stated tolerances (GitHub #86) ----
+# A toleranced parameter is drawn once per record under a `unit/...` role and the NUMBER is
+# written into the recipe. Three things have to be true for that number to be worth having: it
+# follows the distribution that was stated (including what "normal" means -- tol = 3 sigma,
+# truncated), it is the value the waveform was actually made with, and re-rolling the unit
+# moves it and nothing else. The populations are seeds 0..N-1, so every figure is deterministic;
+# a distribution passes at p > 1e-3 and its negative control must fail below 1e-9.
+from scipy import stats as _ust                                   # noqa: E402
+from wfmsynth import tolerance as _TOL                            # noqa: E402
+
+_un, _ug = 10000, Grid(fs=100e9, n=8000)
+_up = np.array([[_o[_k] for _k in ("r_source", "c_load_f", "atten", "bw_hz")] for _o in (
+    Signal(seed=_s, grid=_ug).probe(
+        r_source=_TOL.tol(1e3, 5), c_load_f=_TOL.tol(1e-11, 10, dist="normal"),
+        atten=_TOL.tol(0.1, 2, dist="corner"),
+        bw_hz=_TOL.corners({"slow": 1e9, "typ": 2e9, "fast": 3e9})).recipe()["ops"][0]
+    for _s in range(_un))])
+_uu = (_up[:, 0] - 950.0) / 100.0
+_uz = (_up[:, 1] - 1e-11) / (1e-12 / 3.0)
+_utn = _ust.truncnorm(-3, 3)
+_upu, _upn = _ust.kstest(_uu, "uniform").pvalue, _ust.kstest(_uz, _utn.cdf).pvalue
+check(f"a 'uniform' tolerance is uniform over nom +/- tol ({_un} records)",
+      _upu > 1e-3 and _uu.min() >= 0 and _uu.max() <= 1
+      and _ust.kstest((_up[:, 0] - 1e3) / (50.0 / 3), _utn.cdf).pvalue < 1e-9,
+      f"KS p = {_upu:.3f}; the same values against the normal form: "
+      f"p = {_ust.kstest((_up[:, 0] - 1e3) / (50.0 / 3), _utn.cdf).pvalue:.0e}")
+check("a 'normal' tolerance is tol = 3 sigma, truncated at +/- tol",
+      _upn > 1e-3 and np.abs(_uz).max() <= 3.0 and abs(_uz.std() / _utn.std() - 1) < 0.03
+      and _ust.kstest(_uz / 3.0, _ust.truncnorm(-1, 1).cdf).pvalue < 1e-9,
+      f"KS p = {_upn:.3f}; sd = {_uz.std():.4f} sigma against {_utn.std():.4f}; max |z| = "
+      f"{np.abs(_uz).max():.3f}; read as tol = 1 sigma: p = "
+      f"{_ust.kstest(_uz / 3.0, _ust.truncnorm(-1, 1).cdf).pvalue:.0e}")
+_uc2 = np.unique(_up[:, 2], return_counts=True)[1]
+_uc3 = np.unique(_up[:, 3], return_counts=True)[1]
+check("'corner' is the two extremes and a named corner set its names, each equally likely",
+      len(_uc2) == 2 and len(_uc3) == 3 and _ust.chisquare(_uc2).pvalue > 1e-3
+      and _ust.chisquare(_uc3).pvalue > 1e-3
+      and _ust.chisquare(_uc3, f_exp=_un * np.array([0.25, 0.5, 0.25])).pvalue < 1e-9,
+      f"{_uc2.tolist()} (p = {_ust.chisquare(_uc2).pvalue:.3f}), {_uc3.tolist()} "
+      f"(p = {_ust.chisquare(_uc3).pvalue:.3f})")
+check("two toleranced parameters of one record are independent draws",
+      abs(np.corrcoef(_uu, _uz)[0, 1]) < 0.04,
+      f"r = {np.corrcoef(_uu, _uz)[0, 1]:+.4f} over {_un} records (4 standard errors = 0.04)")
+
+
+def _urec(seed, noise=0.0):
+    return (Signal(seed=seed, grid=_ug)
+            .carrier("cmos", v_lo=0.0, v_hi=3.3, f_hz=25e6, duty=0.5, tr_s=1e-10)
+            .probe(r_source=_TOL.tol(1e3, 20), c_load_f=_TOL.tol(2e-12, 20, dist="normal"),
+                   **({"noise_rms": noise} if noise else {})))
+
+
+def _urise(y, fs, lo=0.0, hi=3.3):
+    a, b = lo + 0.1 * (hi - lo), lo + 0.9 * (hi - lo)
+    i = np.flatnonzero((y[:-1] < a) & (y[1:] >= a))[0]
+    j = np.flatnonzero((y[:-1] < b) & (y[1:] >= b))
+    j = j[j > i][0]
+    return ((j + (b - y[j]) / (y[j + 1] - y[j])) - (i + (a - y[i]) / (y[i + 1] - y[i]))) / fs
+
+
+_ut = []
+for _s in range(8):
+    _usig = _urec(_s)
+    _uo = _usig.recipe()["ops"][1]
+    _ut.append((_urise(_usig.waveform(), _ug.fs), np.log(9.0) * _uo["r_source"] * _uo["c_load_f"]))
+_ut = np.array(_ut)
+check("the resolved R and C in the recipe ARE the ones in the waveform (rise = ln 9 * R * C)",
+      np.abs(_ut[:, 0] / _ut[:, 1] - 1).max() < 1e-3 and _ut[:, 0].max() / _ut[:, 0].min() > 1.2,
+      f"worst {np.abs(_ut[:, 0] / _ut[:, 1] - 1).max():.1e} over 8 units spanning "
+      f"{_ut[:, 0].min() * 1e9:.2f}..{_ut[:, 0].max() * 1e9:.2f} ns")
+
+_us, _uclean = _urec(3, 2e-3), _urec(3)
+_uy = _us.waveform()
+_unoise = _uy - _uclean.waveform()
+_uyu = _us.contrast("unit/*", seed=40)
+_udn = float(np.abs((_uyu - _uclean.unit(40).waveform()) - _unoise).max())
+_uon = _us.contrast("probe/1") - _uclean.waveform()
+check("re-rolling unit/* is another unit under the SAME noise; re-rolling the noise, the reverse",
+      np.array_equal(_uyu, _us.unit(40).waveform()) and float(np.abs(_uyu - _uy).max()) > 0.02
+      and _udn < 1e-12 and abs(np.corrcoef(_uon, _unoise)[0, 1]) < 0.05
+      and abs(_uon.std() / 2e-3 - 1) < 0.05,
+      f"unit re-rolled: waveform moves {np.abs(_uyu - _uy).max() * 1e3:.1f} mV, its noise by "
+      f"{_udn:.1e} V; noise re-rolled: r = {np.corrcoef(_uon, _unoise)[0, 1]:+.4f} with the old")
+_ura, _urb = _us.recipe()["ops"], _us.unit(40).recipe()["ops"]
+check("  ... and only the toleranced parameters differ between the two recipes",
+      _ura[0] == _urb[0] and {k for k in _ura[1] if _ura[1][k] != _urb[1][k]}
+      == {"r_source", "c_load_f", "_unit"},
+      f"changed in the probe op: {sorted(k for k in _ura[1] if _ura[1][k] != _urb[1][k])}")
+import json as _ujson                                             # noqa: E402
+_ub = Signal.from_recipe(_ujson.loads(_us.to_json()))
+check("a recipe with resolved values replays bit-identically",
+      _ub.sha256() == _us.sha256() and np.array_equal(_ub.waveform(), _uy),
+      f"digest {_us.sha256()[:12]}, max |diff| = {np.abs(_ub.waveform() - _uy).max():.1e}")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

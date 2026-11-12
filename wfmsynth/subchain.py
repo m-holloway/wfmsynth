@@ -42,6 +42,7 @@ import warnings
 import numpy as np
 
 from . import opkeys as OPKEYS
+from . import tolerance as TOL
 from .grid import Grid
 from .streams import Streams
 
@@ -106,7 +107,7 @@ def _signal_ops(sig, parent, who):
             f"record's grid, {_grid_words(parent.grid)}; nothing is resampled. Build it on this "
             f"record's grid (or with no grid). A lane at another symbol rate on the same sample "
             f"rate and length is {{'from': that_signal.recipe()}}.")
-    return [dict(o) for o in sig.ops]
+    return TOL.stated(sig.ops)        # its tolerances are drawn by the record it joins
 
 
 def _grid_words(g):
@@ -201,8 +202,9 @@ def same_grid(y, n, who, sub=None, grid=None):
     """Refuse a rendered sub-chain that is not a real waveform of `n` samples at the grid's rate."""
     if np.iscomplexobj(y):
         raise ValueError(
-            f"{who} renders a COMPLEX waveform (an optical field), and taking it as a signal "
-            f"here would drop its imaginary part. End the chain on `photodetect`.")
+            f"{who} renders a COMPLEX waveform (an I/Q envelope or an optical field), and "
+            f"taking it as a signal here would drop its imaginary part. End the sub-chain on "
+            f"`upconvert` (I/Q) or on `photodetect` (optical).")
     y = np.asarray(y, float)
     if y.shape != (n,):
         raise ValueError(

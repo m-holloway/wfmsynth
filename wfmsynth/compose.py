@@ -42,6 +42,7 @@ from scipy.signal import resample_poly
 from . import physics as P
 from . import opkeys as OPKEYS
 from . import subchain as SUB
+from . import tolerance as TOL
 from . import instrument as INST
 from . import domain as DOMAIN
 from .grid import Grid
@@ -1099,7 +1100,7 @@ def _flatten_driver(d):
                 f"net: driver {d.get('id')!r}'s source Signal sets a lead-in, which renders a "
                 f"LONGER record and discards the guard. A driver's level has to be the same "
                 f"length as the net it drives, so put the lead-in on the chain the net is in.")
-        ops = [dict(o) for o in ops.ops]
+        ops = TOL.stated(ops.ops)     # its tolerances are drawn by the record it joins
     elif ops is not None:
         ops = [dict(o) for o in ops]
     else:
@@ -1750,11 +1751,18 @@ class Signal:
         shared and the rule is: `op` is reserved, anything beginning with an underscore is
         annotation, and everything else is a parameter this op has to read.
         """
-        params = SUB.flatten(op, params, self)
+        params = SUB.flatten(op, params, self)                   # a sub-chain -> data
+        params = TOL.resolve(len(self.ops), params, self.seed)   # a toleranced value -> its number
         OPKEYS.check(op, params)
         new = {"op": op, **params}
         DOMAIN.trace(self.ops + [new], self.grid)     # refuse the wrong domain where it is written
         self.ops.append(new); return self
+
+    def unit(self, seed):
+        """The same design as ANOTHER UNIT: every toleranced parameter (`ws.tol`, `ws.corners`)
+        drawn again under `seed`, everything else -- ops, seed, noise -- the same. Returns a
+        Signal, so the new unit's values are in its recipe. See `wfmsynth.tolerance`."""
+        return TOL.as_unit(self, seed)
 
     def annotate(self, **prov):
         """Attach provenance metadata (e.g. ``stage="channel", node="TP2"``) to the most
@@ -2702,10 +2710,15 @@ class Signal:
         plan = self.lead_plan()
         if plan is None:
             return self._run(streams), None
+        if streams is not None:
+            self = TOL.redrawn(self, streams)     # as `_run` does; the plan is the sibling's
+            plan = self.lead_plan()
         return self._run(streams, _extended=True, _plan=plan), plan
 
     def _run(self, streams=None, collect_events=False, _extended=False, _plan=None):
         from .events import EventList
+        if streams is not None and _plan is None:
+            self = TOL.redrawn(self, streams)     # a re-rolled unit/* role is a sibling record
         st = streams if streams is not None else Streams(self.seed)
         plan = _plan if _plan is not None else self.lead_plan()
         ops = self.ops if plan is None else plan.ops
@@ -2801,7 +2814,8 @@ class Signal:
     def roles(self):
         """The re-rollable random factors in this signal, as role names — the valid
         arguments to `contrast()`. Deterministic channel/reflection ops draw no
-        randomness and so contribute none."""
+        randomness and so contribute none. A toleranced parameter (`ws.tol`, `ws.corners`)
+        contributes `unit/<op index>/<parameter>`, or `unit/<group>` when it is grouped."""
         out = []
         for i, op in enumerate(self.ops):
             if op["op"] == "carrier" and op.get("jitter"):
@@ -2817,7 +2831,7 @@ class Signal:
                 out.append(f"events/{i}")
             elif op["op"] == "probe" and op.get("noise_rms"):
                 out.append(f"probe/{i}")
-        return out + SUB.roles(self)
+        return out + SUB.roles(self) + TOL.roles(self.ops)
 
     def summary(self):
         """The chain as text, one op per line with its parameters -- and each SUB-CHAIN indented
@@ -2849,7 +2863,9 @@ class Signal:
     def contrast(self, *factors, seed=None):
         """A sibling waveform with ONLY the named factors re-rolled and every other
         factor bit-identical — a valid contrastive pair / clean ablation. `factors` are
-        role names from `roles()`; `seed` makes the re-roll reproducible."""
+        role names from `roles()`; `seed` makes the re-roll reproducible. `"unit/*"` is every
+        toleranced parameter at once: another unit under the same noise (`unit(seed)` returns
+        that unit as a Signal, with its values in the recipe)."""
         return self.waveform(streams=Streams(self.seed).reroll(*factors, seed=seed))
 
     def ground_truth(self, levels=None):
@@ -2928,12 +2944,16 @@ class Signal:
     def from_recipe(cls, r):
         """Reconstruct a Signal from a recipe; `.waveform()` reproduces bit-for-bit.
 
+        A recipe may be WRITTEN with tolerances in place of numbers (`wfmsynth.tolerance`);
+        they are drawn here under the recipe's seed. One whose values are already resolved --
+        anything `recipe()` returned -- draws nothing.
+
         WARNS if the recipe was written by a version whose numerics differ for an op it
         contains. `recipe()` has always recorded `wfmsynth_version`, and this never read it,
         which made the record write-only provenance -- see `NUMERIC_CHANGES`."""
         grid = Grid(**r["grid"]) if r.get("grid") else None
         s = cls(seed=r["seed"], grid=grid, lead_in=r.get("lead_in"), lead_out=r.get("lead_out"))
-        ops = [dict(o) for o in r["ops"]]
+        ops = TOL.resolve_ops([dict(o) for o in r["ops"]], r["seed"])
         for o in ops:                       # the same gate the builders go through: a recipe
             OPKEYS.check(o.get("op"), o)    # carrying a dead parameter says what it is not
         _warn_on_numeric_drift(r.get("wfmsynth_version"), ops)

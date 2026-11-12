@@ -45,6 +45,7 @@ DEMOS = [
     "sub_chains.py",
     "touchstone_channel.py",
     "two_rate_acquisition.py",
+    "unit_variation.py",
 ]
 
 # Command-line TOOLS, not demos: they take arguments, so running them bare is a usage error
