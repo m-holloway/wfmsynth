@@ -12,14 +12,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wfmsynth"
-version = "0.46.0"
+version = "0.46.1"
 description = "Physics-informed synthetic waveform generation — channels, jitter, crosstalk, NRZ/PAM4/RF carriers, and realistic deep-memory scope captures."
 readme = "README.md"
 license = "0BSD"
 license-files = ["LICENSE"]
 authors = [{ name = "Michael Holloway" }]
 requires-python = ">=3.9"
-dependencies = ["numpy>=1.21", "scipy>=1.7"]
+dependencies = ["numpy>=2.0", "scipy>=1.13"]
 keywords = ["signal-integrity", "waveform", "synthesis", "PAM4", "SerDes", "jitter", "oscilloscope", "physics", "simulation", "synthetic-data"]
 # No `License ::` classifier: PEP 639 replaced them with the SPDX `license` field above, and
 # setuptools warns on both the old table form and the classifier.

@@ -38,7 +38,8 @@ tolerance of about `3.8e-13`, not to bytes. Floating-point reassociation — a f
 a different reduction, a fused multiply — lands inside it. That is deliberate: pinning to bytes
 would make every optimisation a breaking change and freeze the library.
 
-**A complex record needs numpy 2 to replay to the byte.** numpy 1.x forms a complex product in
+**A complex record needs numpy 2 to replay to the byte, which is why `numpy>=2.0` is the
+declared floor from 0.46.1.** numpy 1.x forms a complex product in
 a vector loop whose rounding depends on where the array happens to be allocated, so the same
 I/Q or optical chain rendered twice in one process can differ in its last bit: measured on
 numpy 1.26.4 (arm64 macOS, CPython 3.9.6), `x * g` for one complex array and one complex
@@ -46,7 +47,8 @@ number gave three distinct byte results in 200 tries, and `iq(...).gain(by=<comp
 sample digests. That is inside the band (4.6e-16), but a sample digest is not a band: on
 numpy < 2 a complex record replays to rounding, not to the byte, and the tests that assert
 byte equality of a complex replay can fail there (13 to 18 of them per run). Real records are
-unaffected, and numpy 2.0.2 and later were byte-stable in every run.
+unaffected, and numpy 2.0.2 and later were byte-stable in every run. A source tree used from
+`PYTHONPATH` under numpy 1.x still imports, with one warning saying this.
 
 So there are exactly three kinds of change:
 

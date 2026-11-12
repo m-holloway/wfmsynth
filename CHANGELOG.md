@@ -12,6 +12,23 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## 0.46.1 — 2026-11-12
+
+### Changed
+
+- **The dependency floor is now `numpy>=2.0` and `scipy>=1.13`** (was `numpy>=1.21`,
+  `scipy>=1.7`). No Python version is dropped: numpy 2.0 and scipy 1.13 both support 3.9.
+  The reason is the library's own promise. On numpy 1.x a complex record -- I/Q or an optical
+  field -- does not replay to the byte (0.46.0, "Known gaps": one `x * g` gave three byte
+  results on 1.26.4), so a recipe's sample digest could not be relied on there; and the old
+  floor was never exercised, in CI or in full locally. The floor is now what CI runs: the
+  Python 3.9 legs resolve numpy 2.0.x, the 3.12 legs the current release.
+- An environment that puts the source on `PYTHONPATH` gets no check from pip, so importing
+  `wfmsynth` under numpy < 2 warns once, saying what is not reproducible there and what to
+  install. Nothing is refused: a real record renders as before.
+
+No rendered sample changes, so there is no `NUMERIC_CHANGES` entry.
+
 ## 0.46.0 — 2026-11-12
 
 Chains can meet, and a record can be complex baseband. Until now a chain was a line with one
@@ -382,9 +399,8 @@ None of these moves a rendered sample.
 - On numpy < 2 a COMPLEX record does not replay to the byte: numpy 1.x's complex product
   rounds differently with the array's alignment (measured on 1.26.4, arm64: three byte
   results for one `x * g`), so 13 to 18 tests that assert byte equality of an I/Q or optical
-  replay fail per run there. Real records are unaffected; numpy >= 2.0.2 is byte-stable. The
-  declared floor is still `numpy>=1.21`; raising it is undecided
-  ([COMPATIBILITY.md](docs/COMPATIBILITY.md), Tier 2).
+  replay fail per run there. Real records are unaffected; numpy >= 2.0.2 is byte-stable.
+  (0.46.1 raised the floor to `numpy>=2.0` for this reason.)
 - The work of #88–#94 was gated on Python 3.14 (macOS). `validate` also passes on 3.9.6 with
   numpy 2.0.2 and scipy 1.13.1, all 485 checks; the test suite was not re-run on 3.9, 3.12,
   Linux or Windows after it.
