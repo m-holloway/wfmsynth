@@ -1279,6 +1279,20 @@ def _op_delay(x, p, streams, grid, idx):
     return JN.delay(_joined(x, p), _by(p, streams, grid, idx, len(x)),
                     None if grid is None else grid.fs,
                     max_rate=p.get("max_rate", JN.DELAY_MAX_RATE))
+def _op_sequence(x, p, streams, grid, idx):
+    """Chains joined in time (`wfmsynth/sequence.py`). A source: it starts the chain."""
+    from . import sequence as SEQ
+    SEQ.refuse_after(x, "sequence", "segments")
+    return SEQ.run_sequence(streams, grid, idx,
+                            **{k: p[k] for k in ("segments", "join", "t_join_s") if k in p})
+
+
+def _op_switch(x, p, streams, grid, idx):
+    """Chains selected by a signal (`wfmsynth/sequence.py`). A source: it starts the chain."""
+    from . import sequence as SEQ
+    SEQ.refuse_after(x, "switch", "inputs")
+    return SEQ.run_switch(streams, grid, idx, **{
+        k: p[k] for k in ("select", "inputs", "threshold", "t_switch_s") if k in p})
 
 
 _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
@@ -1302,7 +1316,8 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "modulate": _op_modulate, "law": _op_law, "filter": _op_filter,
          "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert,
          "combine": _op_combine, "gain": _op_gain, "offset": _op_offset, "gate": _op_gate,
-         "delay": _op_delay}
+         "delay": _op_delay,
+         "sequence": _op_sequence, "switch": _op_switch}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1339,6 +1354,7 @@ OP_KIND = {
     "law": "general", "filter": "general",
     "combine": "general", "gain": "general", "offset": "general", "gate": "general",
     "delay": "general",
+    "sequence": "source", "switch": "source",
 }
 
 
@@ -1548,6 +1564,11 @@ _LEAD_REJECT = {
     "downconvert": "the local oscillator's phase is counted from the record's start, which a "
                    "lead-in moves, and fs_out changes the record length so the window cannot "
                    "be sliced back out",
+    "sequence": "its segments are placed at absolute times in the record, which a lead-in "
+                "moves; give the guard to a segment's own record and embed it with "
+                "{'from': recipe}",
+    "switch": "its selector and inputs are sub-chains on the record's own grid, which a "
+              "lead-in lengthens without extending them",
     "acquire": "it resamples the record onto a second rate, so the guard's sample count is not the "
                "record's and the window cannot be sliced back out",
     "events": "it places a localized mechanism at an absolute position in the record, and a lead-in "
@@ -1593,6 +1614,9 @@ def _lead_source_geometry(ops, grid):
         raise ValueError("a lead-in needs a source op (add a carrier first)")
     src = ops[0]
     if src["op"] not in ("carrier", "symbols", "coded"):
+        if src["op"] in ("sequence", "switch"):       # sources, but not ones that can extend
+            raise ValueError(f"lead_in: the {src['op']!r} op cannot be rendered with a "
+                             f"lead-in because {_LEAD_REJECT[src['op']]}")
         raise ValueError(f"a lead-in needs the first op to be the source; ops[0] is "
                          f"{src['op']!r}. The lead-in is rendered BY the source.")
     n = _grid_n(grid, src)
@@ -2085,6 +2109,58 @@ class Signal:
         """Nominal (always-on) transmitter imperfections so the unfaulted class isn't
         suspiciously perfect. params: compression, level_noise, rise_fall_ratio, a_base."""
         return self._add("nonlinearity", **params)
+
+    def sequence(self, segments, join="cut", t_join_s=None):
+        """Chains joined in TIME: a preamble then a payload, power-up then steady state.
+
+            pre  = Signal(grid=g).carrier("sine", f_hz=1e6)
+            data = Signal(grid=g).carrier("nrz", n_ui=400)
+            Signal(seed=1, grid=g).sequence([{"chain": pre, "t_s": 2e-6}, {"chain": data}])
+
+        segments: [{"chain": <sub-chain>, "t_s": <seconds>, "state": "restart"|"continue"}, ...]
+                  in order. A chain is a Signal, {"ops": [...]} or {"from": recipe} (see
+                  `crosstalk`). Durations must land on the grid and fill the record exactly;
+                  the last segment may leave `t_s` off to take the rest.
+        state:    "restart" (default) -- the segment is its chain from the chain's own t=0;
+                  nothing is carried in. "continue" -- the segment is the chain as it would be
+                  at that time had it run since the record began: phase, pattern position and
+                  filter memory all run on.
+        join:     "cut" | "crossfade" | "hold", over the `t_join_s` after each boundary: a
+                  raised-cosine move from the outgoing chain (which runs on) to the incoming,
+                  or the outgoing segment's last value held.
+
+        A SOURCE: ops after it act on the joined record. Outside the join windows the record is
+        exactly the segments spliced. Each boundary comes back from `realize()` /
+        `event_list()` as a `segment` event; `wfmsynth.sequence.layout` gives every segment's
+        samples. See `wfmsynth.sequence`."""
+        from . import sequence as SEQ
+        SEQ.refuse_after(self.ops, "sequence", "segments")
+        SEQ.check_sequence(segments, join, t_join_s, self.grid)
+        return self._add("sequence", segments=segments, join=join,
+                         **({} if t_join_s is None else {"t_join_s": t_join_s}))
+
+    def switch(self, select, inputs, threshold=0.0, t_switch_s=0.0):
+        """Chains selected by a SIGNAL, sample by sample: an analog multiplexer.
+
+            Signal(seed=1, grid=g).switch(select=gate, inputs=[idle, data], threshold=0.5)
+
+        `inputs[k]` is on the line while `select` is above k of the thresholds: one `threshold`
+        for two inputs, an ascending list of N-1 for N. A change of selection takes
+        `t_switch_s`, a raised-cosine move from what the line was carrying to the new input (0
+        is an ideal switch). `select` and each input are sub-chains (see `crosstalk`), all
+        running for the whole record.
+
+        A SOURCE: ops after it act on the multiplexed record. Each change comes back from
+        `realize()` / `event_list()` as a `switch` event whose `t_s` is when `select` crossed
+        the threshold, between two samples. There is no hysteresis: end a noisy `select` chain
+        on `law("comparator", hysteresis=...)`. See `wfmsynth.sequence`."""
+        from . import sequence as SEQ
+        SEQ.refuse_after(self.ops, "switch", "inputs")
+        if not isinstance(inputs, (list, tuple)):
+            raise ValueError("switch: `inputs` is a list of sub-chains to choose between.")
+        SEQ.check_switch(len(inputs), threshold, t_switch_s, self.grid)
+        return self._add("switch", select=select, inputs=inputs, threshold=threshold,
+                         t_switch_s=t_switch_s)
 
     def law(self, kind, **params):
         """A named TRANSFER LAW, for a nonlinear shape that has no op of its own.

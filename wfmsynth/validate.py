@@ -3135,6 +3135,129 @@ _cne = _cns.event_list()
 check("a combined sub-chain's events are in the record's event list under its namespace",
       len(_cne) == 3 and {e.at for e in _cne} == {"combine/1/others/0"} and not _cne.on_record(),
       f"{len(_cne)} events, at = {sorted({e.at for e in _cne})}")
+# ---------------------------------------------------------------------------------------------
+print("\n-- sequence and switch: chains joined in time, or selected by a signal (GitHub #77) --")
+from wfmsynth import sequence as _QS                                        # noqa: E402
+_qg = Grid(fs=1e9, baud=50e6, n=8000)
+_qna, _qm = 2000, 200
+
+
+def _qtone(f=5e6):
+    return Signal(grid=_qg).carrier("sine", f_hz=f)
+
+
+def _qlane():
+    return (Signal(seed=7, grid=_qg).carrier("nrz", n_ui=400, jitter=dict(rj=0.03))
+            .lossy(loss_db=3.0, loss_at_ghz=0.2).rx_noise(rms=0.01))
+
+
+def _qseq(join="cut", t_join_s=None, state="restart"):
+    return Signal(seed=3, grid=_qg).sequence(
+        [{"chain": {"from": _qtone().recipe()}, "t_s": _qna / _qg.fs},
+         {"chain": {"from": _qlane().recipe()}, "state": state}], join=join, t_join_s=t_join_s)
+
+
+_qa, _qb = _qtone().waveform(), _qlane().waveform()
+_qcut = _qseq().waveform()
+check("a two-segment sequence IS its chains rendered alone and spliced (array_equal)",
+      np.array_equal(_qcut, np.concatenate([_qa[:_qna], _qb[:_qg.n - _qna]])),
+      f"{_qna} + {_qg.n - _qna} samples, a jittered noisy lane after a tone, 0 differ")
+_qx, _qxe = _qseq("crossfade", _qm / _qg.fs).realize()
+_qr = 0.5 * (1 - np.cos(np.pi * (np.arange(_qm) + 0.5) / _qm))
+_qin = float(np.max(np.abs(_qx[_qna:_qna + _qm]
+                           - ((1 - _qr) * _qa[_qna:_qna + _qm] + _qr * _qb[:_qm]))))
+check("a crossfade is exact outside its stated window and the stated raised cosine inside it",
+      np.array_equal(_qx[:_qna], _qcut[:_qna])
+      and np.array_equal(_qx[_qna + _qm:], _qcut[_qna + _qm:]) and _qin < 1e-15,
+      f"outside the {_qm}-sample window 0 samples differ from the cut; inside, max error "
+      f"against the closed form {_qin:.1e}")
+_qe = _qxe.events[0]
+check("the boundary event is at the requested time and carries the segment index",
+      len(_qxe) == 1 and _qe.kind == "segment" and _qe.sample == _qna
+      and abs(_qe.t_s * _qg.fs - _qna) < 1 and _qe.params["segment"] == 1,
+      f"requested {_qna / _qg.fs * 1e6:g} us, event at sample {_qe.sample} "
+      f"(t_s {_qe.t_s * 1e6:g} us), segment {_qe.params['segment']}, width {_qe.width}")
+_qt = _qtone(5.3e6)
+_qtw = _qt.waveform()
+
+
+def _qstate(state):
+    return Signal(grid=_qg).sequence([{"chain": _qt, "t_s": _qna / _qg.fs},
+                                      {"chain": _qt, "state": state}]).waveform()
+
+
+_qjump = float(abs(_qstate("restart")[_qna] - _qstate("restart")[_qna - 1]))
+check("'continue' carries a tone's phase across the boundary; 'restart' starts it again",
+      np.array_equal(_qstate("continue"), _qtw)
+      and np.array_equal(_qstate("restart")[_qna:], _qtw[:_qg.n - _qna]) and _qjump > 0.3,
+      f"5.3 MHz continued over a 2 us boundary is the uninterrupted tone (0 samples differ); "
+      f"restarted it steps {_qjump:.3f} at the boundary")
+_qstep = Signal(grid=_qg).sequence(
+    [{"chain": Signal(grid=_qg).carrier("dc", level=0.0), "t_s": _qna / _qg.fs},
+     {"chain": Signal(grid=_qg).carrier("dc", level=1.0)}],
+    join="crossfade", t_join_s=_qm / _qg.fs).waveform()
+
+
+def _qcross(level):
+    i = int(np.argmax(_qstep > level))
+    return i - 1 + (level - _qstep[i - 1]) / (_qstep[i] - _qstep[i - 1])
+
+
+_q1090 = (_qcross(0.9) - _qcross(0.1)) / _qg.fs
+_qan = (np.arccos(-0.8) - np.arccos(0.8)) / np.pi * _qm / _qg.fs
+check("a crossfade between two levels rises 10-90 % in 0.5903 of t_join_s",
+      abs(_q1090 - _qan) < 0.01 / _qg.fs,
+      f"measured {_q1090 * 1e9:.3f} ns, analytic {_qan * 1e9:.3f} ns (bound 0.01 sample)")
+for _qbad, _qword in (
+        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "t_s": 2.0005e-6}, {"chain": _qt}]),
+         "not on the grid"),
+        (lambda: Signal(grid=_qg).sequence([{"chain": _qt, "t_s": 2e-6},
+                                            {"chain": _qt, "t_s": 5e-6}]), "fill it exactly")):
+    try:
+        _qbad()
+        _qmsg = ""
+    except ValueError as _qerr:
+        _qmsg = str(_qerr)
+    check(f"a sequence whose durations are '{_qword}' is refused, never rounded",
+          _qword in _qmsg, _qmsg[:96] + "...")
+
+
+def _qsw(select, **kw):
+    return Signal(seed=3, grid=_qg).switch(
+        select=select, inputs=[{"from": _qtone().recipe()}, {"from": _qlane().recipe()}], **kw)
+
+
+def _qdc(level):
+    return Signal(grid=_qg).carrier("dc", level=level)
+
+
+check("a switch with a constant selector IS that input (array_equal), switching time or not",
+      all(np.array_equal(_qsw(_qdc(lv), threshold=0.5, t_switch_s=ts).waveform(), w)
+          for lv, w in ((0.0, _qa), (1.0, _qb)) for ts in (0.0, 50e-9)),
+      "selector 0 -> inputs[0], selector 1 -> inputs[1], at t_switch_s 0 and 50 ns")
+_qf = 1.3e6
+_qy, _qev = _qsw(_qtone(_qf), threshold=0.25, t_switch_s=40e-9).realize()
+_qw, _qas = 2 * np.pi * _qf, np.arcsin(0.25)
+_qk = np.arange(12)
+_qwant = np.sort(np.concatenate([(_qas + 2 * np.pi * _qk) / _qw,
+                                 (np.pi - _qas + 2 * np.pi * _qk) / _qw]))
+_qwant = _qwant[_qwant < _qg.n / _qg.fs]
+_qgot = np.array([e.t_s for e in _qev])
+_qterr = float(np.max(np.abs(_qgot - _qwant)) * _qg.fs) if len(_qgot) == len(_qwant) else np.inf
+_qbound = (_qw / _qg.fs) / (8 * np.cos(_qas))           # a chord's sag under a sine, as time
+check("switch events are the selector's analytic threshold crossings, between samples",
+      len(_qgot) == len(_qwant) and _qterr < _qbound
+      and [e.sample for e in _qev] == list(np.ceil(_qwant * _qg.fs).astype(int)),
+      f"{len(_qgot)} changes of a 1.3 MHz sine across 0.25; worst time error {_qterr:.1e} "
+      f"sample (bound {_qbound:.1e}, linear interpolation)")
+_qbusy = np.zeros(_qg.n, bool)
+for _qe in _qev:
+    _qbusy[_qe.sample:_qe.sample + _qe.width] = True
+_qideal = np.where(_qtone(_qf).waveform() > 0.25, _qb, _qa)
+check("a switch is each input exactly wherever no change is in progress",
+      np.array_equal(_qy[~_qbusy], _qideal[~_qbusy]) and _qbusy.sum() == 40 * len(_qev),
+      f"{int((~_qbusy).sum())} samples outside the {len(_qev)} switching windows of 40 "
+      f"samples: 0 differ from the selected input")
 
 print()
 if fails:

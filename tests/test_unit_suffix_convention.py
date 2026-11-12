@@ -53,7 +53,8 @@ KNOWN_UNIT_PARAMS = frozenset({
     'psij_ps', 'r_load_ohm', 'r_pullup_ohm', 'r_sink_b_ohm', 'r_sink_ohm', 'r_term_ohm',
     'rate_hz', 'rds_on_ohm', 'rin_db_per_hz', 'ripple_db', 'rj_ps', 'rms_ps', 'skew_ps',
     'snr_db', 'stop_db',
-    'spacing_ui', 'span_ui', 't_off_s', 't_on_s', 't_start_frac', 't_start_s', 't_step_frac', 't_step_s',
+    'spacing_ui', 'span_ui', 't_join_s', 't_off_s', 't_on_s', 't_start_frac', 't_start_s', 't_step_frac', 't_step_s',
+    't_switch_s',
     'tau_frac', 'tau_s', 'td_frac', 'td_ps', 'tr_frac', 'tr_s', 'trend_floor_db',
     'wavelength_nm', 'width_frac', 'width_s'
 })

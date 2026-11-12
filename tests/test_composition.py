@@ -498,7 +498,12 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                # the joins take a second SIGNAL (or a number that is also a signal), so there
                # is no scalar to swap here; tests/test_joins.py moves every parameter of each
                # and checks it moves the samples and the recipe's content address.
-               "combine", "gain", "offset", "gate", "delay"}
+               "combine", "gain", "offset", "gate", "delay",
+               # `sequence` and `switch` are SOURCES built from sub-chains. Every parameter --
+               # a duration, the join and its length, a segment's state, the threshold, the
+               # switching time -- is moved against an exact or analytic result in
+               # tests/test_sequence_switch.py.
+               "sequence", "switch"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

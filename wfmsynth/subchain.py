@@ -32,7 +32,8 @@ FOR AN OP THAT TAKES A SIGNAL the whole integration is one line in its executor,
 and nothing else: the namespace is `<op>/<idx>/<parameter>`, and the builder, `roles()`,
 `summary()`, `subchain()` and the event list all find the parameter by its SHAPE (a dict with
 `ops`, or with a recipe under `from`), so there is no table to register it in. `signals()` is the
-same for a list parameter. The result is a REAL waveform on the record's own grid: an I/Q
+same for a list parameter, and a list entry may hold one beside its own parameters
+(`sequence`'s `segments[k]["chain"]`, namespace `sequence/<idx>/segments/<k>/chain`). The result is a REAL waveform on the record's own grid: an I/Q
 sub-chain ends on `upconvert` (the domain rule, `wfmsynth.domain`, applies inside a sub-chain as
 it does outside), and `same_grid` is the single place that would be relaxed for an op that takes
 a complex envelope.
@@ -124,7 +125,8 @@ def _grid_words(g):
     return f"fs={g.fs:g} Hz, baud={'none' if g.baud is None else format(g.baud, 'g')}, n={g.n}"
 
 
-def _flat(v, parent, who):
+def _flat(v, parent, who, level=0):
+    # level 0: an op parameter; 1: an entry of a list parameter; 2: a value inside such an entry
     from .compose import Signal
     if isinstance(v, Signal):
         return {"ops": _signal_ops(v, parent, who)}
@@ -148,9 +150,14 @@ def _flat(v, parent, who):
                                  f"`Signal.to_json()` writes). `from` takes a recipe, a Signal "
                                  f"or such a path.")
             return {**v, "from": r}
+        if level == 1 and "ops" not in v and "from" not in v:
+            # a list entry that HOLDS a sub-chain beside its own parameters: a `sequence`
+            # segment is {"chain": <sub-chain>, "t_s": ...}
+            new = {k: _flat(e, parent, f"{who}: `{k}`", 2) for k, e in v.items()}
+            return new if any(new[k] is not v[k] for k in v) else v
         return v
-    if isinstance(v, (list, tuple)):
-        new = [_flat(e, parent, f"{who}[{i}]") for i, e in enumerate(v)]
+    if isinstance(v, (list, tuple)) and level == 0:
+        new = [_flat(e, parent, f"{who}[{i}]", 1) for i, e in enumerate(v)]
         return new if any(a is not b for a, b in zip(new, v)) else v
     return v
 
@@ -355,6 +362,10 @@ def walk(ops):
                 for j, e in enumerate(v):
                     if is_subchain(e):
                         yield i, f"{o['op']}/{i}/{k}/{j}", f"{k}[{j}]", e
+                    elif isinstance(e, dict):        # an entry holding one beside parameters
+                        for kk, ee in e.items():
+                            if is_subchain(ee):
+                                yield i, f"{o['op']}/{i}/{k}/{j}/{kk}", f"{k}[{j}].{kk}", ee
 
 
 def child(spec, grid):
@@ -428,7 +439,9 @@ def _short(v):
 
 
 def _held(v):
-    return is_subchain(v) or (isinstance(v, (list, tuple)) and any(is_subchain(e) for e in v))
+    return is_subchain(v) or (isinstance(v, (list, tuple)) and any(
+        is_subchain(e) or (isinstance(e, dict) and any(is_subchain(c) for c in e.values()))
+        for e in v))
 
 
 def _tree(sig, pre, indent):
