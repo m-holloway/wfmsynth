@@ -22,9 +22,14 @@ Every existing call and recipe is unchanged, and so is every rendered sample but
 `square` or `cmos` carrier whose edges were not on samples; see **Changed output** and *How it
 stays exact*.
 
+On top of those, the same release uses them (#88–#94): an OFDM source, a channel and an
+amplifier on the envelope, a source that dwells in states, a module of shipped compositions
+(`wfmsynth.recipes`), the optical field as a third domain, and a swept-wavelength bench. Most
+of that is compositions, not ops; the entries are grouped under *Added* below.
+
 Read [docs/COOKBOOK.md](docs/COOKBOOK.md#composing-a-realistic-capture) for these in order.
-The rule that decided what became an op and what did not is in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#what-becomes-an-op).
+The rule that decided what became an op and what did not, and the table of how each request
+was ruled, is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#what-becomes-an-op).
 
 ### Added
 
@@ -114,13 +119,57 @@ The rule that decided what became an op and what did not is in
 - **`Signal.copy()`** branches a chain. A builder method appends to its Signal and returns
   it, so reusing a base builds one chain holding every variant's ops;
   `base.copy().lossy(...)` is an independent Signal with the same recipe, digest and samples.
-- **`tools/digest_compare.py`** digests a tree (28 fixed chains and every render every
+- **`tools/digest_compare.py`** digests a tree (31 fixed chains and every render every
   example makes) and compares two digests, so "nothing that existed moved" is a command.
 - **The pieces together.** `gain`, `gate`, `combine` (sum), `sequence`, `switch`, `filter` and
   `use` are defined on an envelope and the rest refuse it naming the alternative; a chain that
   did not state its grid starts in the domain its own ops need; tolerances work inside a
   `Channels` record, with `group=` making one part across chains.
-- **Twelve examples**, all run by the test suite: `sub_chains`, `joins`,
+- **OFDM** (#88). `Signal.ofdm(n_fft=, scs_hz=, cp=, active=, pilots=, constellation=,
+  window=, ...)` is a second I/Q source: an inverse FFT per symbol and a cyclic prefix, on a
+  grid at the FFT rate or a whole multiple of it (refused otherwise, never resampled).
+  `transmitted()` returns the resource grid; `ws.ofdm.plan`, `resource_grid` and `demodulate`
+  are its layout and receiver; `rf.evm(..., ofdm=)` is EVM per resource element with
+  `"timing"`, `"common_phase"`, `"gain"` and `"equalizer"` corrections and
+  `evm_per_subcarrier` / `evm_per_symbol`. `ws.ofdm.register(name, source=, ...)` names a
+  parameter set; the recipe keeps the numbers. Frames, preambles and per-block constellations
+  are `sequence` and `combine` of `ofdm` chains. Measured: round trip 6.9e-16; EVM in noise
+  within 1 % of analytic.
+- **A channel on the envelope** (#89). On an I/Q record `delay(by=)` shifts the envelope and
+  turns the carrier (-2π·fc·delay; `fc_hz` must be stated), `gain(by=)` takes a complex number
+  or an I/Q chain, and `lossy` / `sparam` read their response at `fc_hz + f`
+  (`wfmsynth.baseband`), each within 1e-4 of peak of `upconvert` → the op → `downconvert`.
+  `law("saleh")` (AM/AM and AM/PM) and `law("rapp")` act on an envelope's magnitude;
+  `stages.am_am_pm` is their curves. `filter("doppler", f_hz=, shape="jakes"|"flat")` and
+  `awgn` as a first op (a complex noise source, `ref_power` required) are what fading is
+  made of.
+- **A source that dwells in states** (#90). `carrier("states", levels=, dwell=, transitions=,
+  start=, tr_s=)`: a renewal process with exponential, lognormal, uniform, fixed or tabulated
+  dwells, sub-sample jumps, and one `state` event per interval. `ws.states.intervals(events,
+  at=)` and `ws.states.occupancy(...)` read and predict it.
+- **`wfmsynth.recipes`: shipped compositions** (#89, #90, #91, #94). Functions that return a
+  chain of existing ops, visible in `summary()`: `hum`, `ripple`, `pickup`, `flicker` (with
+  `flicker_psd`); `bounce` (with `bounce_times`), `intermittent`; `oscillator_startup`,
+  `multitone` (with `multitone_plan`), `buck` (with `buck_ripple`; 5.4345 mV of ripple
+  against the textbook 5.4375); `fading`, `multipath`; `mzi`, `stray_reflection`, `ring`,
+  `gas_cell`. A recipe takes numbers and refuses a `ws.tol` by name. `spur` may be a first op
+  (an unmodulated carrier), which is what an I/Q `multitone` is.
+- **The optical field is a domain** (#92). Between `eo` and `photodetect` a record is
+  `"optical"`: `stage_kinds(domains=True)` and `summary()` say so, `filter`, `gain`, `gate`,
+  a sum `combine` (a coupler, coherent), `sequence`, `switch` and `use` act on the field, and
+  every other op refuses it naming `photodetect`. `Grid(domain="optical")` starts a chain in
+  the field from a capture. A chain through `eo` still starts real: recipes and digests of
+  every existing optical link are unchanged.
+- **A swept-wavelength measurement** (#93, #94). `Signal.laser(start_nm=, stop_nm=,
+  speed_nm_per_s=, bow_nm=, ripple_nm=, ripple_hz=, hops=)` is a field held in the frame of
+  its own moving carrier; `resonator(wavelength_nm=, intrinsic_hz=, coupling_hz=, fsr_hz=,
+  split_hz=, by=)` is a coupled-mode ring solved in that frame (ring-down against a closed
+  form to 5.8e-6); `delay` on a laser's field makes interferometer fringes.
+  `ws.swept.wavelength_map(sig)` is the ground-truth axis and `ws.swept.steady` a resonator's
+  settled response; `ws.measure.swept_map(ref, grid, ...)`, `transmission` and `resonances`
+  read a record as a bench does, without the recipe.
+- **Eighteen examples**, all run by the test suite: `state_dwell`, `clutter`, `ofdm_frame`,
+  `fading_multipath`, `optical_field`, `swept_ring`, and: `sub_chains`, `joins`,
   `sequence_and_switch`, `clock_and_data`, `law_and_filter`, `triggered_capture`,
   `unit_variation`, `composed_capture`, `iq_passband`, `iq_recordings`, `iq_impairments`,
   `rf_measures`. `composed_capture.py` uses the composition primitives on one two-channel
@@ -201,20 +250,31 @@ None of these moves a rendered sample.
 - `stage_kinds()` reports `general` for the ops whose position is their meaning (`law`,
   `filter`, the joins, `use`, the I/Q impairments), and `canonical()` refuses a chain holding
   one rather than sort it.
+- **Two chains that used to render are refused, replay included** (#92). An electrical op
+  between `eo` and `photodetect` cast the field to float under a numpy warning; a field op
+  (`fiber`, `edfa`, `optical_mpi`, `photodetect`) on a voltage with no `eo` treated the
+  voltage as a field. Each now names the bridge it lacks. No shipped chain, example or test
+  did either ([COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+- `summary()` marks the op that changes the domain (`-> optical`, `-> real`) and a chain that
+  does not start as a voltage (`domain=iq`); it prints a short dict or list of numbers in
+  full (a dwell spec, a pair of levels, a band's edges) where it printed keys or a count. A
+  real chain's text is otherwise unchanged.
+- A lead-in on an `iq` source is refused for its stated reason (the old message said the
+  source was not one).
 
 ### How it stays exact
 
 - **What moved is two entries in `NUMERIC_CHANGES`, and nothing else.** Recipe digest,
   samples, JSON replay, event list and a re-rolled sibling were compared with
-  `tools/digest_compare.py` against `main` (0.45.0, 52e0d03). Of its 28 fixed chains, 22 are
+  `tools/digest_compare.py` against `main` (0.45.0, 52e0d03). Of its 31 fixed chains, 23 are
   identical in every field; `pass_fet` differs in its samples (its gate is a `square`, see
-  *Changed output*); five differ only in the sibling, because the first role `roles()` lists
+  *Changed output*); seven differ only in the sibling, because the first role `roles()` lists
   for them is one that was drawn and unlisted before. Of the 238 example renders the two
   trees have in common, 2 differ, both in `multi_driver_bus.py`, both holding `cmos`
-  carriers. Before the `square` / `cmos` change the same comparison was 28 of 28 and 238 of
-  238. `tests/test_byte_identity.py` pins the default path in the tree.
+  carriers. Before the `square` / `cmos` change the same comparison, on the tool's then 28
+  chains, was 28 of 28 and 238 of 238. `tests/test_byte_identity.py` pins the default path in the tree.
 - **Each effect is asserted against an analytic result or an independent method**, in
-  `wfmsynth.validate` (434 checks) and the test suite (2460 tests): a sub-chain against
+  `wfmsynth.validate` (482 checks) and the test suite (2842 tests): a sub-chain against
   the same chain rendered alone and coupled by hand (equal); Bessel-4 `filter` against the
   scope front end (equal); a product `combine` against `modulate` OOK (equal); the delay's
   error against the exact trigonometric interpolant; trigger instants against an independent
@@ -223,6 +283,13 @@ None of these moves a rendered sample.
   the analytic value. The numbers are printed by `python -m wfmsynth.validate`.
 - **What a stage cannot do honestly it refuses, by name, with the alternative.** Nothing is
   resampled to fit, truncated, clipped on export, or stripped of an imaginary part.
+
+- **The pieces of #88–#94 were compared the same way**, each against the branch tip it
+  started from: 31 fixed chains and every example render in common, 0 differ. Their effects
+  are in `wfmsynth.validate` under their issue numbers, and `tests/test_pieces_meet.py`
+  holds the checks that only exist once they share a tree (an OFDM equaliser reading back a
+  composed multipath channel, carrier phase included; an I/Q multitone through `multipath`
+  at every tone; a contact bounce gating an envelope and a field).
 
 - **A review round before release** (four independent reviewers, every finding reproduced
   first) fixed what the new surface got wrong, with the test that would have caught each:
@@ -252,6 +319,15 @@ None of these moves a rendered sample.
   1024 UI); `carrier(jitter=)`, which displaces edges by whole samples (BACKLOG, U-13);
   and `step` / `pulse` / `sawtooth`, whose single edge or flyback is rounded to a sample.
   Keep samples per UI whole, and take jitter from `timing`.
+- Photonics is one carrier per record, through port only, and checked against closed forms
+  and an independent integrator, not measured sweeps. Deferred with reasons in BACKLOG.md
+  (#88–#94): Bragg gratings, polarisation-dependent loss, a resonator's drop port, coherent
+  detection, a carrier through `sequence` / `switch`.
+- A `state` event in force when a `trigger` window or a restarting `sequence` segment begins
+  is dropped, not clipped to the window.
+- The work of #88–#94 was gated on Python 3.14 (macOS). `validate` also passes on 3.9.6 with
+  numpy 2.0.2 and scipy 1.13.1, all 482 checks; the test suite was not re-run on 3.9, 3.12,
+  Linux or Windows after it.
 - Python 3.9, the declared floor, was run on one machine only (macOS arm64, CPython 3.9.6),
   not in CI. With numpy 2.0.2 and scipy 1.13.1: 2470 passed, 2 failed, both
   `test_the_demo_does_not_warn` (`i2c_bus.py`, `inductive_handover.py`), on spurious

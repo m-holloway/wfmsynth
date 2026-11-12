@@ -400,10 +400,9 @@ Candidate areas:
 - dual-Dirac and target-BER jitter products;
 - ground bounce, EMI, and intermodulation;
 - additional standards-flavored carrier recipes;
-- a behavioral SMPS / switched-mode converter model (switched inductor, diode/sync FET,
-  C+ESR ripple, optional skip/PFM) -- scoped alongside the analog/instrument extension above
-  and deliberately deferred: it has no closed-form lead-in extent the way `open_drain` does,
-  so it needs its own phase rather than blocking the rest; and
+- the rest of a switched-mode converter: diode (DCM), C+ESR ripple, skip/PFM. The
+  synchronous, ideal-capacitor case shipped in 0.46.0 as `recipes.buck`, one `net` op, which
+  needed no lead-in closed form (#91); and
 - distribution-level regression against versioned measured datasets.
 
 ## P3 — dataset tooling and scale
@@ -795,11 +794,10 @@ blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbo
 
 1. (Done, 0.46.0.) `unit_dataset` and `dataset` take a builder that returns a `Channels`,
    and `Channels.contrast` re-rolls one part as `Signal.contrast` does.
-2. `delay` on an envelope (a shift plus the -2&pi;·fc·delay rotation), a trigger on I/Q
-   magnitude, a complex `by`, receiver-side I/Q imbalance, and a baseband-equivalent channel
-   (`lossy`/`sparam` about `fc_hz`).
-3. The optical field path (`eo` .. `photodetect`) still carries a complex array on a real grid,
-   outside the domain model.
+2. (Done, 0.46.0, #89, but for one item.) `delay` on an envelope, a complex `by`, and a
+   baseband-equivalent channel are in; receiver-side I/Q imbalance was ruled a composition.
+   Still deferred: a trigger on I/Q magnitude.
+3. (Done, 0.46.0, #92.) The optical field is a domain.
 4. (Done, 0.46.0, ruling 8.) `measure` / `eye` refuse a complex record by name.
 5. A whole-chain delay report: `filter_delays()` covers `filter` ops only.
 6. Crossing finders: `law("comparator")` and `trigger` now run one state machine
@@ -874,6 +872,84 @@ delivered in 0.46.0 with the test named).
    warnings inside `net.py` (the results are finite and the tests of their values pass),
    which fails `test_the_demo_does_not_warn` for two examples there. Not seen on 3.14.
 
+### #88–#94: OFDM, a channel on the envelope, dwelling sources, recipes, and photonics
+
+**Status:** DELIVERED in 0.46.0. Each issue was first written as a chain of what existed; the
+table of what became an op and what a composition, with the reason, is in
+`docs/ARCHITECTURE.md` ("What becomes an op"). User-facing text: the COOKBOOK chapters
+"Realistic clutter", "I/Q" (from "OFDM" on) and "Photonics". Nothing that existed moved:
+`tools/digest_compare.py` against the branch tip each piece started from, 31 chains and every
+example render in common, 0 differ.
+
+| Issue | Delivered as | Module |
+|---|---|---|
+| #88 | op `ofdm`; `ofdm.plan` / `resource_grid` / `demodulate`; `rf.evm(..., ofdm=)` per resource element; a caller's registry of parameter sets; `ofdm_symbol` events | `ofdm` |
+| #89 | on I/Q: `delay`, complex `gain`, `lossy`, `sparam`, `law("saleh" / "rapp")`; `filter("doppler")`; `awgn` as a first op; `recipes.fading`, `recipes.multipath` | `baseband`, `joins`, `stages`, `recipes` |
+| #90 | `carrier("states")`, `states.intervals` / `occupancy`; `recipes.flicker` | `states`, `recipes` |
+| #91 | `recipes.hum`, `ripple`, `pickup`, `bounce`, `intermittent`, `oscillator_startup`, `multitone`, `buck`; `spur` as a first op | `recipes` |
+| #92 | the `optical` domain: `eo` and `photodetect` as bridges, the general stages on a field, `Grid(domain="optical")` | `domain` |
+| #93, #94 | ops `laser` and `resonator`; `delay` on a laser's field; `swept.wavelength_map`; `measure.swept_map` / `transmission` / `resonances`; `recipes.mzi`, `stray_reflection`, `ring`, `gas_cell` | `swept`, `measure`, `recipes` |
+
+**Decisions, where the issue left a question open.**
+
+- *OFDM off the FFT rate (#88).* Refused, not resampled: the grid is `n_fft * scs_hz` or a
+  whole multiple, where the same sum is evaluated exactly. One constellation per chain;
+  per-block constellations are chains with disjoint `active=` joined by `combine`.
+- *Does a passband law give AM/PM (#89).* No, measured (under 1e-5 rad), so `saleh` is a
+  mechanism. `rapp` is the stated envelope equivalent of `law("tanh")` on the passband.
+- *Fading: a source kind or a filter on noise (#89).* A filter on complex noise. The ruling
+  allowed one missing mechanism and two were missing; both were added in their smallest form
+  (`filter("doppler")`, a first-op `awgn`).
+- *One dwelling source (#90).* A `carrier` kind, with `tr_s` (the ruling said
+  `transition_s`; it is the edge `cmos(tr_s=)` already names). Its jump is half way AT the
+  stated time, which `square` / `cmos` / `step` are not (half a sample early; left alone to
+  stay bit-identical).
+- *Where compositions live (#91).* `wfmsynth/recipes.py`, importable. A recipe converts its
+  arguments, so it takes numbers and refuses a `ws.tol` by name.
+- *The field's domain (#92).* Its own, never "iq". A chain through `eo` still starts real, so
+  its recipe and digest are unchanged.
+- *A wavelength axis (#93).* Not exposed. The record stays in time; the map is ground truth.
+  A mode hop is a parameter of the source.
+- *A device library (#94).* Thin functions only: `ring` and `gas_cell` are `resonator` ops
+  with their parameters converted.
+
+**Found by using the pieces together, and fixed** (`tests/test_pieces_meet.py`): an enable
+written as a `sequence` (`recipes.bounce`) gates an envelope or a field; every recipe answers
+a tolerance the same way; a path's complex gain is accepted when the transmitter is a named
+chain; a chain that starts with `spur` or `awgn` is a channel of a `Channels` record (and
+stays a stage under `shared`); a first `awgn` / `spur` reports as `source`; `summary()` shows
+a dwell spec and a pair of levels, not their count.
+
+**Declined, each with what to use.** A 1/f op (`recipes.flicker`); heavy-tailed amplitudes on
+`events(on="poisson")` (one `events` op per amplitude); receiver-side I/Q imbalance (three
+existing ops); an etalon function (`stray_reflection` or `resonator`); Pareto dwells (`table`);
+named channel models and OFDM numerologies (the caller's registry).
+
+**Deferred, each with the reason.**
+
+1. *Bragg gratings.* A distributed reflector is not a coupled mode or a delayed copy; it
+   needs its own response solved in the laser's frame.
+2. *Polarisation-dependent loss*, and anything else that couples the two fields of a
+   polarisation pair: today they are two independent chains of a `Channels` record.
+3. *Validation against measured sweeps.* Every swept check is against a closed form or an
+   independent integrator; there is no measured-capture corpus (as for the electrical side).
+4. *A resonator's drop port and reflected wave, FSR dispersion; laser linewidth, power
+   variation across a sweep and the power dip at a hop.* Through port and an ideal source
+   only.
+5. *A carrier through `sequence` / `switch`.* A sequence of laser chains ends with no stated
+   carrier, so `delay` and `resonator` after it are refused.
+6. *Coherent detection* (an optical -> I/Q bridge) and a stated optical carrier on the grid.
+7. *A tap inside a sub-chain* (one chain's samples used twice). It would give a contact that
+   opens fast and recovers slowly, and let `recipes.multipath` take a transmitter that draws;
+   today both go through a `Channels` shared chain.
+8. *`buck` with a capacitor's ESR, a diode (DCM) or inductor DCR.* `net` needs capacitance on
+   every node. This answers P2's deferred converter for the synchronous, ideal-capacitor case.
+9. *A trigger on I/Q magnitude*; reflections and crosstalk on an envelope (each bounce also
+   turns the carrier; a reflection there is `recipes.multipath`).
+10. *State events clipped to a window.* `trigger` and a restarting `sequence` segment drop the
+    `state` event in force at the window's start instead of clipping it.
+11. *`Signal.awgn(eb_n0_db=)` on an `ofdm` source* does not infer bits per symbol.
+
 ## Known limitations and claim boundaries
 
 Keep these statements synchronized with user-facing documentation:
@@ -886,6 +962,13 @@ Keep these statements synchronized with user-facing documentation:
 - `dc_balanced()` is not full 8b/10b; 128b/130b is not implemented (#46).
 - Acquisition models timebase/sample-clock jitter, not a distinct trigger-jitter process
   (#50).
+- The optical model is a field about one carrier per record: no WDM, no coherent receiver, no
+  polarisation coupling. A swept record's resonator is coupled-mode, through port only, and is
+  checked against closed forms, not against measured sweeps (#93, #94).
+- `recipes.oscillator_startup` is the closed-form solution of an amplitude equation, not a
+  loop; `recipes.buck` is synchronous with an ideal capacitor (#91).
+- An electrical op between `eo` and `photodetect`, and a field op on a voltage with no `eo`,
+  rendered before 0.46.0 and are now refused, replay included (`docs/COMPATIBILITY.md`).
 - Low-speed bus support currently covers open-drain composition and UART framing/decoding.
   It is not a full SPI, CAN, or RS-485 protocol stack.
 - Touchstone support applies selected single-ended S-parameters; mixed-mode conversion is
@@ -944,6 +1027,7 @@ branches.
 | #62 | `read_mdif` reads one well-documented MDIF (`.mdf`) dialect -- `BEGIN`/`END` blocks, each a full S-matrix sweep at one point of an outer VAR sweep (a stub length, a Z0) -- into an `MdifSweep` (`.freqs`, `.S`, `.axes`); `.select(**kwargs)` names one sweep point and returns `(freqs, S)`, ready for `sparam_channel`'s own slicing. An unrecognised column layout (MA/dB pairs, an unstated dialect) or a mismatch between blocks (VAR names, frequency axis, port count) raises rather than guessing |
 | performance | A benchmark suite (`tools/benchmark.py`) gated on peak memory and on SCALING rather than wall time, wired into per-PR CI. `resample_at` -- reached by `acquire`, `sample_clock`, `dcd` and `shift`, so most instrument chains pay it -- rewritten as a polyphase table gather with a sliding-window view: 2.7x faster and 3.3x -> 1.3x the record in peak memory, agreeing to 1.6e-15. `_min_phase_H` no longer builds the magnitude mirror, the complex cepstrum or the folding weight vector: every chain 8.5x -> 6.0x the record. An opt-in `method="auto"/"overlap"` block path for `lossy`/`sparam`/`cascade` takes a channel to 1.2x the record, recorded in the recipe because the two paths differ by 1e-5 (a behaviour change by the byte-identity gate's own band, not round-off). Net on a full instrument chain: 603 -> 303 ms and 8.5x -> 6.0x memory by default, 1.2x with the block path |
 | #75–#87 | Chains that meet (a sub-chain as a value, `combine` and signal-driven `gain`/`offset`/`gate`/`delay`, `sequence`/`switch`, `Channels` and `use`, general `law`/`filter`, a triggered acquisition, toleranced parts) and an I/Q domain (complex-baseband records, `upconvert`/`downconvert`, open-format recordings, transmitter and LO impairments, RF measures). The rule for what becomes an op is in `docs/ARCHITECTURE.md`; decisions, cuts and what is deferred are under "#75–#87" above |
+| #88–#94 | An OFDM source with its receiver and per-element EVM; a channel, a delay, a complex gain and an amplifier's AM/PM on an envelope; a source that dwells in states; `wfmsynth.recipes` (clutter, contacts, fading and multipath, a buck converter, photonic devices) as functions returning chains; the optical field as a third domain; a swept laser held in its own frame, a coupled-mode resonator, and the measures that read a swept record as a bench does. Decisions, what was declined and what is deferred are under "#88–#94" above |
 | #73 | A scenario layer over the shared net: `Hold(who, t0, t1, **tag)` says who was on the net and when, `Agent(during, after, lead, lag, then, unless)` says what being on it does, and `scenario.schedule` compiles the two into the net's event list -- pure, deterministic and JSON-able, adding no physics. `merge_holds` unions an agent's touching holds (consecutive identical bits are one hold, tolerating the float-noise case where `t0 + i*dt + dt` and `t0 + (i+1)*dt` differ in the last bit), and `hold_windows` turns the same list into `events.label_windows` input, so the thing that produced the waveform is the thing that labels it. A release reaction is all-or-nothing over its whole window, because half a settling sequence parks the thing it was settling in its intermediate state permanently; the t=0 rest row is the agent SETTLED (`after` with the reaction applied), which for a switch that stays closed then opens is the opposite of `after`. Solver events gained `g` (siemens; zero IS an open) and `src` (a driver's level), while `gate`/`relax` are refused by name as time-varying elements. `examples/i2c_bus.py` is the worked caller layer: an I2C write across a 3.3 V/1.8 V MOSFET translator, ~40 lines of protocol, finding t_r = 1209 ns against the 300 ns Fast-mode limit and R_ds(on) eating 90 % of the high side's V_OL budget |
 | #72 (tier 1) | A shared net as one channel stage: several drivers, switched terminations and one solve, where a `cascade` is a series 2-port chain with one source and one probe. Nodes, rails, lumped R/C, Thevenin drivers with a scheduled output conductance, and a schedule of absolute-time events against stable ids, all plain JSON so a protocol or fault generator can produce one. EXACT rather than integrated: between events the network is constant and the symmetric generalised eigenproblem gives it in closed form, so there is no step size, no guard time and no accuracy that decays over a long record. `physics.open_drain_line` is reproduced to 2.2e-15 and a two-node coupled net with a switched termination agrees with an independently-written RK45 integrator to 5.9e-12 |
 | #63 | `Signal.sparam(..., z0=...)` now forwards the reference-impedance renormalization `touchstone_channel` already offered directly -- it was being silently dropped on the composable path, the same class of bug #57 fixed for `ports`. Recorded in the recipe; omitting it is unchanged |

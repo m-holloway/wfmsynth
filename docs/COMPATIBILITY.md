@@ -81,6 +81,17 @@ the record is not real. Those key shapes are reserved: a parameter dict with a l
 a dict under `from`, or any of `nom`, `tol_pct`, `tol_abs`, `corners` is read as what it looks
 like. A recipe written before 0.46.0 contains none of them and replays unchanged.
 
+**Two kinds of chain that rendered before 0.46.0 are now refused, replay included.** Both are
+the optical field becoming a domain, and both were a record that did not mean what its recipe
+said. An electrical op placed between `eo` and `photodetect` (`eo().scope(...)`) used to cast
+the complex field to float under a numpy warning, dropping its phase; it is refused naming
+`photodetect`. A field op (`fiber`, `edfa`, `optical_mpi`, `photodetect`) on a voltage with no
+`eo` before it used to treat the voltage as a field; it is refused naming `eo`. No shipped
+chain, example or test did either, and every chain that goes `eo` .. `photodetect` is
+bit-identical. This is the one place a stored recipe is refused, not warned, and it is stated
+here because the rule above says it should not happen: to replay such a recipe, render it
+with 0.45.x.
+
 **Adding to `NUMERIC_CHANGES` is the running cost of the guarantee.** It is one tuple, and it is
 small beside a record that silently means something other than it says.
 

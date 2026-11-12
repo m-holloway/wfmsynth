@@ -760,9 +760,103 @@ stored record is 10*log10(fs/bw_hz) lower. An I/Q file's byte order is checked o
 self-consistent record.
 `ws.iqfile.describe(path, format, ...)` reports a file's length, peak counts and full-scale
 fraction without building anything. A file states no symbol rate; pass `baud=` or a matched
-filter has nothing to read. On an envelope `gain(by=)`, `gate(by=)` (real `by`), `combine` (sum,
-I/Q peers), `sequence`, `switch`, `filter` and `use` work; `offset`, `delay`, `law` and
-`trigger` are refused and name `iq_offset`, the passband record, `dac`, and a voltage.
+filter has nothing to read. On an envelope `gain(by=)` (real, or complex: a number or an I/Q
+chain), `gate(by=)` (real `by`), `combine` (sum, I/Q peers), `sequence`, `switch`, `filter`,
+`use`, `delay(by=)` (needs `Grid(fc_hz=)`: it turns the carrier too), `lossy` / `sparam` (read
+at `fc_hz + f`) and `law("saleh" | "rapp")` work; `offset`, the voltage laws and `trigger` are
+refused and name `iq_offset`, the passband record or `dac`, and a voltage.
+
+### OFDM, a channel and an amplifier on the envelope
+
+```python
+go = ws.Grid(fs=20e6, n=1 << 16, fc_hz=2.4e9)          # fs = n_fft * scs_hz, or a WHOLE multiple
+NUM = dict(n_fft=64, scs_hz=312.5e3, cp=16, active=52, pilots=[-21, -7, 7, 21])   # cp in FFT-rate samples
+
+def ofdm():                                            # ALWAYS state prbs_seed (see SKILL #36)
+    return Signal(seed=1, grid=go).ofdm(constellation="qam16", prbs=15, prbs_seed=0x2F6E, **NUM)
+
+par = ofdm().ops[0]                                    # the receiver takes the op's own parameters
+grid_sent, t_useful = ofdm().transmitted()             # [symbol, subcarrier] (819 x 52), each FFT's start
+bw = ws.ofdm.plan(par, go)["noise_bw_hz"]              # 16.25 MHz; an OFDM grid has no baud
+
+rx = (ws.recipes.multipath(ofdm(), delays_s=[0.0, 150e-9], gains=[1.0, 0.5])   # delay + gain + combine
+      .gain(by=0.1).law("saleh", alpha_a=2.1587, beta_a=1.1517,                # 20 dB back-off, AM/AM + AM/PM
+                        alpha_phi_rad=4.0033, beta_phi=9.1040)
+      .awgn(snr_db=30, bw_hz=bw))                      # against the record's own power here
+y = rx.waveform()
+fit = rf.evm(y, go, grid_sent, ofdm=par, correct=("common_phase", "gain", "equalizer"))
+fit["evm_pct"]                                         # 7.1 %; without "equalizer" 47 %
+fit["removed"]["equalizer"]                            # the channel, one complex number per subcarrier
+fit["evm_per_subcarrier"], fit["evm_per_symbol"]       # where the error is
+
+fade = ws.recipes.fading(doppler_hz=200.0)             # unit mean power; k_db= adds a line of sight
+# sig.gain(by=fade): the record must hold 4 Doppler periods or more (refused under that)
+```
+
+`rf.evm(..., ofdm=)` corrections: `"timing"`, `"common_phase"` (per symbol), `"gain"`,
+`"equalizer"`; the single-carrier names are refused. A frame is a `sequence` of `ofdm` chains;
+a burst schedule is `gate(by=Signal().carrier("states", dwell=[t_on, t_off]))`, and then EVM
+is taken over the symbols inside an on interval (`ws.ofdm.demodulate` and
+`ws.states.intervals(events, at="gate/<i>/by")`; COOKBOOK, "OFDM"). `ws.ofdm.register(name,
+source=, **numbers)` names a parameter set; the recipe keeps the numbers. `multipath`'s
+transmitter is rendered once per path, so one that draws anything is refused: make it a named
+chain of a `Channels` record and pass `Signal().use("tx")`.
+
+## Sources that dwell, and shipped compositions (`ws.recipes`)
+
+```python
+import numpy as np, wfmsynth as ws
+from wfmsynth import Signal
+R = ws.recipes
+g = ws.Grid(fs=1e6, n=1 << 20)
+
+busy = Signal().carrier("states", dwell=[800e-6, 300e-6])        # two states 0/1, mean dwells (exponential)
+sig = Signal(seed=1, grid=g).carrier("sine", f_hz=10e3).gate(by=busy)
+x, events = sig.realize()
+spans = ws.states.intervals(events, at="gate/1/by")    # [{t_start_s, t_stop_s, state, level, complete}, ...]
+ws.states.occupancy([800e-6, 300e-6])                  # [0.727 0.273]
+# levels=[...], dwell={"dist": "lognormal"|"uniform"|"fixed"|"table"|"exponential", ...} per state,
+# transitions=[[...]] (zero diagonal, rows sum to 1), start="stationary"|<index>, tr_s=<10-90 % s>
+
+rail = (Signal(seed=1, grid=g).carrier("dc", level=3.3)
+        .combine([R.hum(50.0, amp=0.02, harmonics={3: 0.3}),                 # each is a visible sub-chain
+                  R.ripple(2e3, amp=0.01, spike=0.03, f_ring_hz=50e3),
+                  R.pickup(200e3, amp=0.005),
+                  R.flicker(10.0, 1e4, rms=0.003)]))
+print(rail.summary())                                  # every op of every one
+closing = Signal(seed=1, grid=g).carrier("dc", level=3.3).gate(by=R.bounce(t_s=2e-3, gap_s=400e-6))
+osc = R.oscillator_startup(100e3, startup_s=8e-3, sig=Signal(seed=1, grid=g))   # sig=: it IS the record
+```
+
+`ws.recipes` also has `intermittent`, `multitone` (+ `multitone_plan`), `buck` (+ `buck_ripple`),
+`fading`, `multipath`, and the photonic `mzi`, `stray_reflection`, `ring`, `gas_cell`. Each
+converts its arguments, so each takes numbers: `ws.tol(...)` goes on the op's own parameter in
+the chain written out.
+
+## The optical field, and a swept-wavelength bench
+
+```python
+gs = ws.Grid(fs=1e6, n=1 << 17)                        # 0.131 s
+bench = ws.Channels(
+    {"dut": R.ring(Signal().use("laser"), wavelength_nm=1550.0, q=1e5, extinction_db=15.0)
+            .photodetect(shot=False),                  # shot=False: photodetect() draws shot noise by default
+     "ref": R.mzi(Signal().use("laser"), delay_s=2e-9).photodetect(shot=False)},
+    shared={"laser": Signal().laser(start_nm=1549.0, stop_nm=1551.0)},   # also bow_nm=, ripple_nm=, hops=[...]
+    seed=1, grid=gs)
+w = bench.waveforms()
+truth = ws.swept.wavelength_map(bench.signal("dut"))["wavelength_nm"]       # from the recipe
+nm = ws.measure.swept_map(w["ref"], gs, delay_s=2e-9, at_s=0.0, wavelength_nm=1549.0)   # from the fringes
+dip = ws.measure.resonances(*ws.measure.transmission(w["dut"], nm), level=1.0)[0]
+dip["wavelength_nm"], dip["q"], dip["extinction_db"]   # 1550.00000, 99999.98, 15.000
+```
+
+A field is `eo()` .. `photodetect()` (or `laser(...)` ..), its own domain: `filter`, `gain`
+(real, or a complex NUMBER), `gate`, a sum `combine` (a coupler: coherent), `sequence`,
+`switch`, `use`, `fiber`, `edfa`, `optical_mpi` act on it and everything else is refused
+naming `photodetect`. Only a `laser`'s field states its carrier, so only there do `delay` and
+`resonator` work (and `optical_mpi` is refused for `recipes.stray_reflection`). A toleranced
+ring is `resonator(wavelength_nm=ws.tol(...), intrinsic_hz=..., coupling_hz=...)`, and
+`bench.unit(k)` another die.
 
 ## Writing records out
 

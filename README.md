@@ -159,6 +159,9 @@ has what it needs to do so.
 | Model what a scope stores | `Signal.acquire(AcquisitionProfile)` | Separates fine-grid simulation from front end, sampling, ADC, and record decimation |
 | Several correlated channels (clock and data, a pair, lanes on one supply) | `ws.Channels` + `use(name)` | One recipe and one digest; shared chains draw the same randomness on every channel that uses them |
 | RF: a complex-baseband record, impairments, EVM/ACLR | `Signal.iq` on a `Grid(fc_hz=)`, `ws.rf` | The envelope is the record; `upconvert`/`downconvert` cross to a passband voltage and back |
+| Multicarrier, a fading channel, an amplifier's AM/PM | `Signal.ofdm`, `ws.recipes.multipath` / `fading`, `law("saleh")` | Stated at RF, rendered on the envelope; `rf.evm(..., ofdm=)` against the resource grid |
+| What a bench capture carries besides the signal | `ws.recipes` (`hum`, `ripple`, `flicker`, `bounce`, ...) | Each is a function returning a visible chain of existing ops, not an op |
+| Photonics: a field, a swept laser, a ring | `eo` .. `photodetect`; `Signal.laser`, `resonator`, `ws.swept` | The optical field is its own domain; a swept record keeps its wavelength map as ground truth |
 | Apply or study one physical operation | `wfmsynth.physics` | Low-level NumPy-in/NumPy-out primitives for custom pipelines |
 | Add one named fault to an existing array | `apply_impairment` | Convenient fixed vocabulary for class-labelled augmentation |
 | Plant a rare, localized defect in a long record | `Signal.events` / `place_events` | Targeting (symbols, edges, pattern, aggressor, poisson, …) is independent of mechanism (runt, glitch, ring, droop, …); emits event times for an external segmenter |
@@ -251,7 +254,13 @@ legacy array-warp workflows but should not be the default for a new physical cha
    complex-baseband record, up to a passband voltage, through a scope, and back to symbols;
    the cookbook's [I/Q chapter](docs/COOKBOOK.md#iq-complex-baseband-and-rf) covers
    impairments, files and measures.
-8. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
+8. **Add what a real capture carries, or go to light:**
+   [`examples/clutter.py`](examples/clutter.py) for hum, ripple and 1/f from `ws.recipes`,
+   and [`examples/swept_ring.py`](examples/swept_ring.py) for a swept-wavelength bench; the
+   cookbook's [clutter](docs/COOKBOOK.md#realistic-clutter-wfmsynthrecipes) and
+   [photonics](docs/COOKBOOK.md#photonics-the-field-and-a-swept-wavelength-measurement)
+   chapters go with them.
+9. **Use specialist features as needed:** clock recovery, Touchstone channels, non-integer
    samples/UI, two-rate acquisition, and localized events (needles in a long record)
    are indexed in [`examples/README.md`](examples/README.md).
 
@@ -261,7 +270,9 @@ legacy array-warp workflows but should not be the default for a new physical cha
 |---|---|---|
 | Composition and units | `compose`, `grid`, `streams` | `Signal`, recipes, deterministic factor streams, contrastive pairs |
 | Chains that meet | `subchain`, `joins`, `sequence`, `channels`, `stages`, `trigger`, `tolerance` | A chain as any signal-taking parameter; `combine` and signal-driven `gain`/`offset`/`gate`/`delay`; `sequence`/`switch`; several named channels in one recipe (`Channels`, `use`); general `law`/`filter` stages; a triggered, segmented, averaged acquisition; toleranced parts and corners with held-out-unit datasets; `summary()` as a tree |
-| I/Q and RF | `iq`, `domain`, `rf`, `iqfile` | Complex-baseband records and QAM sources, `upconvert`/`downconvert`, transmitter and LO impairments with a report of what each came to, SigMF and interleaved I/Q in and out, spectrum/ACLR/CCDF and EVM against the transmitted symbols |
+| I/Q and RF | `iq`, `ofdm`, `baseband`, `domain`, `rf`, `iqfile` | Complex-baseband records, QAM and OFDM sources, `upconvert`/`downconvert`, transmitter and LO impairments with a report of what each came to, a channel and an amplifier on the envelope, SigMF and interleaved I/Q in and out, spectrum/ACLR/CCDF and EVM against the transmitted symbols |
+| Compositions | `recipes`, `states` | Shipped arrangements as functions returning a chain (clutter, contacts, fading and multipath, a buck converter, photonic devices); a source that dwells in states |
+| Photonics | `optical`, `swept`, `domain`, `measure` | The optical field as a domain, a swept laser in its own frame, a coupled-mode resonator, a wavelength map as ground truth and its recovery from a reference interferometer |
 | Sources and effects | `physics`, `capture`, `impairments`, `events`, `grammar` | Digital/RF/analog/CMOS sources, a real capture from disk, channels, reflections, jitter, named faults, localized needles (incl. a generic clamped-exponential rail transient), broad shape generation |
 | Acquisition | `acquire`, `instrument`, `pam4` | Two-rate captures, a probe pack (loading, compensation, ground-lead ring, termination, AC coupling, overload recovery), scope/ADC effects, segmented PAM4 datasets |
 | Links and systems | `rx`, `cdr`, `sparam`, `net`, `scenario`, `scene`, `optical`, `coding`, `bus` | Equalization, clock recovery, measured channels, shared nets (several drivers, switched terminations, R/L/C elements so a hand-over rings, each driver optionally rendering its own chain as its level) and the scenario layer that schedules them from "who held the net when", multi-lane, optical, coding, UART/open-drain (incl. a wired-AND second sink), a pass-FET/analog switch, AM/ASK/OOK/FM/FSK/PM modulation |

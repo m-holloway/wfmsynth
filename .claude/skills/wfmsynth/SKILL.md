@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
-description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); and a record can be complex baseband (I/Q) with RF impairments and measures. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
-version: 9
+description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); a record can be complex baseband (I/Q, OFDM, fading and multipath) with RF impairments and measures, or an optical field with a swept laser and resonators; and wfmsynth.recipes ships realistic clutter (hum, ripple, 1/f, contact bounce) as visible chains. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
+version: 10
 ---
 
 # wfmsynth
@@ -39,7 +39,9 @@ mistakes that cost time.
 
   a parameter that takes a signal takes a chain:   .crosstalk(aggressor=Signal().carrier(...).lossy(...))
   several named chains are one record:             ws.Channels({...}, shared={...})  +  .use("name")
-  a record may be a complex envelope:              .iq("qam16", prbs=15)  ...  .upconvert(fc_hz=)
+  a record may be a complex envelope:              .iq("qam16", prbs=15) | .ofdm(...)  ...  .upconvert(fc_hz=)
+  or light:                                        .eo() | .laser(start_nm=, stop_nm=)  ...  .photodetect()
+  a useful arrangement is a function, not an op:   ws.recipes.hum(...) · multipath(...) · ring(...)
 ```
 
 Order is physical. A band limit before the sampler is a measurement; after it, an artefact. A
@@ -78,8 +80,20 @@ has each one worked.
   source; `Grid(fc_hz=)` states the centre). `upconvert()` / `downconvert(lpf=dict(pass_hz=))`
   cross to a real passband voltage and back; `dac`, `iq_imbalance`, `iq_offset`,
   `phase_noise`, `freq_offset`, `awgn`, `spur` impair it; `ws.rf` measures it; `ws.read_iq` /
-  `ws.to_sigmf` are files. An op or a measure handed the wrong kind of record refuses by name
-  and says what to use.
+  `ws.to_sigmf` are files. `.ofdm(n_fft=, scs_hz=, cp=, active=)` is the multicarrier source
+  (`rf.evm(..., ofdm=)`). `delay`, a complex `gain`, `lossy`, `sparam` and
+  `law("saleh" | "rapp")` act on the envelope about `fc_hz`. An op or a measure handed the
+  wrong kind of record refuses by name and says what to use.
+- **The optical field** is a third domain between `eo()` (or `laser(...)`) and `photodetect()`.
+  A `laser`'s field is held in the frame of its own swept carrier, where `delay` makes
+  interferometer fringes and `resonator` is a ring; `ws.swept.wavelength_map` is the truth and
+  `ws.measure.swept_map` / `transmission` / `resonances` read a record as a bench does.
+- **`carrier("states", dwell=[...])`** dwells at levels for random times (burst noise, an
+  activity schedule for `gate`/`switch`); `ws.states.intervals(events, at=)` is what it drew.
+- **`ws.recipes`** is the shipped compositions, each a function returning a visible chain:
+  `hum`, `ripple`, `pickup`, `flicker` (for `combine`); `bounce`, `intermittent` (for
+  `gate`); `oscillator_startup`, `multitone`, `buck` (sources); `fading`, `multipath` (I/Q);
+  `mzi`, `stray_reflection`, `ring`, `gas_cell` (a laser's field).
 
 `sig.summary()` prints any of this as a tree. `sig.roles()` is exactly the randomness the
 record draws from, and `sig.contrast(name)` re-rolls one of them alone.
@@ -267,6 +281,44 @@ Composition and I/Q added these. Each renders, replays and digests cleanly, and 
     included: "Es/N0 = 25 dB" against a unit-power constellation needs `ref_power=1.0`.
 35. **An I/Q file's `scale` is the value of ONE COUNT, and a wrong one cannot be detected.**
     Read with exactly what the writer returned.
+
+The last round (OFDM, envelope channels, dwelling sources, recipes, the optical field) added
+these.
+
+36. **State `prbs_seed=` on `ofdm` (and `iq`).** The default LFSR state emits almost only
+    zeros for its first few hundred bits, so the first OFDM symbols carry one constellation
+    point on every subcarrier and are impulses: MEASURED 15.5 dB peak-to-average on 52 QPSK
+    subcarriers with `prbs=31`, against 11.6 dB with a stated seed.
+37. **`ofdm`'s `cp=` and `window=` are samples at the FFT rate** (`n_fft * scs_hz`), not
+    seconds and not the grid's samples. And the `"equalizer"` correction is ONE coefficient
+    per subcarrier for the whole record: on a channel that moves within it (fading), measure
+    in blocks.
+38. **EVM of a gated or bursty record counts what was never sent.** MEASURED on an OFDM burst
+    schedule: 64.9 % over every symbol against 5.6 % over the symbols inside an on interval.
+    Select the symbols from the schedule's own intervals.
+39. **A sub-chain that draws nothing is the SAME signal every time it is written.** Two
+    `Signal().carrier(...).eo()` peers in a `combine` are one laser, fully coherent (4x the
+    power, or none); two `recipes` paths of one transmitter are one transmission. Independence
+    needs something drawn (`eo(linewidth_hz=)`, a fade) under its own role.
+40. **`photodetect()` draws shot noise unless `shot=False`**, and a swept record through it is
+    noisy before any device is in the chain.
+41. **A deterministic recipe does not vary with the seed.** `hum`, `ripple`, `pickup`,
+    `bounce`, `multitone` and `oscillator_startup` draw nothing, so a thousand records from
+    one template carry the same hum at the same phase. Vary a number (`phase_rad=`, `f_hz=`).
+42. **A state source's cut intervals are not draws.** The interval in force at t = 0 and the
+    last one carry `complete: False`; in a dwell histogram they bias it short. After
+    `trigger`, or in a restarting `sequence` segment, the state in force at the window's
+    start is missing from the event list altogether.
+43. **`recipes.fading` averages to unit power only over many Doppler periods**: MEASURED
+    0.971 over 52 periods, and a first-path power of 1.34 over 10. Size the record from the
+    Doppler, as from the pattern period.
+44. **A mode hop moves the truth, and the reference interferometer cannot see it**: the
+    fringe count misses a step of whole fringes, so `measure.swept_map` is wrong after the
+    hop by about its size (MEASURED 28 pm for a 30 pm hop). That is the bench's failure
+    reproduced, not a bug: read `swept.wavelength_map` for the truth and the `mode_hop` event
+    for where.
+45. **`filter` on a laser's field tracks the moving carrier**; it is not a fixed optical
+    passband. `fiber` there still uses its own `wavelength_nm`.
 
 ## Where the boundary sits
 

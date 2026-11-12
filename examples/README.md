@@ -163,6 +163,8 @@ that goes with them.
 | [`triggered_capture.py`](triggered_capture.py) | The record is what a scope's trigger kept: an edge or pulse-width trigger, segmented memory, holdoff, averaging |
 | [`unit_variation.py`](unit_variation.py) | Parts have tolerances and a model must generalise to units it has not seen; shows the leakage a random split hides |
 | [`composed_capture.py`](composed_capture.py) | You want to see all of the above on one two-channel triggered capture, and each cause of its jitter isolated by changing one named thing |
+| [`state_dwell.py`](state_dwell.py) | A level dwells and jumps at random times: burst noise, an idle/active schedule for a gate or a switch, 1/f noise as a sum of such processes |
+| [`clutter.py`](clutter.py) | A clean record is too clean: mains hum, converter ripple, pickup and 1/f from `ws.recipes`, and what each does to a detector's false alarms |
 
 ### 8. I/Q and RF
 
@@ -172,8 +174,17 @@ that goes with them.
 | [`iq_impairments.py`](iq_impairments.py) | A transmitter and its oscillator are not ideal: an EVM budget predicted from the chain's own report against the measured EVM |
 | [`rf_measures.py`](rf_measures.py) | You need ACLR, PAPR and EVM against the transmitted symbols, with an amplifier compressing the passband voltage |
 | [`iq_recordings.py`](iq_recordings.py) | I/Q has to come from or go to a file: SigMF with annotations, raw interleaved samples with a marker channel, an embedded recording |
+| [`ofdm_frame.py`](ofdm_frame.py) | The signal is multicarrier: an OFDM frame (preamble, payload, gap) through an echo and noise, with EVM per subcarrier and per symbol against the resource grid |
+| [`fading_multipath.py`](fading_multipath.py) | The channel is stated at RF and rendered on the envelope: an amplifier's AM/PM, a cable, multipath and Doppler fading at 2.4 GHz on a 4 MSa/s grid |
 
-### 9. Specialist topics
+### 9. Photonics
+
+| Example | Use it when |
+|---|---|
+| [`optical_field.py`](optical_field.py) | The record is light between `eo` and `photodetect`: a coupler, an attenuator, an optical filter, two polarisations, and what is refused on a field. Start here |
+| [`swept_ring.py`](swept_ring.py) | A tunable laser sweeps a ring with a reference interferometer beside it: Q and extinction across dies, and what a stray reflection, a fast sweep and a mode hop do to the reading |
+
+### 10. Specialist topics
 
 | Example | Use it when |
 |---|---|

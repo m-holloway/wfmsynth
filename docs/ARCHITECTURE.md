@@ -21,6 +21,7 @@ A waveform is an ordered list of operations. Each one owns a single physical eff
 
   an op's parameter may hold another chain:   crosstalk(aggressor=<chain>) · gain(by=<chain>)
   several named chains are one record:        Channels({...}, shared={...}) · use("name")
+  a record is a voltage, an envelope or light: iq · ofdm ↔ upconvert/downconvert,  eo · laser ↔ photodetect
 ```
 
 The ops are independent of each other. `jitter` displaces edges. `lossy` applies a frequency
@@ -112,14 +113,47 @@ meet, and each is data in the recipe.
 
 Three rules keep these honest. Nothing is ever resampled, truncated or stripped of an imaginary
 part to make it fit: a sub-chain off the record's grid is refused by name. A record is in one
-**domain**, a real voltage or a complex envelope about `fc_hz` (`domain`), and an op is
-real-only unless it has opted in with a test of what it means on an envelope; a chain that did
-not state its grid starts in the domain its own ops need. And the ops whose meaning is their
-position (`law`, `filter`, the joins, `use`, the I/Q impairments) are stage kind `general`:
-`canonical()` refuses to sort a chain that contains one.
+**domain** (below), and an op is real-only unless it has opted in with a test of what it means
+elsewhere; a chain that did not state its grid starts in the domain its own ops need. And the
+ops whose meaning is their position (`law`, `filter`, the joins, `use`, the I/Q impairments)
+are stage kind `general`: `canonical()` refuses to sort a chain that contains one.
 
 `trigger` is the one op that shortens a record: the grid is the long render and the op keeps the
 windows a scope would. `Signal.stored_grid(x)` accounts for it, as it does for `acquire`.
+
+## Three domains, and what a record is an envelope about
+
+A record is in one domain at each point of its chain, and `wfmsynth.domain` is the whole of
+the mechanism: a table of which ops accept which, and a trace that refuses by name.
+
+| Domain | A sample is | Starts with | Crosses by |
+|---|---|---|---|
+| `real` | a voltage | `carrier`, `symbols`, `coded`, a real `capture` | |
+| `iq` | I + jQ, the envelope about `fc_hz` | `iq`, `ofdm`, a first `awgn` or `spur`, a complex `capture` | `upconvert` / `downconvert` |
+| `optical` | a field E, with \|E\|² the power | `eo` after a real drive, `laser`, a capture on `Grid(domain="optical")` | `eo` / `photodetect` |
+
+Being complex is never taken as being I/Q. The two complex domains differ in their bridge (a
+mixer pair, a modulator and a square-law detector), their unit and the ops that mean anything,
+so an envelope offered where a field belongs is refused, and the reverse. The general stages
+(`filter`, `gain`, `gate`, a sum `combine`, `sequence`, `switch`, `use`) mean the same on all
+three. An op that reads a frequency stated at RF has to know what the envelope is about, and
+that is the second thing the trace carries:
+
+- **I/Q carries `fc_hz`.** `delay` turns the carrier by -2π·fc·delay as it shifts the
+  envelope, and `lossy` / `sparam` read their response at `fc_hz + f`. Without a stated centre
+  `delay` is refused: shifting the envelope alone is a different signal.
+- **A field from `eo` or a capture states no carrier.** `fiber(wavelength_nm=)` states one
+  where it acts, and `delay` is refused there.
+- **A field from `laser` carries the laser op itself**: the swept frame. A tunable laser
+  crossing 2 nm moves 250 GHz, which no grid holds, so the record is held in the frame of its
+  own moving carrier (the samples are the constant `sqrt(power)`) and ν(t) is recipe data.
+  `delay` and `resonator` read it. A delayed copy beats against the direct path at (sweep
+  rate) × delay, which is every interferometer, and a ring is solved in that frame, ring-down
+  included. The record stays a time record: `swept.wavelength_map` is the ground-truth axis
+  and no op exposes a wavelength axis.
+
+Because a chain that reaches the field through `eo` still starts real, its grid, recipe JSON
+and digest are what they were before the field was a domain.
 
 ## Where the boundary sits: mechanisms in, knowledge out
 
@@ -146,8 +180,8 @@ Issue #87 asked for the other half, and this is it.
    The test is to try to write it as a chain. If it can be written, it is not an op.
 2. **A useful arrangement ships as a composition**: a plain function that returns a `Signal()`
    sub-chain, with a COOKBOOK entry. It stays visible, because `summary()`, the recipe and
-   `roles()` show the ops it is made of, and a caller can change one of them.
-   `examples/composed_capture.py` has two (`clock()` and `pll()`).
+   `roles()` show the ops it is made of, and a caller can change one of them. The shipped ones
+   are `wfmsynth.recipes`; `examples/composed_capture.py` has two more (`clock()` and `pll()`).
 3. **Standards knowledge goes in a registry the caller populates**, as test patterns do. A named
    parameter set has a document and a revision date behind it; the recipe records the name and
    the resolved numbers.
@@ -177,6 +211,40 @@ names are kept because one says "a property of this signal" and the other "a sec
 `sequence` and `switch` (#77) stayed two ops, since one states its instants and the other emits
 them. Tolerances (#86) and the trigger (#85) are independent of the rest. `law`/`filter` (#80)
 are the general stages rule 4 is about.
+
+**The rule applied again (#88–#94).** Seven issues asked for OFDM, an envelope channel,
+dwelling sources, clutter, the optical field and a swept-wavelength bench. Each was first
+written as a chain. Three ops came out (`ofdm`, `laser`, `resonator`), four kinds of an
+existing op (`carrier("states")`, `filter("doppler")`, `law("saleh")`, `law("rapp")`) and a
+handful of opt-ins; the rest are functions in `wfmsynth.recipes`.
+
+| Asked for | Ruling | Why, or what it is instead |
+|---|---|---|
+| OFDM (#88) | op `ofdm` | an inverse FFT per symbol and a cyclic prefix is one mechanism; a chain of `iq` per subcarrier has no rectangular pulse and no prefix |
+| frames, preambles, gaps, per-block constellations (#88) | composition | `sequence` of `ofdm` chains; a preamble is all pilots; disjoint `active=` joined by `combine` |
+| a standard's OFDM numerology (#88) | registry | `ofdm.register(name, source=, ...)`; the recipe holds the name and the numbers |
+| `delay`, complex `gain`, `lossy`, `sparam` on an envelope (#89) | opted in | each has one meaning about `fc_hz`, checked against the passband route |
+| AM/PM (#89) | `law("saleh")`, `law("rapp")` | measured first: a memoryless passband law turns the carrier by under 1e-5 rad, so AM/PM does not compose |
+| fading (#89) | composition, plus two small mechanisms | `recipes.fading` is complex noise through a Doppler filter. Neither part existed: `filter("doppler")` (a FIR that resolves a Doppler of fs/1000 is thousands of taps of recipe data) and `awgn` as a first op |
+| multipath, a reflection on an envelope (#89) | composition | `recipes.multipath`: `delay` + `gain` per path, `combine` |
+| receiver-side I/Q imbalance (#89) | declined | `iq_imbalance` after the channel, between a turn and its inverse for a phase error |
+| a dwelling source (#90) | `carrier("states")`, a source KIND | every source seam already existed for `carrier`; a renewal process is not a chain |
+| a 1/f noise op (#90) | composition | `recipes.flicker`: two-state processes with corners spaced in log frequency |
+| heavy-tailed event amplitudes (#90) | declined | a second randomness per event needs its own role and draw order; several `events(on="poisson")` ops, one per amplitude, express a table |
+| hum, ripple, pickup, bounce, intermittent contact, oscillator start-up, multitone, a converter (#91) | compositions | all eight are chains. `spur` may now start a chain, as `awgn` may, because an I/Q multitone had no honest source |
+| the optical field as a domain (#92) | domain, no op | `eo` and `photodetect` became bridges; polarisation is a `Channels` pair |
+| a swept source (#93) | op `laser` | the moving carrier is the mechanism; a mode hop is a parameter of it, since a `sequence` of lasers loses the carrier |
+| a ring (#94) | op `resonator` | coupled-mode dynamics in the laser's frame; every order summed in closed form |
+| MZI, stray reflection, etalon, gas-cell reference (#93, #94) | compositions | `delay` + `gain` + `combine`, or one `resonator` per line. A low-finesse etalon is `stray_reflection`, a high-finesse one `resonator` |
+| thermal drift, detector range switching, die-to-die campaigns (#94) | compositions | `resonator(by=<chain>)`; `photodetect().gain(by=<step>)`; `ws.tol` and `unit()` |
+| a wavelength axis on the record (#93) | declined | the record stays in time; the map is ground truth and `measure.swept_map` recovers it as a bench does |
+
+Three things a function in `recipes` could not be, each named in its module docstring: a
+contact that opens fast and recovers slowly (one draw used twice, so a `Channels` shared
+chain), an oscillator as a feedback loop (a chain has none; `oscillator_startup` is the loop's
+closed-form solution), and a capacitor's series resistance in `buck` (`net` needs capacitance
+on every node). The mechanism the first one points at, a tap that reuses a chain's own samples
+inside a sub-chain, is deferred (BACKLOG).
 
 ## Working with agents
 
