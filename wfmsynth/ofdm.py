@@ -57,9 +57,13 @@ TWO THINGS THAT ARE TRUE OF THE SIGNAL AND SURPRISE PEOPLE:
     refuses the part that would fold; `window=` or a following `filter` is the remedy, as it
     is in a transmitter.
 
-NOISE is `awgn(snr_db=s, bw_hz=plan(...)["noise_bw_hz"])`: in that bandwidth, ``n_active *
-scs_hz``, the SNR is the one each demodulated element sees. An OFDM grid states no `baud`,
-so `es_n0_db=` is refused there.
+NOISE is ``awgn(snr_db=s, bw_hz=p["noise_bw_hz"], ref_power=p["ref_power"])`` with
+``p = plan(...)``: in that bandwidth, ``n_active * scs_hz``, the SNR is the one each
+demodulated unit-power element sees. `ref_power` is ``amp**2``, the useful part's power.
+Left out, `awgn` takes the mean ``|x|**2`` of the WHOLE record, which is the same number only
+when the symbols fill the record: a burst of `n_symbols=` half the record reads 3 dB high
+(measured 23.02 dB per element at a stated 20, tests/test_ofdm.py), and a window, a gate or
+louder pilots move it too. An OFDM grid states no `baud`, so `es_n0_db=` is refused there.
 
 WHAT IS NOT HERE, because it composes. A frame, a burst and a gap are `sequence` and `gate`
 around this op (`n_symbols=` makes a burst of that many). A preamble is another `ofdm` chain
@@ -162,9 +166,10 @@ def jsonable(params):
     """`params` as a recipe holds them: lists for arrays, ``[re, im]`` pairs for complex
     pilot values."""
     out = dict(params)
-    for k in ("cp", "active"):
-        if k in out and not isinstance(out[k], (int, np.integer)):
-            out[k] = [int(v) for v in np.asarray(out[k]).ravel()]
+    for k in ("cp", "active"):       # a count stays a count; anything else is refused later
+        if k in out and isinstance(out[k], (list, tuple, np.ndarray)):
+            out[k] = [int(v) if isinstance(v, np.integer) else v
+                      for v in np.asarray(out[k]).ravel()]
     for k in ("n_fft", "cp", "active", "window", "n_symbols"):
         if isinstance(out.get(k), np.integer):
             out[k] = int(out[k])
@@ -265,10 +270,18 @@ def _numerology(p, partial=False):
                              f"{p['scs_hz']!r}")
     if p.get("cp") is not None:
         cp = p["cp"]
-        cp = [cp] if isinstance(cp, (int, np.integer)) else list(cp)
+        cp = list(cp) if isinstance(cp, (list, tuple, np.ndarray)) else [cp]
         if not cp:
             raise ValueError("ofdm: cp is a count of samples at the FFT rate, or a list of "
                              "them cycled over the symbols; got an empty list")
+        rate = out["n_fft"] * out["scs_hz"] if "n_fft" in out and "scs_hz" in out else None
+        for c in cp:                     # a time is the usual mistake: say what it is
+            m = c * rate if isinstance(c, (float, np.floating)) and rate else 0.0
+            if 1 <= round(m) <= out["n_fft"] and abs(m - round(m)) < 1e-6:
+                raise ValueError(
+                    f"ofdm: cp is a count of samples at the FFT rate (n_fft * scs_hz = "
+                    f"{rate:.10g} Sa/s), a whole number >= 0, got {float(c)!r}. If that is "
+                    f"seconds, it is cp={int(round(m))}.")
         out["cp"] = [_count(c, "cp (samples at the FFT rate)", 0) for c in cp]
         if "n_fft" in out and max(out["cp"]) > out["n_fft"]:
             raise ValueError(f"ofdm: cp={max(out['cp'])} is longer than the useful part it "
@@ -358,8 +371,11 @@ def plan(params, grid, n=None):
       ``t_s``              ``useful / fs``
       ``window``           the edge ramp, in record samples
       ``noise_bw_hz``      ``n_active * scs_hz``: the bandwidth in which white noise reaches
-                           the demodulated elements, so `awgn(snr_db=s, bw_hz=noise_bw_hz)`
-                           is an SNR of s dB per resource element
+                           the demodulated elements
+      ``ref_power``        ``amp**2``, the useful part's mean ``|x|**2`` with unit-power
+                           elements, so `awgn(snr_db=s, bw_hz=noise_bw_hz,
+                           ref_power=ref_power)` is an SNR of s dB per unit-power resource
+                           element whether or not the symbols fill the record
 
     `n` is the record length where it is not the grid's. `params` is the op's own dict
     (``sig.ops[0]``) or the same keywords."""
@@ -422,7 +438,7 @@ def _plan(p, grid, n):
             "n_symbols": n_sym, "subcarriers": sc, "f_hz": sc * scs, "pilot": pilot,
             "cp": cp, "start": start, "useful": useful, "samples": samples,
             "t_s": useful / fs, "window": num["window"] * over,
-            "noise_bw_hz": sc.size * scs, "_value": value, "_amp": num["amp"], "_n": n}
+            "noise_bw_hz": sc.size * scs, "ref_power": num["amp"] ** 2, "_value": value, "_amp": num["amp"], "_n": n}
 
 
 def resource_grid(params, grid, n=None):
@@ -557,15 +573,19 @@ def _timing(ref, got, f_hz, pl):
     return float(best.x)
 
 
-def evm(x, grid, sent, params, correct=(), skip=0, delay_s=0.0):
+def evm(x, grid, sent, params, correct=(), skip=0, delay_s=0.0, symbols=None, block=None):
     """What `rf.evm(x, grid, sent, ofdm=params)` returns: the RMS distance between the
     demodulated resource grid and `sent` (`Signal.transmitted()[0]`), over the RMS of `sent`,
     counted over every active element -- data and pilots.
 
-    `skip` leaves that many OFDM symbols out at each end. `delay_s` is the receiver's
-    (`demodulate`). `correct` names what to take out first; nothing is taken out otherwise,
-    each is a least-squares fit against `sent` in this order, and what it removed comes back
-    in ``["removed"]``:
+    WHICH SYMBOLS. `skip` leaves that many OFDM symbols out at each end. `symbols` is a
+    boolean mask, one entry per row of `sent`: only the True ones are counted -- the symbols
+    a burst schedule actually sent (a `gate` leaves the rest of `transmitted()` in place and
+    zeroes the record under them), or the ones a blanking interval spared.
+
+    `delay_s` is the receiver's (`demodulate`). `correct` names what to take out first;
+    nothing is taken out otherwise, each is a least-squares fit against `sent` in this order,
+    and what it removed comes back in ``["removed"]``:
 
       ``"timing"``        one delay, as the phase slope across the subcarriers it causes;
                           ``timing_s``, found within +/- half a useful symbol. The window is
@@ -577,18 +597,29 @@ def evm(x, grid, sent, params, correct=(), skip=0, delay_s=0.0):
       ``"equalizer"``     one complex coefficient per subcarrier, the channel as the pilots
                           and data together show it; ``equalizer``, one per subcarrier
 
+    `block=b` fits ``"timing"``, ``"gain"`` and ``"equalizer"`` afresh over each run of `b`
+    consecutive OFDM symbols (of the record's, from its first), for a channel that MOVES
+    within the record -- a fade: one coefficient per subcarrier for the whole record is then
+    the average channel, and the figure is the fade's. ``removed`` holds one fit per block
+    (``timing_s`` and ``gain_db`` one number each, ``equalizer`` one row each) and
+    ``["block_symbols"]`` the index of each block's first symbol. A block left with fewer
+    than two counted symbols cannot be equalised and is left OUT of the figure
+    (``n_symbols`` is what was counted).
+
     A FIT ABSORBS NOISE. The equaliser spends one complex number per subcarrier, so over N
     counted symbols it takes 1/N of white noise's power with it and the figure reads low by
-    ``sqrt(1 - 1/N)``; with one symbol it would read zero, and is refused. The common phase
-    takes ``1 / (2 * n_active)`` the same way. And the equaliser DIVIDES by the channel, noise
-    included: on a subcarrier the channel faded to ``|H|`` the noise left is ``1 / |H|``
-    larger, which is the channel's cost and stays in the figure.
+    ``sqrt(1 - 1/N)`` (N is the block when `block=` is given); with one symbol it would read
+    zero, and is refused. The common phase takes ``1 / (2 * n_active)`` the same way. And the
+    equaliser DIVIDES by the channel, noise included: on a subcarrier the channel faded to
+    ``|H|`` the noise left is ``1 / |H|`` larger, which is the channel's cost and stays in
+    the figure.
 
     Returns ``evm``, ``evm_pct``, ``evm_db``, ``evm_peak``; ``evm_per_subcarrier`` and
     ``evm_per_symbol`` (each over the RMS of the whole reference); ``subcarriers``;
-    ``n_symbols``, ``n_elements``, ``skip``, ``reference``, ``receiver``, ``delay_s``,
-    ``removed``; and ``received`` / ``reference_symbols``, ``[symbol, subcarrier]`` after
-    `skip`, for the error on any one element."""
+    ``symbols`` (the index of each counted symbol, a row of `sent`), ``n_symbols``,
+    ``n_elements``, ``skip``, ``reference``, ``receiver``, ``delay_s``, ``removed``; and
+    ``received`` / ``reference_symbols``, ``[counted symbol, subcarrier]``, for the error on
+    any one element."""
     correct = (correct,) if isinstance(correct, str) else tuple(correct)
     for c in correct:
         if c in _NOT_HERE:
@@ -607,40 +638,72 @@ def evm(x, grid, sent, params, correct=(), skip=0, delay_s=0.0):
         raise ValueError(f"evm: sent has shape {ref.shape} and these ofdm parameters on this "
                          f"record are {want[0]} symbols of {want[1]} active subcarriers. Pass "
                          f"sig.transmitted()[0], the op's own parameters (sig.ops[0]) and the "
-                         f"grid that describes the record (sig.stored_grid(x)).")
+                         f"grid that describes the record (sig.stored_grid(x)). To count only "
+                         f"some symbols, keep the whole record and pass symbols=<a boolean "
+                         f"mask, one per row of sent>.")
     skip = int(skip)
     if skip < 0 or ref.shape[0] - 2 * skip < 1:
         raise ValueError(f"evm: skip={skip} at each end leaves {ref.shape[0] - 2 * skip} of "
                          f"{ref.shape[0]} OFDM symbols; nothing to measure")
-    keep = slice(skip, ref.shape[0] - skip)
-    ref, got = ref[keep], demodulate(x, grid, params, delay_s=delay_s)[keep]
-    power = float(np.mean(np.abs(ref) ** 2))
+    counted = np.zeros(ref.shape[0], bool)
+    counted[skip:ref.shape[0] - skip] = True
+    if symbols is not None:
+        mask = np.asarray(symbols)
+        if mask.dtype != bool or mask.shape != (ref.shape[0],):
+            raise ValueError(f"evm: symbols= is a boolean mask with one entry per OFDM symbol "
+                             f"(row of sent): {ref.shape[0]} here, True for each symbol to "
+                             f"count. Got dtype {mask.dtype}, shape {mask.shape}.")
+        counted &= mask
+    if block is not None:
+        block = _count(block, "evm's block (OFDM symbols per fit)", 2 if "equalizer" in correct
+                       else 1)
+    least = 2 if "equalizer" in correct else 1
+    runs = [np.flatnonzero(counted[a:a + (block or len(counted))]) + a
+            for a in range(0, len(counted), block or len(counted))]
+    runs = [r for r in runs if r.size >= (least if block else 1)]
+    if not runs:
+        raise ValueError("evm: no OFDM symbol is left to measure after symbols=, skip= and "
+                         "block= (an equalised block needs two counted symbols).")
+    all_got = demodulate(x, grid, params, delay_s=delay_s)
+    power = float(np.mean(np.abs(ref[np.concatenate(runs)]) ** 2))
     if not power > 0:
         raise ValueError("evm: the reference grid is all zero; there is nothing to normalise "
                          "the error by")
-    removed = {}
-    if "timing" in correct:
-        removed["timing_s"] = _timing(ref, got, pl["f_hz"], pl)
-        got = got * np.exp(2j * np.pi * pl["f_hz"] * removed["timing_s"])
-    if "common_phase" in correct:
-        removed["common_phase_rad"] = np.angle(np.sum(np.conj(ref) * got, axis=1))
-        got = got * np.exp(-1j * removed["common_phase_rad"])[:, None]
-    if "gain" in correct:
-        gain = abs(np.vdot(ref, got)) / (power * ref.size)
-        removed["gain_db"] = float(20 * np.log10(gain))
-        got = got / gain
-    if "equalizer" in correct:
-        if ref.shape[0] < 2:
-            raise ValueError("evm: correct='equalizer' fits one coefficient per subcarrier, "
-                             "and over a single OFDM symbol that fit is exact whatever the "
-                             "record holds -- the figure would be zero. Count 2 symbols or "
-                             "more.")
-        energy = np.sum(np.abs(ref) ** 2, axis=0)
-        if not energy.all():
-            raise ValueError("evm: correct='equalizer' needs every active subcarrier to carry "
-                             "something on a counted symbol; one is zero throughout")
-        removed["equalizer"] = np.sum(np.conj(ref) * got, axis=0) / energy
-        got = got / removed["equalizer"]
+    fits, parts = {}, []
+    for rows in runs:
+        r, got = ref[rows], all_got[rows]
+        if "timing" in correct:
+            t = _timing(r, got, pl["f_hz"], pl)
+            fits.setdefault("timing_s", []).append(t)
+            got = got * np.exp(2j * np.pi * pl["f_hz"] * t)
+        if "common_phase" in correct:
+            ph = np.angle(np.sum(np.conj(r) * got, axis=1))
+            fits.setdefault("common_phase_rad", []).append(ph)
+            got = got * np.exp(-1j * ph)[:, None]
+        if "gain" in correct:
+            gain = abs(np.vdot(r, got)) / (float(np.mean(np.abs(r) ** 2)) * r.size)
+            fits.setdefault("gain_db", []).append(float(20 * np.log10(gain)))
+            got = got / gain
+        if "equalizer" in correct:
+            if r.shape[0] < 2:
+                raise ValueError("evm: correct='equalizer' fits one coefficient per "
+                                 "subcarrier, and over a single OFDM symbol that fit is exact "
+                                 "whatever the record holds -- the figure would be zero. "
+                                 "Count 2 symbols or more.")
+            energy = np.sum(np.abs(r) ** 2, axis=0)
+            if not energy.all():
+                raise ValueError("evm: correct='equalizer' needs every active subcarrier to "
+                                 "carry something on a counted symbol; one is zero throughout")
+            eq = np.sum(np.conj(r) * got, axis=0) / energy
+            fits.setdefault("equalizer", []).append(eq)
+            got = got / eq
+        parts.append(got)
+    rows = np.concatenate(runs)
+    ref, got = ref[rows], np.concatenate(parts)
+    removed = {k: (np.concatenate(v) if k == "common_phase_rad" else
+                   np.array(v) if block else v[0]) for k, v in fits.items()}
+    if block:
+        removed["block_symbols"] = np.array([int(r[0]) // block * block for r in runs])
     err = np.abs(got - ref) ** 2
     val = float(np.sqrt(err.mean() / power))
     return {"evm": val, "evm_pct": 100.0 * val,
@@ -648,7 +711,8 @@ def evm(x, grid, sent, params, correct=(), skip=0, delay_s=0.0):
             "evm_peak": float(np.sqrt(err.max() / power)),
             "evm_per_subcarrier": np.sqrt(err.mean(axis=0) / power),
             "evm_per_symbol": np.sqrt(err.mean(axis=1) / power),
-            "subcarriers": pl["subcarriers"], "n_symbols": int(ref.shape[0]),
+            "subcarriers": pl["subcarriers"], "symbols": rows,
+            "n_symbols": int(ref.shape[0]),
             "n_elements": int(ref.size), "skip": skip, "reference": "truth",
             "receiver": f"fft of {pl['n_fft'] * pl['oversample']} samples per symbol, "
                         f"{pl['subcarriers'].size} active subcarriers",

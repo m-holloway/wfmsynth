@@ -971,7 +971,8 @@ def _equalizer(y, s, keep, taps):
 
 
 def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), skip=0,
-        delay_s=0.0, equalizer_taps=None, beta=IQ.RRC_BETA, span_ui=IQ.RRC_SPAN_UI, ofdm=None):
+        delay_s=0.0, equalizer_taps=None, beta=IQ.RRC_BETA, span_ui=IQ.RRC_SPAN_UI, ofdm=None,
+        symbols=None, block=None):
     """Error-vector magnitude of a complex baseband record: RMS distance between the received
     symbols and the reference, over the RMS of the reference.
 
@@ -1060,9 +1061,12 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
     is then per RESOURCE ELEMENT against the truth, the contract is the same -- nothing
     fitted unless `correct` names it, what it took out in ``["removed"]`` -- and the
     corrections are OFDM's own: ``"timing"``, ``"common_phase"``, ``"gain"``,
-    ``"equalizer"`` (one coefficient per subcarrier). `wfmsynth.ofdm.evm` states each and
-    what the result holds; `reference="decided"` and the single-carrier arguments are
-    refused by name.
+    ``"equalizer"`` (one coefficient per subcarrier). Two more arguments choose what is
+    measured: ``symbols=<boolean mask, one per OFDM symbol>`` counts only those symbols (the
+    ones a burst schedule sent), and ``block=<OFDM symbols>`` fits the timing, gain and
+    equaliser afresh over each run of that many symbols, for a channel that moves within the
+    record (a fade). `wfmsynth.ofdm.evm` states each and what the result holds;
+    `reference="decided"` and the single-carrier arguments are refused by name.
     """
     a = _measured_envelope(x, "evm")
     if ofdm is not None:
@@ -1080,8 +1084,23 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
                 f"against sent= only, its equaliser is one coefficient per subcarrier "
                 f"(correct=('equalizer',), no tap count), and it has no pulse to match.")
         from . import ofdm as OFDM
-        return OFDM.evm(a, grid, sent, ofdm, correct=correct, skip=skip, delay_s=delay_s)
-    fs, baud = IQ._rate(grid, "evm")
+        return OFDM.evm(a, grid, sent, ofdm, correct=correct, skip=skip, delay_s=delay_s,
+                        symbols=symbols, block=block)
+    looks_ofdm = ("If this is an OFDM record (its grid states no baud, and transmitted() "
+                  "returns a 2-D resource grid), say so: rf.evm(x, grid, sent, ofdm=<the "
+                  "ofdm op's parameters, sig.ops[0]>).")
+    if symbols is not None or block is not None:
+        raise ValueError("evm: symbols= and block= choose OFDM symbols, and this call has no "
+                         "ofdm=. " + looks_ofdm + " On a single-carrier record skip= leaves "
+                         "symbols out at each end.")
+    if sent is not None and np.ndim(sent) == 2:
+        raise ValueError(f"evm: sent is 2-D, shape {np.shape(sent)} -- a resource grid, "
+                         f"[OFDM symbol, subcarrier] -- and without ofdm= the receiver is a "
+                         f"matched filter per single-carrier symbol. " + looks_ofdm)
+    try:
+        fs, baud = IQ._rate(grid, "evm")
+    except ValueError as e:
+        raise ValueError(f"{e} {looks_ofdm}") from None
     if reference not in ("truth", "decided"):
         raise ValueError(f"evm: reference is 'truth' (against sent=) or 'decided' (against the "
                          f"nearest point of constellation=), got {reference!r}")

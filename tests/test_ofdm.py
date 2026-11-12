@@ -218,6 +218,13 @@ def test_a_named_set_records_its_name_and_its_numbers_and_replays_without_the_re
     ({"bits": [0, 1]}, "exactly one source"),
     ({"n_symbols": 51}, "do not fit in a record"),
     ({"n_fft": 1}, "n_fft is a whole number >= 2"),
+    ({"cp": 0.8e-6}, r"cp is a count of samples at the FFT rate \(n_fft \* scs_hz = 20000000 "
+                     r"Sa/s\).*got 8e-07. If that is seconds, it is cp=16"),
+    ({"cp": [16, 0.8e-6]}, "If that is seconds, it is cp=16"),
+    ({"cp": 16.7}, r"cp \(samples at the FFT rate\) is a whole number >= 0, got 16.7"),
+    ({"cp": 0.25}, "is a whole number >= 0, got 0.25"),
+    ({"cp": 16.0}, "is a whole number >= 0, got 16.0"),
+    ({"active": [1.5, 2.0]}, "active is a list of whole subcarrier numbers"),
     ({"scs_hz": -1.0}, "must be positive"),
 ])
 def test_what_cannot_be_rendered_is_refused_by_name(kw, says):
@@ -473,6 +480,87 @@ def test_evm_in_white_noise_is_the_analytic_value(constellation, snr_db):
     few = RF.evm(x[:80 * 8], g, sent[:8], ofdm=noisy.ops[0])["evm"]
     eq = RF.evm(x[:80 * 8], g, sent[:8], ofdm=noisy.ops[0], correct=("equalizer",))["evm"]
     assert abs(eq / few - np.sqrt(1 - 1 / 8)) < 0.03, (eq / few, np.sqrt(1 - 1 / 8))
+
+
+def test_the_stated_snr_is_per_element_on_a_burst_when_the_noise_states_its_reference():
+    """`awgn` references the whole record's mean power unless told: a burst over half the
+    record then reads 3 dB high. `plan()["ref_power"]` is the useful part's own."""
+    g = grid(800)
+    burst = source(g, constellation="qam16", n_symbols=400)
+    p = OFDM.plan(burst.ops[0], g)
+    assert p["ref_power"] == 1.0 and OFDM.plan(dict(burst.ops[0], amp=0.5), g)["ref_power"] == 0.25
+    sent = burst.transmitted()[0]
+
+    def evm_db(**kw):
+        x = burst.copy().awgn(snr_db=20.0, bw_hz=p["noise_bw_hz"], **kw).waveform()
+        return RF.evm(x, g, sent, ofdm=burst.ops[0])["evm_db"]
+
+    stated, record = evm_db(ref_power=p["ref_power"]), evm_db()
+    print(f"burst of 400 in 800: EVM {stated:.2f} dB with ref_power, {record:.2f} dB without")
+    assert abs(stated + 20.0) < 0.1                                  # measured -19.99
+    assert abs(record + 20.0 + 10 * np.log10(2.0)) < 0.1             # measured -23.02
+
+
+def test_evm_counts_the_symbols_it_is_told_to_and_says_which():
+    """A record whose second half was never sent (a gate): every symbol counted reads
+    sqrt(1/2); the first half alone is exact."""
+    sig = source()
+    sent = sig.transmitted()[0]
+    x = sig.waveform()
+    x[80 * 25:] = 0.0
+    assert abs(RF.evm(x, sig.grid, sent, ofdm=sig.ops[0])["evm"] - np.sqrt(0.5)) < 0.01
+    on = np.arange(50) < 25
+    got = RF.evm(x, sig.grid, sent, ofdm=sig.ops[0], symbols=on)
+    assert got["evm"] < EXACT and got["n_symbols"] == 25 and list(got["symbols"]) == list(range(25))
+    assert got["received"].shape == (25, 52) and got["evm_per_symbol"].shape == (25,)
+    both = RF.evm(x, sig.grid, sent, ofdm=sig.ops[0], symbols=on, skip=3)
+    assert list(both["symbols"]) == list(range(3, 25))               # skip still trims the ends
+    for bad, says in ((on[:10], "one entry per OFDM symbol"), (np.arange(50), "boolean mask"),
+                      (np.zeros(50, bool), "no OFDM symbol is left")):
+        with pytest.raises(ValueError, match=says):
+            RF.evm(x, sig.grid, sent, ofdm=sig.ops[0], symbols=bad)
+
+
+def test_a_channel_that_changes_within_the_record_is_equalised_in_blocks():
+    """An echo of 0.4 for the first 25 symbols and of -0.3j for the rest. One coefficient per
+    subcarrier over the record is their average and leaves the difference as error; a fit per
+    block of 25 returns each channel and nothing else."""
+    sig = source()
+    sent, x = sig.transmitted()[0], sig.waveform()
+    echo = np.concatenate([np.zeros(3), x[:-3]])                      # 3 samples late: in the prefix
+    y = x + np.where(np.arange(x.size) < 80 * 25, 0.4, -0.3j) * echo
+    k = OFDM.plan(sig.ops[0], sig.grid)["subcarriers"]
+    turn = np.exp(-2j * np.pi * 3 * k / N_FFT)
+    whole = RF.evm(y, sig.grid, sent, ofdm=sig.ops[0], correct=("equalizer",))
+    assert 0.2 < whole["evm"] < 0.3                                   # measured 0.243
+    fit = RF.evm(y, sig.grid, sent, ofdm=sig.ops[0], correct=("equalizer", "gain"), block=25)
+    # the first symbol of the second block has the old echo in its prefix only: exact too
+    assert fit["evm"] < EXACT and fit["n_symbols"] == 50
+    assert list(fit["removed"]["block_symbols"]) == [0, 25]
+    assert fit["removed"]["equalizer"].shape == (2, 52) and fit["removed"]["gain_db"].shape == (2,)
+    h = fit["removed"]["equalizer"] * 10 ** (fit["removed"]["gain_db"][:, None] / 20)
+    assert np.abs(h - [1 + 0.4 * turn, 1 - 0.3j * turn]).max() < 1e-9
+    # with a mask: a block left with under two counted symbols is left out, and said
+    on = np.ones(50, bool)
+    on[26:] = False
+    part = RF.evm(y, sig.grid, sent, ofdm=sig.ops[0], correct=("equalizer",), block=25, symbols=on)
+    assert list(part["symbols"]) == list(range(25)) and list(part["removed"]["block_symbols"]) == [0]
+    with pytest.raises(ValueError, match="block .OFDM symbols per fit. is a whole number >= 2"):
+        RF.evm(y, sig.grid, sent, ofdm=sig.ops[0], correct=("equalizer",), block=1)
+
+
+def test_evm_on_an_ofdm_record_without_ofdm_names_the_argument():
+    sig = source()
+    x, sent = sig.waveform(), sig.transmitted()[0]
+    with pytest.raises(ValueError, match=r"needs the sample rate and the symbol rate.*OFDM "
+                                         r"record.*ofdm=<the ofdm op's parameters"):
+        RF.evm(x, sig.grid, sent.ravel())
+    with_baud = Grid(fs=RATE, baud=250e3, n=x.size)
+    with pytest.raises(ValueError, match=r"sent is 2-D, shape \(50, 52\).*ofdm=<the ofdm op"):
+        RF.evm(x, with_baud, sent)
+    single = Signal(seed=1, grid=Grid(fs=8e6, baud=1e6, n=4096)).iq("qpsk", prbs=9)
+    with pytest.raises(ValueError, match="symbols= and block= choose OFDM symbols"):
+        RF.evm(single.waveform(), single.grid, single.transmitted()[0], block=8)
 
 
 def test_gain_is_counted_until_it_is_named():

@@ -4873,6 +4873,81 @@ check("an OFDM frame through recipes.multipath: the per-subcarrier equaliser ret
       f"(bound 1e-3, the fractional delay's interpolator); against the same echo without the "
       f"carrier's turn {_ofmno:.3f}; equalised EVM {_ofmeq['evm']:.1e}")
 
+# ---- a burst: the stated SNR per element, the symbols that were sent, a channel that changes
+_ofb = _ofsrc(800, n_symbols=400)                                  # a burst over half the record
+_ofbp = _ofm.plan(_ofb.ops[0], _ofb.grid)
+_ofbsent = _ofb.transmitted()[0]
+
+
+def _ofbevm(**kw):
+    return _RF.evm(_ofb.copy().awgn(snr_db=20.0, bw_hz=_ofbp["noise_bw_hz"], **kw).waveform(),
+                     _ofb.grid, _ofbsent, ofdm=_ofb.ops[0])["evm_db"]
+
+
+_ofbref, _ofbrec = _ofbevm(ref_power=_ofbp["ref_power"]), _ofbevm()
+_ofbs = _ofsrc(50)
+_ofbx, _ofbt = _ofbs.waveform(), _ofbs.transmitted()[0]
+_ofbgone = _ofbx.copy()
+_ofbgone[80 * 25:] = 0.0                                           # the second half never sent
+_ofbon = np.arange(50) < 25
+_ofball = _RF.evm(_ofbgone, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0])["evm"]
+_ofbsel = _RF.evm(_ofbgone, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0], symbols=_ofbon)
+_ofbecho = np.concatenate([np.zeros(3), _ofbx[:-3]])               # 3 samples late: in the prefix
+_ofbmove = _ofbx + np.where(np.arange(_ofbx.size) < 80 * 25, 0.4, -0.3j) * _ofbecho
+_ofbone = _RF.evm(_ofbmove, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0], correct=("equalizer",))["evm"]
+_ofbblk = _RF.evm(_ofbmove, _ofbs.grid, _ofbt, ofdm=_ofbs.ops[0], correct=("equalizer",),
+                    block=25)
+_ofbturn = np.exp(-2j * np.pi * 3 * _ofbblk["subcarriers"] / 64)
+_ofbherr = float(np.abs(_ofbblk["removed"]["equalizer"]
+                        - [1 + 0.4 * _ofbturn, 1 - 0.3j * _ofbturn]).max())
+check("a BURST: noise that states its reference (plan()['ref_power'], the useful part's power) "
+      "is the stated SNR per resource element, where the record's own mean power reads 3 dB "
+      "high on a burst over half the record; EVM over the symbols a mask names is the sent "
+      "ones' alone; and a channel that changes within the record is equalised per block",
+      abs(_ofbref + 20.0) < 0.1 and abs(_ofbrec + 20.0 + 10 * np.log10(2.0)) < 0.1
+      and abs(_ofball - np.sqrt(0.5)) < 0.01 and _ofbsel["evm"] < 1e-12
+      and _ofbsel["n_symbols"] == 25 and 0.2 < _ofbone < 0.3 and _ofbblk["evm"] < 1e-12
+      and _ofbherr < 1e-9,
+      f"400 symbols in a record of 800 at a stated 20 dB: EVM {_ofbref:.2f} dB with ref_power, "
+      f"{_ofbrec:.2f} dB against the record's mean; a record whose second half was never "
+      f"sent: {_ofball:.4f} over every symbol (sqrt(1/2)), {_ofbsel['evm']:.1e} over the 25 "
+      f"sent; an echo of 0.4 then -0.3j: {_ofbone:.3f} with one equaliser, "
+      f"{_ofbblk['evm']:.1e} with one per 25 symbols, each within {_ofbherr:.1e} of its H(k)")
+
+# ---- what a later cut ends: a state's dwell, an OFDM symbol
+from wfmsynth import states as _ofst                                           # noqa: E402
+_ofcg = Grid(fs=1e6, n=1 << 14)
+_ofcst = Signal().carrier("states", dwell=4e-4)
+_ofcuts = {
+    "sequence": (Signal(seed=4, grid=_ofcg).sequence(
+        [{"chain": _ofcst, "duration_s": 3e-3},
+         {"chain": Signal().carrier("dc", level=0.5)}]), 3e-3),
+    "sample_clock": (Signal(seed=4, grid=_ofcg).carrier("states", dwell=4e-4)
+                     .sample_clock(n_out=4096), 4096e-6),
+    "delay": (Signal(seed=4, grid=_ofcg).carrier("states", dwell=4e-4).delay(by=1.5e-3),
+              _ofcg.n / 1e6),
+    "trigger": (Signal(seed=4, grid=_ofcg).carrier("states", dwell=4e-4)
+                .trigger(pre_s=0.5e-3, post_s=1.5e-3, level=0.5), 2e-3),
+}
+_ofclast = {k: (_ofst.intervals(s.event_list())[-1], t) for k, (s, t) in _ofcuts.items()}
+_ofcseq = Signal(seed=1, grid=Grid(fs=20e6, n=800)).sequence(
+    [{"chain": Signal().ofdm(constellation="qpsk", prbs=7, **_ofnum), "duration_s": 200 / 20e6},
+     {"chain": Signal().ofdm(constellation="qpsk", prbs=7, **_ofnum)}])
+_ofcev = [e for e in _ofcseq.event_list() if e.kind == "ofdm_symbol"]
+_ofcwhole = [e.t_s + e.params["cp_s"] for e in _ofcev if e.params["complete"]]
+check("an event that states an EXTENT ends where a later cut ends the samples: a state "
+      "interval under way at the end of a `sequence` segment, of a shorter stored record, of "
+      "the record after a `delay` and of a `trigger` window stops there with complete=False; "
+      "an OFDM symbol a segment cuts is marked, and the complete ones are transmitted()'s",
+      all(abs(r["t_stop_s"] - t) < 1e-9 and not r["complete"] for r, t in _ofclast.values())
+      and [e.params["complete"] for e in _ofcev] == [True, True, False] + [True] * 7 + [False]
+      and max(e.sample + e.width for e in _ofcev) == 800
+      and np.allclose(_ofcwhole, _ofcseq.transmitted()[1], rtol=0, atol=1e-15),
+      "; ".join(f"{k}: last interval ends {r['t_stop_s'] * 1e3:.3f} ms (cut {t * 1e3:.3f})"
+                for k, (r, t) in _ofclast.items())
+      + f"; OFDM: {len(_ofcev)} symbol events, {len(_ofcwhole)} complete = "
+        f"{len(_ofcseq.transmitted()[1])} sent, none past sample 800")
+
 # ---- recipes: compositions worth shipping (GitHub #91)
 # Each is a function that returns a chain, so each is checked twice: against that chain written
 # out by hand (same recipe, same samples), and for the property it states, against a closed
