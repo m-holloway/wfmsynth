@@ -981,9 +981,12 @@ nothing drawn, so `Segments.without("trend/...")` holds it at its first value an
 draw. An arrival is a `carrier("states")` dwell spec through the same parser; a bare number is
 refused (a period or a mean?). Each occurrence's source is delayed by the fraction of a sample
 its arrival falls after one, so the trigger's sub-sample placement spreads as on a
-free-running scope: measured against `trigger(n_segments=400)`, placement rms 0.4819 against
-0.4810 samples, two-sample KS p = 0.76. An occurrence arriving during the last capture's
-render is missed and counted. `level=None` is refused: a scope's level is set once.
+free-running scope: measured against `trigger(n_segments=400)`, placement rms 0.4790 against
+0.4810 samples, two-sample KS p = 0.81. The scope's dead time is `post_s` plus `rearm_s=`
+(default 0), counted arrival to arrival, so the render's length never changes which
+occurrences are captured. A variant is the same unit: a part it holds at the same op and
+parameter as the main chain is the same draw. `level=None` is refused: a scope's level is
+set once.
 
 **Deferred, each with the reason.**
 
@@ -1001,7 +1004,7 @@ render is missed and counted. `level=None` is refused: a scope's level is set on
 3. *A trend that is another chain sampled at the arrivals.* The chain's render length would
    depend on the arrival draw, so re-rolling `arrival` would change the trend's own render.
 4. *`average=`, `holdoff_s=`, `on=` in `Segments(trigger=)`.* Refused by name with what to
-   do; a holdoff would be a second rule beside "missed while storing".
+   do; the dead time is `post_s + rearm_s`, and a holdoff would be a second name for it.
 5. *An op after the source that states its own instants* (`events(on="times")`, a later
    sub-chain) keeps them on the occurrence's render clock, not shifted by the sub-sample
    delay. Stated in `wfmsynth.segments`; a fix needs a time origin every such op reads.

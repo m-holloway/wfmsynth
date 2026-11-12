@@ -31,15 +31,19 @@ its windows. Every existing call, recipe and rendered sample is unchanged.
 - **Per-occurrence values.** `ws.tol(..., per="segment")` and `ws.corners(..., per=
   "segment")` draw again for every occurrence (role `vary/<op index>/<parameter>`, or
   `vary/<group>`), nested inside the unit: a tolerance without `per=` stays one draw for the
-  acquisition, and `seg.unit(seed)` is another unit with the same occurrences.
+  acquisition, shared by the main chain and every variant that holds the same part (a variant
+  is the same unit), and `seg.unit(seed)` is another unit with the same occurrences.
   `ws.trend("ramp", start=, stop= | rate_per_s=)` and `ws.trend("step", before=, after=, at= |
   at_s=)` move a value across the occurrences, by index or by arrival time.
 - **Arrival** is a `carrier("states")` dwell spec (`fixed` is a period; `exponential`,
-  `lognormal`, `uniform`, `table` are drawn under the role `arrival`). An occurrence arriving
-  while the previous capture's render is still running is missed and counted.
+  `lognormal`, `uniform`, `table` are drawn under the role `arrival`). The scope is busy for
+  `post_s` plus `trigger=dict(rearm_s=)` (default 0) after a trigger; an occurrence arriving
+  then is missed and counted. The render's length (its settling lead) changes no arrival or
+  timestamp.
 - **Variants**: `variants={"late": dict(p=0.02, chain=...)}` (role `variant`) or
-  `dict(at=[...], chain=...)`, recorded per occurrence; a variant's parts are named under it
-  (`late/vary/1/by`).
+  `dict(at=[...], chain=...)`, recorded per occurrence; a variant's per-occurrence draws are named under it
+  (`late/vary/1/by`, `late/vary/<group>`). A variant that stores at another rate, so another
+  window length, is refused naming both.
 - **Ground truth and siblings.** `seg.occurrences()` (arrival, missed, variant and every
   per-occurrence value, from the recipe alone); `ws.segment_params(recipe, op)`, `op_params`
   per occurrence; `roles()` lists `arrival`, `variant`, each `vary/...`, `trigger`,
@@ -51,7 +55,7 @@ its windows. Every existing call, recipe and rendered sample is unchanged.
   rail and a rare chattering contact. From the windows alone it finds the 7 chattering
   closures (exactly the recipe's) and that the sag follows time, not the closure count
   (residual 16.3 mV against time, 25.2 mV against count).
-- `wfmsynth.validate`: five checks under "a segmented acquisition of a rare event".
+- `wfmsynth.validate`: six checks under "a segmented acquisition of a rare event".
 - SKILL.md gotcha 46: a chain moved from a long render into `Segments` renders on the short
   grid, and what it sizes from the grid's length changes with it.
 

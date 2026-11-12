@@ -1059,8 +1059,9 @@ The output is what `trigger(n_segments=200)` would give: the windows end to end,
 dwell (`fixed` is a period; a bare number is refused, since it could be either). `level` must be
 stated. `variants={"late": dict(p=0.02, chain=...)}` makes some occurrences another chain,
 drawn under the role `variant` and recorded on each event. A tolerance without `per=` is still
-a unit part, fixed for the whole acquisition, and `seg.unit(seed)` is another unit captured
-the same way. A chain holding a `per="segment"` value or a trend is refused when rendered on
+a unit part, one draw for the whole acquisition and every variant that holds it, and
+`seg.unit(seed)` is another unit captured the same way. An occurrence arriving within `post_s`
+(plus `trigger=dict(rearm_s=)`) of the last capture is missed and counted. A chain holding a `per="segment"` value or a trend is refused when rendered on
 its own. [`examples/segmented_events.py`](../examples/segmented_events.py) captures 300 relay
 closures and finds the rare chattering ones and what the sag follows.
 
