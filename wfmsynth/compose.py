@@ -2178,6 +2178,23 @@ class Signal:
     # and its recipe is the record's.
     within: object = field(default=None, repr=False, compare=False)
 
+    def copy(self):
+        """An independent Signal with the same seed, grid and ops: the way to BRANCH a chain.
+
+        A builder method appends to the Signal it is called on and returns that same Signal,
+        so `base.lossy(...)` followed by `base.rx_noise(...)` is ONE chain holding both ops,
+        not two variants. Branch from a copy:
+
+            base = Signal(seed=1, grid=g).carrier("nrz", n_ui=1024)
+            short = base.copy().lossy(loss_db=3, loss_at_ghz=8)
+            long = base.copy().lossy(loss_db=12, loss_at_ghz=8)       # base still has one op
+
+        The copy renders and digests exactly as the original does at the moment of copying
+        (same recipe, same samples, toleranced parts as drawn), and nothing done to either
+        afterwards reaches the other."""
+        import copy as _copy
+        return dataclasses.replace(self, ops=_copy.deepcopy(self.ops))
+
     def _streams(self, collect=False):
         """The streams this chain draws from when none are handed in."""
         if self.within is None:
