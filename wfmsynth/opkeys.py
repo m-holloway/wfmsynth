@@ -73,6 +73,7 @@ OP_KEYS = {
     "timing": frozenset({"phase_noise", "pj", "rj_ps", "ssc", "wander"}),
     "tx_ffe": frozenset({"pre", "spb", "taps"}),
     "upconvert": frozenset({"fc_hz", "fold_db", "phase_rad"}),
+    "use": frozenset({"name"}),
 }
 
 

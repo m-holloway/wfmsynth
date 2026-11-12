@@ -3258,6 +3258,94 @@ check("a switch is each input exactly wherever no change is in progress",
       np.array_equal(_qy[~_qbusy], _qideal[~_qbusy]) and _qbusy.sum() == 40 * len(_qev),
       f"{int((~_qbusy).sum())} samples outside the {len(_qev)} switching windows of 40 "
       f"samples: 0 differ from the selected input")
+print("== several correlated channels from one recipe (GitHub #78) ==")
+import json as _cjson                                                       # noqa: E402
+import wfmsynth as _cws                                                     # noqa: E402
+_cg = Grid(fs=320e9, baud=10e9, n=32 * 512)
+_cramp = np.arange(_cg.n, dtype=float)
+
+
+def _cclk():
+    return Signal().carrier("square", f_hz=5e9, tr_frac=0.3)
+
+
+def _cdat():
+    return Signal().carrier("nrz", n_ui=512, pattern="prbs7", tr_frac=0.3)
+
+
+def _ccross(y):
+    s = np.signbit(y)
+    i = np.nonzero(s[1:] != s[:-1])[0]
+    return i + y[i] / (y[i] - y[i + 1])
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _crec = _cws.Channels(
+        {"clk": _cclk().use("pll"), "data": _cdat().use("pll"),
+         "ramp": Signal().capture(values=_cramp).use("pll"),
+         "ramp3": Signal().capture(values=3.0 * _cramp + 7.0).use("pll"), "quiet": _cdat()},
+        shared={"pll": Signal().timing(phase_noise=dict(rms_ps=2.0))}, seed=1, grid=_cg)
+    _cx = _crec.waveforms()
+    _cideal = _cws.Channels({"clk": _cclk(), "data": _cdat()}, seed=1, grid=_cg).waveforms()
+    _cy = _crec.contrast("pll/timing/0")
+    _cback = _cws.Channels.from_recipe(_cjson.loads(_crec.to_json()))
+    _cz = _cback.waveforms()
+# a ramp through a timing warp reads back the displacement, so two ramps of different slope
+# recover the one shared source twice
+_cd1 = (_cramp - _cx["ramp"])[8:-8]
+_cd3 = (_cramp - (_cx["ramp3"] - 7.0) / 3.0)[8:-8]
+check("two channels through one shared timing source are displaced by the same samples",
+      abs(_cd1.std() / _cg.fs * 1e12 - 2.0) < 0.02 and np.abs(_cd1 - _cd3).max() < 1e-10,
+      f"{_cd1.std() / _cg.fs * 1e12:.4f} ps rms asked 2.0 (bound 1 %); the two recovered "
+      f"displacements differ by {np.abs(_cd1 - _cd3).max():.1e} samples (bound 1e-10)")
+_ctc, _ctd = _ccross(_cideal["clk"]), _ccross(_cideal["data"])
+_cjc, _cjd = _ccross(_cx["clk"]) - _ctc, _ccross(_cx["data"]) - _ctd
+_cdisp = _cramp - _cx["ramp"]
+_cerr = max(np.abs(_cjc - np.interp(_ctc + _cjc, _cramp, _cdisp)).max(),
+            np.abs(_cjd - np.interp(_ctd + _cjd, _cramp, _cdisp)).max())
+check("a clock and its data sharing a timing source carry the same jitter: every edge of "
+      "both sits on the one applied displacement",
+      _cerr < 0.01 * _cjc.std() and len(_ctc) == 511 and len(_ctd) > 200,
+      f"{len(_ctc)} clock and {len(_ctd)} data edges, TIE {_cjc.std():.3f} samples rms; "
+      f"worst edge is {_cerr:.4f} samples off the displacement (bound 1 % of rms)")
+_cmoved = {k: float(np.abs(_cy[k] - _cx[k]).max()) for k in ("clk", "data", "quiet")}
+check("re-rolling the shared role moves both channels that use it and not the one that does "
+      "not", _crec.roles() == ["pll/timing/0"] and _cmoved["clk"] > 0.1
+      and _cmoved["data"] > 0.1 and _cmoved["quiet"] == 0.0,
+      f"largest change clk {_cmoved['clk']:.3f}, data {_cmoved['data']:.3f}, "
+      f"quiet {_cmoved['quiet']:.1f}")
+check("a several-channel record replays bit-identically from its recipe, under one digest",
+      all(np.array_equal(_cx[k], _cz[k]) for k in _cx) and _cback.sha256() == _crec.sha256(),
+      f"{len(_cx)} channels, sha256 {_crec.sha256()[:16]}")
+
+
+def _clane():
+    return Signal().carrier("nrz", n_ui=512, pattern="prbs9", seed=9).lossy(loss_db=6.0,
+                                                                            loss_at_ghz=5.0)
+
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    _cxt = _cws.Channels({"victim": _cdat().crosstalk(aggressor=Signal().use("lane"),
+                                                      coupling=0.1), "lane": _clane()},
+                         seed=1, grid=_cg).waveforms()
+    _cref = Signal(seed=1, grid=_cg)
+    _cref.ops = _cdat().crosstalk(aggressor=_clane(), coupling=0.1).ops
+    _crefx, _crefa = _cref.waveform(), _cref.subchain("crosstalk/1/aggressor")
+check("a channel used as another's crosstalk aggressor is that channel: the victim equals "
+      "the sub-chain build of the same lane, and the aggressor is the lane's own output",
+      np.array_equal(_cxt["victim"], _crefx) and np.array_equal(_cxt["lane"], _crefa),
+      f"victim max difference {np.abs(_cxt['victim'] - _crefx).max():.1e}; the coupling "
+      f"moved it by up to {np.abs(_crefx - _cideal['data']).max():.3f}")
+try:
+    _cws.Channels({"a": _cdat().crosstalk(aggressor=Signal().use("b"), coupling=0.1),
+                   "b": _cdat().crosstalk(aggressor=Signal().use("a"), coupling=0.1)}, grid=_cg)
+    _cmsg = ""
+except ValueError as _ce:
+    _cmsg = str(_ce)
+check("two channels that name each other are refused naming the cycle",
+      "a -> b -> a is a cycle" in _cmsg, _cmsg[:34])
 
 print()
 if fails:

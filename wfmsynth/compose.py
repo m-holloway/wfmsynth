@@ -43,6 +43,7 @@ from . import physics as P
 from . import opkeys as OPKEYS
 from . import subchain as SUB
 from . import tolerance as TOL
+from . import channels as CH
 from . import instrument as INST
 from . import domain as DOMAIN
 from .grid import Grid
@@ -1295,6 +1296,10 @@ def _op_switch(x, p, streams, grid, idx):
         k: p[k] for k in ("select", "inputs", "threshold", "t_switch_s") if k in p})
 
 
+def _op_use(x, p, streams, grid, idx):
+    return CH.use(x, p["name"], streams)
+
+
 _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "capture": _op_capture, "lossy": _op_lossy, "reflect": _op_reflect,
          "crosstalk": _op_crosstalk, "ac_couple": _op_ac_couple, "digitize": _op_digitize,
@@ -1317,7 +1322,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert,
          "combine": _op_combine, "gain": _op_gain, "offset": _op_offset, "gate": _op_gate,
          "delay": _op_delay,
-         "sequence": _op_sequence, "switch": _op_switch}
+         "sequence": _op_sequence, "switch": _op_switch, "use": _op_use}
 
 
 # --------------------------------------------------------------- fabric: stage-kind homing
@@ -1355,7 +1360,10 @@ OP_KIND = {
     "combine": "general", "gain": "general", "offset": "general", "gate": "general",
     "delay": "general",
     "sequence": "source", "switch": "source",
+    "use": "general",
 }
+# `use` is whatever the named chain is -- a source, a timing source, a supply -- so, like the
+# general stages, where it sits is its meaning and it has no home kind.
 
 
 def op_kind(op_name):
@@ -1553,6 +1561,9 @@ _LEAD_REJECT = {
                "extending the message backward for a lead-in would change that integral, so "
                "the op is refused uniformly rather than being silently right for one kind and "
                "wrong for another",
+    "use": "the chain it names belongs to a several-channel record (`wfmsynth.channels`), "
+           "whose chains are all rendered on the one grid a lead-in would lengthen for this "
+           "chain alone",
     "capture": "a captured record has no synthesized pattern to extend backward in time -- "
                "unlike `carrier`, which renders more of the SAME periodic sequence for the "
                "guard, a lead-in here would have to invent history the capture never had",
@@ -1857,6 +1868,14 @@ class Signal:
         drawn again under `seed`, everything else -- ops, seed, noise -- the same. Returns a
         Signal, so the new unit's values are in its recipe. See `wfmsynth.tolerance`."""
         return TOL.as_unit(self, seed)
+
+    def use(self, name):
+        """The chain called `name` in the several-channel record this chain belongs to
+        (`ws.Channels`), at this point: as the first op it IS that chain's waveform (a shared
+        bit stream, another channel); after a source it is that chain's ops APPLIED here (a
+        shared timing source, a shared supply). Its randomness is drawn under ITS name, not
+        this channel's, so every channel that uses it sees the same realisation."""
+        return self._add("use", name=name)
 
     def annotate(self, **prov):
         """Attach provenance metadata (e.g. ``stage="channel", node="TP2"``) to the most
@@ -2956,7 +2975,7 @@ class Signal:
             plan = self.lead_plan()
         return self._run(streams, _extended=True, _plan=plan), plan
 
-    def _run(self, streams=None, collect_events=False, _extended=False, _plan=None):
+    def _run(self, streams=None, collect_events=False, _extended=False, _plan=None, _x=None):
         from .events import EventList
         if streams is not None and _plan is None:
             self = TOL.redrawn(self, streams)     # a re-rolled unit/* role is a sibling record
@@ -2965,7 +2984,7 @@ class Signal:
         ops = self.ops if plan is None else plan.ops
         grid = self.grid if plan is None else plan.grid
         win = None if plan is None else plan.window
-        x = None
+        x = _x                                  # a shared chain applied by `use` starts from one
         sink = [] if collect_events else None
         if collect_events:
             st = SUB.Namespaced(st, "", sink)       # so a sub-chain's events reach this list
@@ -3072,6 +3091,8 @@ class Signal:
                 out.append(f"events/{i}")
             elif op["op"] == "probe" and op.get("noise_rms"):
                 out.append(f"probe/{i}")
+            elif op["op"] == "timing" and (op.get("rj_ps") or op.get("phase_noise")):
+                out.append(f"timing/{i}")
         return out + SUB.roles(self) + TOL.roles(self.ops)
 
     def summary(self):
@@ -3192,6 +3213,10 @@ class Signal:
         WARNS if the recipe was written by a version whose numerics differ for an op it
         contains. `recipe()` has always recorded `wfmsynth_version`, and this never read it,
         which made the record write-only provenance -- see `NUMERIC_CHANGES`."""
+        if "channels" in r and "ops" not in r:
+            raise ValueError("Signal.from_recipe: this recipe has several channels, so it is "
+                             "not one Signal. ws.Channels.from_recipe(recipe).waveforms() "
+                             "renders all of them.")
         grid = Grid(**r["grid"]) if r.get("grid") else None
         s = cls(seed=r["seed"], grid=grid, lead_in=r.get("lead_in"), lead_out=r.get("lead_out"))
         ops = TOL.resolve_ops([dict(o) for o in r["ops"]], r["seed"])

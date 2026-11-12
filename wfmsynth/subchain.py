@@ -67,13 +67,16 @@ class Namespaced:
     still name one factor inside it exactly (`reroll("crosstalk/2/aggressor/jitter/0")`).
 
     `sink` is where a render that is collecting events puts them; a sub-chain reads it off the
-    view it was handed so that its own events reach the record's event list.
+    view it was handed so that its own events reach the record's event list. `record` is the
+    several-channel render this chain is part of, if any (`wfmsynth.channels`): it travels the
+    same way, so a `use` op inside a sub-chain can still find the chain it names.
     """
-    __slots__ = ("_st", "_pre", "sink")
+    __slots__ = ("_st", "_pre", "sink", "record")
 
     def __init__(self, st, pre, sink=None):
         self._st, self._pre = st, pre
         self.sink = sink if sink is not None else getattr(st, "sink", None)
+        self.record = getattr(st, "record", None)
 
     def role(self, name):
         return self._st.role(self._pre + str(name))

@@ -503,7 +503,10 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                # a duration, the join and its length, a segment's state, the threshold, the
                # switching time -- is moved against an exact or analytic result in
                # tests/test_sequence_switch.py.
-               "sequence", "switch"}
+               "sequence", "switch",
+               # `use` is another chain of a several-channel record, so it has no knob and no
+               # meaning in a lone carrier chain; tests/test_channels.py checks what it does.
+               "use"}
     missing = set(_EXEC) - covered - excused
     assert not missing, f"ops with no knob-moves-the-output row: {sorted(missing)}"
 

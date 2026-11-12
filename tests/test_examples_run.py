@@ -28,6 +28,7 @@ EXAMPLES = ROOT / "examples"
 # Demos: run with no arguments, print something, exit 0.
 DEMOS = [
     "analog_instrument.py",
+    "clock_and_data.py",
     "clock_recovery.py",
     "confounder_sweep.py",
     "events.py",
