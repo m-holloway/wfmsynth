@@ -41,8 +41,10 @@ THE CONVENTIONS, none of which is guessable:
   phase_noise    y = x * exp(j*theta(t)), theta a zero-mean Gaussian process whose one-sided
                  phase PSD is 2*L(f): `profile` is L(f) in dBc/Hz at offsets in Hz (L is
                  DEFINED as half the phase PSD, IEEE Std 1139), joined by straight lines on
-                 log-frequency / dB axes. NOTHING is drawn outside the stated offsets, so the
-                 integrated phase is the profile's own (`phase_rms_rad`).
+                 log-frequency / dB axes. NOTHING is drawn outside the stated offsets, and
+                 each FFT bin carries the profile's power over its own fs/n of offsets, so
+                 the expected mean-square phase is the profile's integral (`phase_rms_rad`)
+                 whatever the record length.
   awgn           y = x + n, n circular complex Gaussian, white across the whole sampled band.
                  Its level is one of three ratios against a REFERENCE POWER:
                      snr_db    P_ref / (N0 * bw_hz)    -- `bw_hz` is required: an SNR without
@@ -268,27 +270,38 @@ def profile_dbc_hz(f_hz, profile):
     return out
 
 
+def _phase_power(f_hz, profile):
+    """``integral of 2*L(f) df`` from the profile's first offset up to each of `f_hz`, in
+    rad**2: closed form on every straight segment, and flat outside the stated offsets."""
+    f, db = _profile(profile)
+    fq = np.clip(np.atleast_1d(np.asarray(f_hz, float)), f[0], f[-1])
+    total = np.zeros(fq.shape)
+    for f1, f2, d1, d2 in zip(f[:-1], f[1:], db[:-1], db[1:]):
+        a = (d2 - d1) / (10.0 * np.log10(f2 / f1))          # L = L1 * (f/f1)**a
+        r = np.clip(fq, f1, f2) / f1
+        total += 10.0 ** (d1 / 10.0) * f1 * (np.log(r) if abs(a + 1.0) < 1e-12
+                                             else (r ** (a + 1.0) - 1.0) / (a + 1.0))
+    return 2.0 * total
+
+
 def phase_rms_rad(profile):
     """The rms phase the profile integrates to, in rad: ``sqrt(integral of 2*L(f) df)`` over
     the stated offsets, in closed form for each straight segment."""
-    f, db = _profile(profile)
-    total = 0.0
-    for f1, f2, d1, d2 in zip(f[:-1], f[1:], db[:-1], db[1:]):
-        a = (d2 - d1) / (10.0 * np.log10(f2 / f1))          # L = L1 * (f/f1)**a
-        l1 = 10.0 ** (d1 / 10.0)
-        total += l1 * f1 * (np.log(f2 / f1) if abs(a + 1.0) < 1e-12
-                            else ((f2 / f1) ** (a + 1.0) - 1.0) / (a + 1.0))
-    return float(np.sqrt(2.0 * total))
+    return float(np.sqrt(_phase_power(_profile(profile)[0][-1], profile)[0]))
 
 
 def lo_noise(n, fs, profile, rng):
     """An oscillator's phase in rad at each of `n` samples: Gaussian, zero-mean, one-sided PSD
     ``2*L(f)`` at the profile's offsets and nothing elsewhere.
 
-    White Gaussian samples shaped in the frequency domain, so the spectrum is the stated one
-    at every bin rather than a filter's approximation of it; the process is periodic in the
-    record. It is NOT rescaled to the profile's rms: one record's rms phase is an estimate of
-    it (`Signal.rf_report()` gives both)."""
+    White Gaussian samples shaped in the frequency domain. EACH BIN CARRIES ITS OWN BAND'S
+    POWER: the integral of ``2*L(f)`` over the ``fs/n`` of offsets nearest that bin, not L at
+    the bin's centre times its width. So the expected mean-square phase is the profile's
+    integral (`phase_rms_rad`) at ANY record length -- including a profile whose close-in
+    part, where most of the power is, is narrower than a bin -- and a bin many of which span
+    a segment still reads the stated density. The process is periodic in the record. One
+    record is NOT rescaled to the profile's rms: its rms phase is one draw's estimate of it
+    (`Signal.rf_report()` gives both)."""
     f, _ = _profile(profile)
     n = int(n)
     if f[0] < fs / n or f[-1] > 0.5 * fs:
@@ -299,9 +312,15 @@ def lo_noise(n, fs, profile, rng):
             f"above, end it at or below Nyquist, or lengthen the record. Nothing is clipped "
             f"to fit.")
     fb = np.fft.rfftfreq(n, 1.0 / fs)
-    gain = np.zeros(len(fb))
-    # unit white noise has a one-sided PSD of 2/fs, and the phase wants 2*L(f)
-    gain[1:] = np.sqrt(10.0 ** (profile_dbc_hz(fb[1:], profile) / 10.0) * fs)
+    edges = np.minimum(np.append(fb[0], fb) + 0.5 * fs / n, 0.5 * fs)     # between the bins
+    power = np.diff(_phase_power(edges, profile))            # rad**2 in each bin's band
+    # unit white noise puts 2/n of its power in each bin (1/n at DC and at Nyquist)
+    share = np.full(len(fb), 2.0 / n)
+    share[0] = 1.0 / n
+    if n % 2 == 0:
+        share[-1] = 1.0 / n
+    gain = np.sqrt(power / share)
+    gain[0] = 0.0                                            # a constant phase is not noise
     return np.fft.irfft(np.fft.rfft(rng.standard_normal(n)) * gain, n)
 
 

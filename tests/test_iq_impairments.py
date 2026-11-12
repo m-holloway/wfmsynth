@@ -507,3 +507,23 @@ def test_lo_phase_refuses_to_add_phases_on_two_timebases():
          .downconvert(fc_hz=1e9, lpf=20e6, fs_out=250e6).freq_offset(f_hz=1e5))
     with pytest.raises(ValueError, match="not on one timebase"):
         s.lo_phase()
+
+
+@pytest.mark.parametrize("profile", [
+    [(1e4, -80), (1e6, -120)],                      # many bins across every segment
+    [(6.2e3, -70), (1e6, -120)],                    # starts just above the first bin
+    [(7e3, -60), (1.2e4, -110), (1e6, -120)],       # the close-in power sits between two bins
+    [(1e4, -80), (1.2e4, -80)],                     # the whole profile is inside one bin
+])
+@pytest.mark.parametrize("n", [1 << 16, 1 << 17])
+def test_phase_noise_delivers_the_profiles_rms_at_any_record_length(profile, n):
+    """Each bin carries the profile's power over its own band, so the mean-square phase is the
+    profile's integral however few bins the close-in part spans. Over 300 seeds the mean
+    square of a ONE-bin profile (the widest spread: two degrees of freedom a record) is known
+    to 1/sqrt(300) = 5.8 %, so its rms to 2.9 %; the bound is 3.5 sigma of that."""
+    fs = 400e6                                      # bins 6.1 kHz and 3.05 kHz apart
+    ms = np.mean([ws.rf.lo_noise(n, fs, profile, np.random.default_rng(s)).var()
+                  for s in range(300)])
+    ratio = np.sqrt(ms) / ws.rf.phase_rms_rad(profile)
+    print(f"n={n}: realised / stated rms = {ratio:.4f}")
+    assert abs(ratio - 1.0) < 0.10
