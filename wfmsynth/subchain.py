@@ -261,7 +261,8 @@ def same_grid(y, n, who, sub=None, grid=None, domain=DOMAIN.REAL):
     return y
 
 
-def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domain=DOMAIN.REAL):
+def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domain=DOMAIN.REAL,
+           is_record=False):
     """One nested-signal spec -> a real waveform of `n` samples. The resolver.
 
     `domain="iq"` is for the parameter that takes a PEER of an I/Q record (a segment, a
@@ -269,6 +270,9 @@ def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domai
 
     `at` is the namespace (`crosstalk/2/aggressor`): the prefix of every role the sub-chain
     draws and the `Event.at` of every event it places. `who` names the parameter in a refusal.
+    Those events are marked as NOT on the record (`Event.on_record`) -- they happened to the
+    aggressor, the enable -- unless `is_record` says the sub-chain's samples are the record's
+    (a `sequence` segment, a `switch` input).
 
     Two bodies are for the ops that had a form before this one existed. `carrier=` is a callable
     taking a bare carrier spec (`{"kind": "nrz", "n_ui": 64}`), which keeps that shorthand and
@@ -318,6 +322,7 @@ def render(spec, streams, grid, at, n, who, chain=_NO_CHAIN, carrier=None, domai
         y, placed = sub._run(st, collect_events=True)
         for e in placed:
             e.at = at + ("/" + e.at if e.at else "")
+            e.on_record = e.on_record and is_record
         sink.extend(placed.events)
     return same_grid(y, n, who, sub=sub, grid=grid, domain=domain)
 

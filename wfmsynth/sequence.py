@@ -225,15 +225,18 @@ def splice(waves, plan, join="cut", m=0):
     return y
 
 
-def _render(spec, streams, grid, at, who, keep=None, shift=0, domain="real"):
+def _render(spec, streams, grid, at, who, keep=None, shift=0, domain="real", is_record=False):
     """One sub-chain on the record's grid. Its events reach the record's list only if they
     fall in `keep` (a sample range of the CHAIN's own time), moved by `shift` samples onto the
-    record's -- a segment that restarts has its own clock."""
+    record's -- a segment that restarts has its own clock. `is_record`: its samples become
+    the record's, so its events are on the record (`Event.on_record`)."""
     sink = getattr(streams, "sink", None)
     if sink is None or keep is None:
-        return SUB.render(spec, streams, grid, at, grid.n, who, domain=domain)
+        return SUB.render(spec, streams, grid, at, grid.n, who, domain=domain,
+                          is_record=is_record)
     own = []
-    y = SUB.render(spec, SUB.Namespaced(streams, "", own), grid, at, grid.n, who, domain=domain)
+    y = SUB.render(spec, SUB.Namespaced(streams, "", own), grid, at, grid.n, who, domain=domain,
+                   is_record=is_record)
     for e in own:
         if keep[0] <= e.sample < keep[1]:
             e.sample += shift
@@ -254,7 +257,7 @@ def run_sequence(streams, grid, idx, segments=None, join="cut", t_join_s=None):
         waves.append(_render(seg["chain"], streams, grid, f"sequence/{idx}/segments/{k}/chain",
                              f"sequence: segments[{k}]: `chain`",
                              keep=(a, a + count), shift=s["start"] - a,
-                             domain=getattr(grid, "domain", "real")))
+                             domain=getattr(grid, "domain", "real"), is_record=True))
     sink = getattr(streams, "sink", None)
     if sink is not None:
         for s in plan[1:]:
@@ -342,12 +345,23 @@ def run_switch(streams, grid, idx, select=None, inputs=None, threshold=0.5, t_sw
         raise ValueError("switch needs select=<a sub-chain>: the signal whose level chooses "
                          "the input (a Signal, {'ops': [...]} or {'from': <recipe>}).")
     sel = _render(select, streams, grid, f"switch/{idx}/select", "switch: `select`")
-    ins = [_render(s, streams, grid, f"switch/{idx}/inputs/{k}", f"switch: `inputs`[{k}]",
-                   domain=getattr(grid, "domain", "real"))
-           for k, s in enumerate(inputs)]
-    y, changes = mux(sel, ins, thr, m)
     sink = getattr(streams, "sink", None)
+    ins, placed = [], []
+    for k, s in enumerate(inputs):
+        own = [] if sink is not None else None
+        ins.append(_render(s, streams if own is None else SUB.Namespaced(streams, "", own),
+                           grid, f"switch/{idx}/inputs/{k}", f"switch: `inputs`[{k}]",
+                           domain=getattr(grid, "domain", "real"), is_record=True))
+        placed.append(own)
+    y, changes = mux(sel, ins, thr, m)
     if sink is not None:
+        # an input's event is on the record where that input is on the line
+        on_line = np.searchsorted(thr, np.asarray(sel, float), side="left")
+        for k, own in enumerate(placed):
+            for e in own:
+                lo, hi = e.span(len(y))
+                e.on_record = e.on_record and bool(np.any(on_line[lo:hi] == k))
+            sink.extend(own)
         for c, cross, was, now, level in changes:
             sink.append(Event(
                 sample=c, kind="switch", severity=0.0, t_s=float(cross / grid.fs),

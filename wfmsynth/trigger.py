@@ -65,8 +65,8 @@ GROUND TRUTH. `Signal.realize()` returns one `Event(kind="trigger")` per trigger
   params.start         the window's first sample in the long render
   params.level, .condition, and .width_s / .peak for a width or runt trigger
   params.dropped       how many events of the long render fell outside every window
-Its `at` is `trigger/<op index>`: it is an observation, not a change to the samples, so
-`EventList.on_record()` and `mask()` leave it out. Events already realised on the long render
+Its `at` is `trigger/<op index>` and its `on_record` False: it is an observation, not a
+change to the samples, so `EventList.on_record()` and `mask()` leave it out. Events already realised on the long render
 (an `events` op, a comparator's transitions, a sub-chain's) are re-timed into the window that
 holds them and the rest are dropped, counted in `dropped`.
 
@@ -348,8 +348,7 @@ def _refuse(q, found, picks, n_fit, need, n, fs, room_s, src):
 # ------------------------------------------------------------------ the acquisition itself
 def apply(x, fs, *, pre_s, post_s, condition="edge", level=None, slope="rising",
           hysteresis=0.0, width_s=None, runt_level=None, holdoff_s=0.0, jitter_s=0.0,
-          n_segments=1, average=1, rng=None, on=None, events=None, placement="trigger",
-          event_scale=1.0):
+          n_segments=1, average=1, rng=None, on=None, events=None, placement="trigger"):
     """Cut the triggered window(s) out of the long render `x` (sampled at `fs`). See the module
     docstring for the parameters.
 
@@ -358,9 +357,7 @@ def apply(x, fs, *, pre_s, post_s, condition="edge", level=None, slope="rising",
 
     `events`, when given, is the list of events already realised on the long render. It is
     rewritten in place onto the delivered record -- re-timed into the window that holds each
-    one, the rest dropped -- and one `Event(kind="trigger")` per trigger is appended.
-    `event_scale` converts those events' `sample` to this record's samples when an earlier op
-    changed the rate (`fs` now / `fs` they were placed at)."""
+    one, the rest dropped -- and one `Event(kind="trigger")` per trigger is appended."""
     q = check(dict(pre_s=pre_s, post_s=post_s, condition=condition, level=level, slope=slope,
                    hysteresis=hysteresis, width_s=width_s, runt_level=runt_level,
                    holdoff_s=holdoff_s, jitter_s=jitter_s, n_segments=n_segments,
@@ -404,7 +401,7 @@ def apply(x, fs, *, pre_s, post_s, condition="edge", level=None, slope="rising",
         win = win.reshape(q["n_segments"], q["average"], n_win).mean(1)
     if events is not None:
         from .events import Event
-        dropped = _retime(events, starts, n_win, fs, event_scale, q["average"])
+        dropped = _retime(events, starts, n_win, fs, q["average"])
         for k, p in enumerate(picks):
             seg = k // q["average"]
             pos = t[p] * fs - starts[k]                    # the crossing, in window samples
@@ -419,26 +416,23 @@ def apply(x, fs, *, pre_s, post_s, condition="edge", level=None, slope="rising",
                 sample=seg * n_win + int(math.ceil(pos)), kind="trigger", severity=0.0,
                 t_s=float((seg * n_win + pos) / fs), width=1,
                 direction=float(found["direction"][p]), placement=placement, at=placement,
-                params=par))
+                on_record=False, params=par))
     return win.ravel()
 
 
-def _retime(events, starts, n_win, fs, scale, average):
+def _retime(events, starts, n_win, fs, average):
     """Move the long render's events onto the delivered record, in place; return how many
     fell outside every window. Windows never overlap, so an event is in at most one."""
     kept = []
     for e in events:
-        pos = e.sample if scale == 1.0 else int(math.floor(e.sample * scale))
-        k = int(np.searchsorted(starts, pos, "right")) - 1
-        if k < 0 or pos >= starts[k] + n_win:
+        k = int(np.searchsorted(starts, e.sample, "right")) - 1
+        if k < 0 or e.sample >= starts[k] + n_win:
             continue
         seg = k // average
         move = seg * n_win - int(starts[k])
-        e.sample = pos + move
+        e.sample += move
         if e.t_s is not None:
             e.t_s = float(e.t_s + move / fs)
-        if e.width is not None and scale != 1.0:
-            e.width = int(math.ceil(e.width * scale))
         if average > 1:
             e.params["shot"] = k % average
         kept.append(e)

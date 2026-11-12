@@ -309,7 +309,7 @@ def _sigmf(path, who="capture"):
                             annotations_to_events(meta.get("annotations") or [])]}
 
 
-_CARRIED = ("severity", "t_s", "ui", "direction", "placement", "params", "at")
+_CARRIED = ("severity", "t_s", "ui", "direction", "placement", "params", "at", "on_record")
 
 
 def events_to_annotations(events):
@@ -581,8 +581,8 @@ def _marker_bytes(events, n):
     m = np.zeros(n, np.uint8)
     for e in events or ():
         e = e if isinstance(e, Event) else Event(**e)
-        if e.at:
-            continue                        # an event inside a sub-chain is not on these samples
+        if not e.on_record:
+            continue                        # e.g. an aggressor's: not on these samples
         lo, hi = e.span(n)
         m[lo:hi] = 1
     return m
@@ -598,8 +598,8 @@ def to_interleaved(path, x, dtype="float32", byteorder="little", scale=None, eve
     refused rather than clipped if the record does not fit.
 
     `events=` also writes a MARKER channel, ``<path>.markers``: one uint8 per sample, 1 across
-    each event's span (its `sample` for `width` samples) and 0 elsewhere. Events inside a
-    sub-chain (`Event.at`) are not on these samples and are left out. The file states nothing
+    each event's span (its `sample` for `width` samples) and 0 elsewhere. Events that are not
+    on these samples (`Event.on_record` False: an aggressor's, a trigger) are left out. The file states nothing
     about itself, so the returned dict is what a reader needs:
     ``{"path", "markers", "dtype", "byteorder", "scale", "n"}``."""
     v, dt, order, s = _encode(x, dtype, byteorder, scale, "to_interleaved")

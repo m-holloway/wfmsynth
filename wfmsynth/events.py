@@ -40,6 +40,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import math
+
 import numpy as np
 
 
@@ -75,9 +77,14 @@ class Event:
     # "" for an event on the record itself. For one placed inside a SUB-CHAIN this is that
     # sub-chain's namespace (`crosstalk/2/aggressor`): the event happened to the aggressor, at
     # this sample of the shared grid, and reached the record only through the op that holds it.
-    # A `trigger` event carries `trigger/<op index>`: it is an observation of the record, not a
-    # change to its samples.
     at: str = ""
+    # Whether the event is ON THESE SAMPLES: what `EventList.on_record()`, `mask()` and
+    # `overlapping()` go by. False for one that reached the record only through another op (an
+    # aggressor's glitch, an enable's edge) and for an observation that changed nothing (a
+    # `trigger`). A sub-chain that BECOMES the record -- a `sequence` segment, a `switch` input
+    # while it is selected, a shared chain brought in by `use` -- keeps `at` for where its
+    # event came from, and stays on the record.
+    on_record: bool = True
 
     def span(self, n=None):
         w = 1 if self.width is None else max(int(self.width), 1)
@@ -102,6 +109,8 @@ class Event:
                            if k not in ("_n_ui",)}
         if self.at:
             d["at"] = str(self.at)
+        if not self.on_record:
+            d["on_record"] = False
         return d
 
 
@@ -121,10 +130,12 @@ class EventList:
         return [e.to_dict() if isinstance(e, Event) else dict(e) for e in self.events]
 
     def on_record(self):
-        """The events placed on the record itself. One placed inside a sub-chain (`Event.at`)
-        is in this list as ground truth about that sub-chain, but it did not modify these
-        samples, so a window is not labelled with it and the mask does not cover it."""
-        return [e for e in self.events if not getattr(e, "at", "")]
+        """The events on the record's own samples (`Event.on_record`). One inside a sub-chain
+        that only reached the record through another op -- a coupled aggressor, an enable --
+        is in this list as ground truth about that sub-chain, but a window is not labelled
+        with it and the mask does not cover it. One inside a chain that IS the record (a
+        `sequence` segment, a selected `switch` input, a `use`d chain) counts."""
+        return [e for e in self.events if getattr(e, "on_record", True)]
 
     def overlapping(self, start, stop):
         out = []
@@ -143,6 +154,48 @@ class EventList:
             if hi > lo:
                 g[lo:hi] = 1.0
         return g
+
+
+def rescale(events, scale, n):
+    """Move `events` onto a record stored at `scale` times the rate they were placed at and
+    `n` samples long, in place: `sample` floored onto the new grid, `width` scaled (never
+    below one sample), `t_s` kept -- time did not move. An event whose sample is past the end
+    of the shorter record is no longer on it and is removed."""
+    kept = []
+    for e in events:
+        pos = e.sample if scale == 1.0 else int(math.floor(e.sample * scale))
+        if not 0 <= pos < n:
+            continue
+        e.sample = pos
+        if e.width is not None and scale != 1.0:
+            e.width = max(int(math.ceil(e.width * scale)), 1)
+        kept.append(e)
+    events[:] = kept
+
+
+def shift(events, by, fs, n):
+    """Move `events` through a delay of `by` seconds (a number, or one value per sample of the
+    record), in place. The output at time t is the input at ``t - by(t)``, so an event at input
+    sample s arrives where ``t = s + by(t)``: `sample` and `t_s` are later by the delay AT THE
+    ARRIVAL, found by iterating that (it converges because a delay changes by less than one
+    second per second). One delayed past the end of the `n`-sample record is removed."""
+    kept = []
+    for e in events:
+        if np.ndim(by) == 0:
+            d = float(by)
+        else:
+            pos = float(e.sample)
+            for _ in range(32):
+                d = float(by[min(max(int(round(pos)), 0), n - 1)])
+                pos = e.sample + d * fs
+        pos = int(e.sample) + int(round(d * fs))
+        if pos >= n:
+            continue
+        e.sample = pos
+        if e.t_s is not None:
+            e.t_s = float(e.t_s + d)
+        kept.append(e)
+    events[:] = kept
 
 
 def step_overshoot_fraction(zeta):

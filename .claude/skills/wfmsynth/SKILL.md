@@ -266,9 +266,13 @@ Composition added these. Each renders, replays and digests cleanly, and is wrong
 32. **After `trigger` or `downconvert(fs_out=)`, as after `acquire`, `sig.grid` is not the
     record** (#17): measure with `sig.stored_grid(x)`. A trigger's crossing is at `pre_s` only
     to half a sample; the exact time is the trigger event's `t_s`.
-33. **An event with `e.at` set did not happen to this record's samples** — it is inside a
-    sub-chain (an aggressor's glitch) or is a trigger firing. `mask()` and `overlapping()` skip
-    them; a loop over `events` does not. Label from `events.on_record()`.
+33. **Label from `events.on_record()`.** `e.on_record` is False for an event that reached the
+    record only through another op (an aggressor's glitch, an enable's edge) and for a trigger
+    firing; `mask()` and `overlapping()` skip those, a loop over `events` does not. `e.at` says
+    which sub-chain an event came from: a chain that IS the record (a `sequence` segment, a
+    `switch` input while selected, a chain brought in by `use`) keeps its events on it. Labels
+    follow the samples through `acquire`, `downconvert(fs_out=)`, `trigger` and `delay`; a
+    `filter` moves them by `filter_delays()`, which you add.
 34. **Split a unit dataset on `ws.unit_of(recipe)`.** A random split puts captures of one unit
     on both sides and reads as generalisation: MEASURED 1.7 ohm error random against 31.3 ohm
     on held-out units, where answering the nominal scores 30.2. Also: a tolerance is drawn when

@@ -34,7 +34,9 @@ The rule that decided what became an op and what did not is in
   `net` driver's `source`. `Signal.summary()` prints a chain as a tree,
   `subchains()` / `subchain(namespace)` return a sub-chain and its waveform exactly as used, and
   `roles()` / `contrast()` reach inside under the namespace (`crosstalk/1/aggressor/jitter/0`).
-  An event inside a sub-chain is listed with `Event.at` set; `EventList.on_record()` is the
+  An event inside a sub-chain is listed with `Event.at` set and, unless that chain's samples
+  are the record's (a `sequence` segment, a selected `switch` input, a `use`d chain),
+  `Event.on_record` False; `EventList.on_record()`, which `mask()` goes by, is the
   rest. A sub-chain off the record's grid is refused, never resampled.
 - **`combine`, and `gain` / `offset` / `gate` / `delay` driven by a signal** (#76, #79).
   `combine(others, how="sum"|"product"|"min"|"max", gains=)`; the other four take `by=`, a
@@ -108,6 +110,12 @@ None of these moves a rendered sample.
 - **Three parameter shapes are now reserved in a recipe**: a dict with a list under `ops` or a
   dict under `from` is a sub-chain, and a dict holding `nom`, `tol_pct`, `tol_abs` or `corners`
   is a toleranced value. No existing op parameter used them.
+- **Labels follow the samples through a rate change and a delay.** After `acquire`,
+  `digitize(n_out=)`, `sample_clock(n_out=)` or `downconvert(fs_out=)` an upstream event's
+  `sample` and `width` are on the stored record (they used to stay on the synthesis grid and
+  point past its end: 36 of 40 labels on a 4:1 acquisition), and one past a shortened record
+  is dropped. `delay` moves upstream events by the delay where they land. Samples are
+  unchanged, so no recipe's waveform moves.
 - `stage_kinds()` reports `general` for the ops whose position is their meaning (`law`,
   `filter`, the joins, `use`, the I/Q impairments), and `canonical()` refuses a chain holding
   one rather than sort it.

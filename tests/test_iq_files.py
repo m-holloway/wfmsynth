@@ -109,7 +109,7 @@ def _events(x):
         ws.Event(sample=4000, kind="glitch", width=37, severity=0.8, direction=-1.0, ui=400,
                  t_s=4000 / FS, placement="edges", params={"f0": 1.5e9, "tau": 2e-10}),
         ws.Event(sample=250, kind="ring", width=12, t_s=250 / FS, placement="symbols",
-                 at="crosstalk/1/aggressor"),
+                 at="crosstalk/1/aggressor", on_record=False),
     ], n=len(x))
 
 

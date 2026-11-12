@@ -47,6 +47,7 @@ from . import channels as CH
 from . import instrument as INST
 from . import domain as DOMAIN
 from . import trigger as TRIG
+from . import events as EV
 from .grid import Grid
 from .streams import Streams
 from .stages import LAW_KEYS as _LAW_KEYS, FILTER_KEYS as _FILTER_KEYS
@@ -704,7 +705,7 @@ def _op_acquire(x, p, streams, grid, idx):
     return taps[p.get("tap", "stored")]
 
 
-def _op_trigger(x, p, streams, grid, idx, sink=None, event_scale=1.0):
+def _op_trigger(x, p, streams, grid, idx, sink=None):
     """Cut the triggered window(s) out of the long render. `grid` is the grid the record is on
     NOW (after an `acquire`, the acquisition's)."""
     kw = {k: p[k] for k in ("pre_s", "post_s", "condition", "level", "slope", "hysteresis",
@@ -714,7 +715,7 @@ def _op_trigger(x, p, streams, grid, idx, sink=None, event_scale=1.0):
     # another channel -- and the window is cut out of `x` either way
     on = SUB.signal(p, "on", streams, grid, idx, n=len(x)) if p.get("on") is not None else None
     return TRIG.apply(x, grid.fs, on=on, rng=streams.role(f"trigger/{idx}"), events=sink,
-                      placement=f"trigger/{idx}", event_scale=event_scale, **kw)
+                      placement=f"trigger/{idx}", **kw)
 
 
 _EVENT_SKIP = {"op"}
@@ -1311,10 +1312,22 @@ def _op_gate(x, p, streams, grid, idx):
 
 
 def _op_delay(x, p, streams, grid, idx):
+    """A delay moves the labels with the samples: every event already on the waveform is
+    later by the delay AT that event, and one pushed past the end is gone with its samples."""
     from . import joins as JN
-    return JN.delay(_joined(x, p), _by(p, streams, grid, idx, len(x)),
-                    None if grid is None else grid.fs,
-                    max_rate=p.get("max_rate", JN.DELAY_MAX_RATE))
+    sink = getattr(streams, "sink", None)
+    upstream = list(sink or ())               # before `by` renders: its own events stay put
+    by = _by(p, streams, grid, idx, len(_joined(x, p)))
+    y = JN.delay(x, by, None if grid is None else grid.fs,
+                 max_rate=p.get("max_rate", JN.DELAY_MAX_RATE))
+    if upstream:
+        gone = {id(e) for e in upstream}
+        EV.shift(upstream, by, grid.fs, len(y))
+        gone -= {id(e) for e in upstream}
+        sink[:] = [e for e in sink if id(e) not in gone]
+    return y
+
+
 def _op_sequence(x, p, streams, grid, idx):
     """Chains joined in time (`wfmsynth/sequence.py`). A source: it starts the chain."""
     from . import sequence as SEQ
@@ -1854,9 +1867,15 @@ def _lead_size(spec, ops, grid, seed, n, p_quantum, measured=None, floor=0):
     return L, k, measured
 
 
-def _stored_rate(ops, fs, n):
+# the ops that store the record at another rate or length: what `_stored_rate` walks
+_RESTORES = ("acquire", "digitize", "sample_clock", "downconvert")
+
+
+def _stored_rate(ops, fs, n, peak_ok=False):
     """``(fs, n)`` of the record after `ops`, starting from a grid of `fs` and `n`: the ops
-    that store at their own rate, resample or shorten the record, walked in order."""
+    that store at their own rate, resample or shorten the record, walked in order. `peak_ok`
+    lets a peak-hold acquisition through as the rate of its (min, max) pairs, which is what an
+    event's sample index needs; a timebase for a measurement it is not."""
     for op in ops:
         name = op["op"]
         if name == "acquire":
@@ -1864,7 +1883,7 @@ def _stored_rate(ops, fs, n):
             fs, n = float(prof["sample_rate_hz"]), int(prof["record_length"])
             dec = prof.get("decimation") or {}
             if dec.get("depth"):
-                if dec.get("mode", "sample") == "peak_hold":
+                if dec.get("mode", "sample") == "peak_hold" and not peak_ok:
                     raise ValueError(
                         "stored_grid: acquire(decimation=peak_hold) returns a (2, depth) "
                         "min/max record, not a waveform on a timebase, so there is no grid "
@@ -3296,7 +3315,7 @@ class Signal:
                 now = (None if grid is None and name in _RATE_NOW
                        else _grid_now(ops[:i], grid, x, *was))
             if name == "trigger":
-                x = _op_trigger(x, op, st, now, i, sink=sink, event_scale=now.fs / grid.fs)
+                x = _op_trigger(x, op, st, now, i, sink=sink)
             elif name == "law":
                 x = _op_law(x, op, st, now, i, sink=sink)
             elif name in DOMAIN.EMITS or name in _RATE_NOW:
@@ -3307,6 +3326,11 @@ class Signal:
                 x = _EXEC[name](x, op, st, grid, i, win=win)   # range the vertical to the window
             else:
                 x = _EXEC[name](x, op, st, grid, i)
+            if sink and name in _RESTORES:
+                # the labels follow the samples onto the stored record: its rate, its length
+                was_fs, now_fs = (_stored_rate(ops[:k], float(grid.fs), int(grid.n),
+                                               peak_ok=True)[0] for k in (i, i + 1))
+                EV.rescale(sink, now_fs / was_fs, x.shape[-1])
             if doms[i][0] == DOMAIN.IQ and not np.iscomplexobj(x):
                 raise ValueError(f"{op['op']} (op {i}) returned a real array for a complex "
                                  f"baseband record: it dropped the imaginary part. An op "
