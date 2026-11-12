@@ -132,7 +132,7 @@ None of these moves a rendered sample.
 - **No `NUMERIC_CHANGES` entry was needed.** Recipe digest, samples, JSON replay, `contrast()`
   output and event lists were compared against `main` at the branch's head: 16 of 16 chains covering every pre-existing signal-taking form, 259 of 259 renders in common (mixed chains, lead-ins and every example `main` ships; two further recipes embed a temporary path and differ between two runs of `main` itself), and 18 of 18 acquisition and capture chains, one of which differs only in its `roles()` list. The comparison scripts were run from outside the tree and are not shipped; in the tree, `tests/test_byte_identity.py` pins the default path.
 - **Each effect is asserted against an analytic result or an independent method**, in
-  `wfmsynth.validate` (428 checks) and the test suite (2160 tests): a sub-chain against
+  `wfmsynth.validate` (429 checks) and the test suite (2249 tests): a sub-chain against
   the same chain rendered alone and coupled by hand (equal); Bessel-4 `filter` against the
   scope front end (equal); a product `combine` against `modulate` OOK (equal); the delay's
   error against the exact trigonometric interpolant; trigger instants against an independent
@@ -142,7 +142,23 @@ None of these moves a rendered sample.
 - **What a stage cannot do honestly it refuses, by name, with the alternative.** Nothing is
   resampled to fit, truncated, clipped on export, or stripped of an imaginary part.
 
+- **A review round before release** (four independent reviewers, every finding reproduced
+  first) fixed what the new surface got wrong, with the test that would have caught each:
+  the general stages after an `acquire` or a decimating `downconvert` ran at the synthesis
+  rate (a 2 GHz corner landed at 0.5 GHz); `phase_noise` under-delivered a profile whose
+  close-in power fell between FFT bins (0.0019 rad for a stated 0.0263); defects in a
+  `sequence` segment, a selected `switch` input or a `use`d chain were left out of `mask()`;
+  `contrast()` with a mistyped role returned the record unchanged; `iq()` recorded and
+  ignored a second symbol source. After it, the suite's renders were compared again: 721
+  recipes in common with `main`, 0 differ; against the branch before the round, the 59 that
+  differ all hold a `phase_noise` op.
+
 ### Known gaps
+
+- The named link and instrument ops (`scope`, `probe`, `lossy`, `events`, ...) placed AFTER
+  an `acquire` still read the synthesis grid's rate, as on `main`: `scope(bw_hz=2e9)` after
+  an 80 -> 20 GSa/s acquisition has its -3 dB point at 0.5 GHz. Put them before the
+  acquisition; `filter` after it runs at the stored rate.
 
 - `carrier("square")` and `carrier("cmos")` place each edge on the nearest sample (measured at
   64 GSa/s: 15.6 ps peak to peak). Fixing it moves existing records and needs a

@@ -267,7 +267,10 @@ Composition added these. Each renders, replays and digests cleanly, and is wrong
     amplitude 0.03 with `offset=1.0`; without the offset the record is multiplied by a signal
     that crosses zero. `delay(by=)` is in seconds.
 32. **After `trigger` or `downconvert(fs_out=)`, as after `acquire`, `sig.grid` is not the
-    record** (#17): measure with `sig.stored_grid(x)`. A trigger's crossing is at `pre_s` only
+    record** (#17): measure with `sig.stored_grid(x)`. The general stages (`filter`, `law`,
+    `delay`, `gate`, `gain`, `offset`, `combine`) and the I/Q impairments placed after one run
+    at the stored rate, so their Hz and seconds mean what they say; the NAMED link and
+    instrument ops (`scope`, `lossy`, `events`, ...) belong before the acquisition. A trigger's crossing is at `pre_s` only
     to half a sample; the exact time is the trigger event's `t_s`.
 33. **Label from `events.on_record()`.** `e.on_record` is False for an event that reached the
     record only through another op (an aggressor's glitch, an enable's edge) and for a trigger

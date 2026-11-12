@@ -792,9 +792,8 @@ blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbo
 
 **Deferred, each with the hook that is already there.**
 
-1. `unit_dataset` for a `Channels` record, and a partial unit re-roll in one
-   (`contrast("a/unit/1/r")` is refused; only `unit/*`). `Channels.unit` and `unit_of` are the
-   base.
+1. (Done, 0.46.0.) `unit_dataset` and `dataset` take a builder that returns a `Channels`,
+   and `Channels.contrast` re-rolls one part as `Signal.contrast` does.
 2. `delay` on an envelope (a shift plus the -2&pi;·fc·delay rotation), a trigger on I/Q
    magnitude, a complex `by`, receiver-side I/Q imbalance, and a baseband-equivalent channel
    (`lossy`/`sparam` about `fc_hz`).
@@ -802,8 +801,11 @@ blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbo
    outside the domain model.
 4. `measure` / `eye` cast complex input to float unguarded.
 5. A whole-chain delay report: `filter_delays()` covers `filter` ops only.
-6. Four crossing finders and three events-onto-another-clock helpers exist across `stages`,
-   `joins`, `sequence` and `trigger`; they agree and are tested, and want consolidating.
+6. Crossing finders: `law("comparator")` and `trigger` now run one state machine
+   (`stages.schmitt`); `gate` and `switch` are memoryless comparisons and keep their own two
+   lines. Events onto another clock: a rate change and a delay go through `events.rescale` /
+   `events.shift`; `trigger._retime`, `stages.window_events` and the segment shift in
+   `sequence._render` each still carry their own.
 
 **Needs a ruling** (found, not changed, because each moves existing output or API):
 
@@ -825,6 +827,14 @@ blind phase estimator in `rf.evm`; a `Signal`-level EVM convenience; a per-symbo
    not only a frequency, and `fs_out_hz=` / `lpf_hz=` are refused naming them.)
 8. `net`'s `{"ops": Signal}` drops that Signal's seed and grid silently (the generic sub-chain
    path refuses the same thing); `Signal.unit()` does not move a `{"from": recipe}` record.
+9. The NAMED link and instrument ops (`scope`, `probe`, `lossy`, `events`, ...) placed after
+   an `acquire` still read the synthesis grid's rate: `scope(bw_hz=2e9)` after an 80 -> 20
+   GSa/s acquisition has its -3 dB point at 0.5 GHz (measured; the same on `main`). The
+   general stages and the I/Q impairments were moved to the record's own rate in 0.46.0 because
+   they were new; moving these changes released records and needs a `NUMERIC_CHANGES` entry,
+   or a refusal.
+10. `coded(bits=, prbs=)` lets `bits` win and records `prbs` unused (as on `main`); `iq` now
+    refuses the same pair.
 
 ## Known limitations and claim boundaries
 
