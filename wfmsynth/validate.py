@@ -4258,6 +4258,18 @@ check("combine on a field is a coupler: two unit fields a phase apart detect as 
       f"detected power at 0/60/90/120/180 deg: {np.round(_opow, 6).tolist()}; worst error "
       f"against 2 (1 + cos) {_oerr:.1e}")
 
+# ---- a complex gain on a field is one arm's loss and phase (the number #89 gave an envelope)
+_oarm = np.array([_ocw().combine(_ocw().gain(by=np.exp(1j * p))).photodetect(shot=False)
+                  .waveform().mean() for p in _ophis])
+_oaerr = np.abs(_oarm - 2.0 * (1.0 + np.cos(_ophis))).max()
+_oamov = _qrefusal(lambda: _ocw().gain(by=_sws.recipes.fading(doppler_hz=2e9)).waveform())
+check("  ... and gain(by=<complex number>) on one arm is its phase: the same 2 (1 + cos phase) "
+      "from an interferometer whose arm is turned by the gain; a complex gain that MOVES is "
+      "an I/Q chain and is refused on a field",
+      _oaerr < 1e-12 and "COMPLEX waveform" in _oamov,
+      f"detected power with the arm at 0/60/90/120/180 deg: {np.round(_oarm, 6).tolist()}; "
+      f"worst error {_oaerr:.1e}; refusal: {_oamov[:80]}...")
+
 # ---- two lasers: each its own linewidth role, and the beat averages to the incoherent sum
 _odv = 200e6
 with warnings.catch_warnings():
@@ -4671,6 +4683,195 @@ check("1/f noise is a COMPOSITION of two-state processes (`recipes.flicker`), no
       f"slope {_hslope:.3f} (bound -1 +/- 0.1) by Welch over 2.1 s; against `flicker_psd` "
       f"mean {_hfdb.mean():+.2f} dB (bound 0.5), rms {_hfdb.std():.2f} dB (bound 1.0); rms "
       f"{_hxf.std():.4f} for 0.1 stated; {len(_hfl.roles())} roles, one per process")
+
+# ============================================================ an OFDM source (GitHub #88)
+print("\n== OFDM: an inverse FFT per symbol, its receiver, and the error per resource element ==")
+from wfmsynth import ofdm as _ofm
+
+_ofnum = dict(n_fft=64, scs_hz=312.5e3, cp=16, active=52)
+_ofseed = 0x2F6E15                       # a PRBS state away from the sparse start at state 1
+
+
+def _ofsrc(n_sym, over=1, **kw):
+    p = dict(_ofnum, constellation="qam16", prbs=15, prbs_seed=_ofseed)
+    p.update(kw)
+    return Signal(seed=1, grid=Grid(fs=20e6 * over, n=80 * over * n_sym)).ofdm(**p)
+
+
+_oferr = {}
+for _ofname, _ofover, _ofkw in (("1x", 1, {}), ("4x", 4, {}),
+                                ("4x, edge window 8, pilots, cp 20/12", 4,
+                                 dict(window=8, pilots=[-21, -7, 7, 21], cp=[20, 12]))):
+    _ofs = _ofsrc(40, _ofover, **_ofkw)
+    _oferr[_ofname] = float(np.abs(_ofm.demodulate(_ofs.waveform(), _ofs.grid, _ofs.ops[0])
+                                   - _ofs.transmitted()[0]).max())
+# the record against the stated sum, with no FFT in it: symbol 2 of a 3x record, prefix included
+_ofs = _ofsrc(4, 3, amp=0.7)
+_ofrg = _ofm.resource_grid(_ofs.ops[0], _ofs.grid)
+_ofa, _ofn = int(_ofrg["start"][2]), int(_ofrg["samples"][2])
+_oft = (np.arange(_ofa, _ofa + _ofn) - _ofrg["useful"][2]) / _ofs.grid.fs
+_ofsum = 0.7 / np.sqrt(52) * (_ofrg["grid"][2][None, :] * np.exp(
+    2j * np.pi * 312.5e3 * np.outer(_oft, _ofrg["subcarriers"]))).sum(axis=1)
+_ofdirect = float(np.abs(_ofs.waveform()[_ofa:_ofa + _ofn] - _ofsum).max())
+check("an OFDM record is the stated sum of its subcarriers, and the receiver with the same "
+      "parameters returns the resource grid to rounding (bound 1e-12) -- on the FFT rate, on "
+      "a whole multiple of it, and with an edge window, pilots and unequal prefixes",
+      max(_oferr.values()) < 1e-12 and _ofdirect < 1e-12,
+      "largest |demodulated - sent|: " + "; ".join(f"{k}: {v:.1e}" for k, v in _oferr.items())
+      + f"; largest |record - direct sum of 52 exponentials| over one symbol: {_ofdirect:.1e}")
+
+_ofrate = _qrefusal(lambda: Signal(grid=Grid(fs=30.72e6, n=4096)).ofdm(
+    constellation="qpsk", prbs=9, **_ofnum).waveform())
+_ofm.register("validate_set", source="wfmsynth.validate, not a standard", **_ofnum)
+_ofnamed = Signal(seed=1, grid=Grid(fs=20e6, n=800)).ofdm("validate_set", constellation="qpsk", prbs=9)
+_ofm.unregister("validate_set")
+_ofop = _ofnamed.recipe()["ops"][0]
+_ofreplay = Signal.from_recipe(_json.loads(_ofnamed.to_json()))
+check("a grid that is not a whole multiple of the FFT rate is refused with the rate it needs "
+      "(nothing is resampled), and a named parameter set puts its name AND its numbers in "
+      "the recipe, which then replays with the registry empty",
+      "Grid(fs=20000000)" in _ofrate and "Nothing is resampled" in _ofrate
+      and _ofop["name"] == "validate_set" and _ofop["n_fft"] == 64 and _ofop["scs_hz"] == 312.5e3
+      and _ofop["cp"] == 16 and _ofop["active"] == 52 and "validate_set" not in _ofm.REGISTRY
+      and np.array_equal(_ofreplay.waveform(), _ofnamed.waveform()),
+      f"refusal: {_ofrate[:118]}...; recipe op: name={_ofop['name']!r}, n_fft={_ofop['n_fft']}, "
+      f"scs_hz={_ofop['scs_hz']:g}, cp={_ofop['cp']}, active={_ofop['active']}")
+
+
+def _ofshare(sc, lo_hz, hi_hz, over, m=1 << 16):
+    # independent rectangular symbols of (64 + 16) * over samples: a Dirichlet kernel squared
+    # on every active subcarrier
+    fs, ns = 20e6 * over, 80 * over
+    f = (np.arange(m) - m // 2) * fs / m
+    tot = np.zeros(m)
+    for k in sc:
+        u = np.pi * (f - k * 312.5e3) / fs
+        near = np.abs(np.sin(u)) < 1e-12
+        tot += np.where(near, float(ns), np.sin(ns * u) / np.where(near, 1.0, np.sin(u))) ** 2
+    return float(tot[(f >= lo_hz) & (f <= hi_hz)].sum() / tot.sum())
+
+
+_ofband = []
+for _ofact, _ofover in ((52, 1), (list(range(5, 21)), 1), (52, 4)):
+    _ofs = _ofsrc(4000, _ofover, constellation="qpsk", prbs=23, active=_ofact)
+    _ofsc = _ofm.plan(_ofs.ops[0], _ofs.grid)["subcarriers"]
+    _oflo, _ofhi = (_ofsc.min() - 0.5) * 312.5e3, (_ofsc.max() + 0.5) * 312.5e3
+    _ofsp = _sws.rf.spectrum(_ofs.waveform(), _ofs.grid, rbw_hz=312.5e3 / 8)
+    _oftot = _sws.rf.band_power(_ofsp, _ofsp["f_hz"][0], _ofsp["f_hz"][-1])
+    _ofband.append((_sws.rf.band_power(_ofsp, _oflo, _ofhi) / _oftot,
+                    _ofshare(_ofsc, _oflo, _ofhi, _ofover),
+                    _sws.rf.band_power(_ofsp, -_ofhi, -_oflo) / _oftot))
+_ofskirt = []
+for _ofw in (0, 8):
+    _ofs = _ofsrc(4000, 4, constellation="qpsk", prbs=23, window=_ofw)
+    _ofsp = _sws.rf.spectrum(_ofs.waveform(), _ofs.grid, rbw_hz=312.5e3 / 8)
+    _ofskirt.append(10 * np.log10(_sws.rf.band_power(_ofsp, 30.5 * 312.5e3, 34.5 * 312.5e3)
+                                  / _sws.rf.band_power(_ofsp, _ofsp["f_hz"][0], _ofsp["f_hz"][-1])))
+check("the occupied band is the active subcarriers: the share of the record's power between "
+      "the outermost active subcarriers (half a spacing beyond each) is the analytic one for "
+      "rectangular symbols to 0.001, a one-sided allocation leaves its mirror band empty, and "
+      "the edge window lowers the skirt 4 to 8 spacings out by more than 3 dB",
+      all(abs(got - want) < 1e-3 for got, want, _ in _ofband) and _ofband[1][2] < 0.005
+      and _ofskirt[0] - _ofskirt[1] > 3.0,
+      "measured / analytic share: " + ", ".join(f"{g:.5f} / {w:.5f}" for g, w, _ in _ofband)
+      + f" (52 about the centre; subcarriers 5..20, mirror band {_ofband[1][2]:.5f}; 52 at 4x); "
+      f"skirt {_ofskirt[0]:.1f} dB -> {_ofskirt[1]:.1f} dB with window=8")
+
+_oflv = np.arange(0.0, 9.01, 0.25)
+_oflaw = np.exp(-10 ** (_oflv / 10))
+_ofdist, _ofk4 = {}, {}
+for _ofna, _ofnf in ((2, 64), (4, 64), (12, 64), (52, 64), (300, 512)):
+    _ofg = Grid(fs=_ofnf * 15e3, n=(_ofnf + _ofnf // 8) * (460800 // _ofnf))
+    _ofx = Signal(seed=1, grid=_ofg).ofdm(n_fft=_ofnf, scs_hz=15e3, cp=_ofnf // 8, active=_ofna,
+                                          constellation="qpsk", prbs=23, prbs_seed=_ofseed).waveform()
+    _ofdist[_ofna] = float(np.abs(_sws.rf.ccdf(_ofx, levels_db=_oflv)["probability"]
+                                  - _oflaw).max())
+    _ofp = np.abs(_ofx) ** 2
+    _ofk4[_ofna] = float(np.mean(_ofp ** 2) / np.mean(_ofp) ** 2)
+check("the envelope approaches the complex-Gaussian law as active subcarriers are added: "
+      "E|x|^4 / E|x|^2^2 is 2 - 1/n for QPSK on n subcarriers (2 is the Gaussian's) -- to "
+      "0.005 on 2, 4 and 12, where the departure is large, and to 0.02 on 52 and 300 -- and "
+      "the CCDF's largest distance from exp(-level) over 0 .. 9 dB falls with every step from "
+      "2 to 300 subcarriers, below 0.004 at 300",
+      all(abs(_ofk4[n] - (2 - 1 / n)) < (0.005 if n <= 12 else 0.02) for n in _ofk4)
+      and all(_ofdist[a] > _ofdist[b] for a, b in zip((2, 4, 12, 52), (4, 12, 52, 300)))
+      and _ofdist[300] < 0.004,
+      "n: fourth moment (2 - 1/n), CCDF distance -- "
+      + "; ".join(f"{n}: {_ofk4[n]:.4f} ({2 - 1 / n:.4f}), {_ofdist[n]:.4f}" for n in _ofk4))
+
+_ofevm = []
+for _ofmap, _ofsnr in (("qpsk", 10.0), ("qpsk", 25.0), ("qam64", 25.0)):
+    _ofs = _ofsrc(2000, constellation=_ofmap)
+    _ofbw = _ofm.plan(_ofs.ops[0], _ofs.grid)["noise_bw_hz"]
+    _ofs = _ofs.awgn(snr_db=_ofsnr, bw_hz=_ofbw)
+    _ofsent = _ofs.transmitted()[0]
+    _ofgot = _sws.rf.evm(_ofs.waveform(), _ofs.grid, _ofsent, ofdm=_ofs.ops[0])
+    _ofevm.append((_ofmap, _ofsnr, _ofgot["evm"],
+                   float(np.sqrt(_ofbw * _ofs.rf_report()[0]["n0"]
+                                 / np.mean(np.abs(_ofsent) ** 2))), _ofgot["removed"]))
+check("EVM per resource element against the truth, in white noise, is the analytic "
+      "sqrt(n_active * scs_hz * N0) / rms(sent) to 1 %, with nothing fitted -- so an SNR "
+      "stated in n_active * scs_hz reads back as that many dB of EVM",
+      all(abs(got / want - 1) < 0.01 and removed == {} and abs(20 * np.log10(got) + snr) < 0.2
+          for _, snr, got, want, removed in _ofevm),
+      "; ".join(f"{m} at {s:g} dB: {100 * g:.3f} % measured, {100 * w:.3f} % analytic"
+                for m, s, g, w, _ in _ofevm) + " (104000 elements each)")
+
+_ofs = _ofsrc(50)
+_ofsent = _ofs.transmitted()[0]
+_ofx = _ofs.copy().filter("fir", taps=[1.0, 0.0, 0.0, 0.4]).waveform()
+_ofraw = _sws.rf.evm(_ofx, _ofs.grid, _ofsent, ofdm=_ofs.ops[0])
+_ofeq = _sws.rf.evm(_ofx, _ofs.grid, _ofsent, ofdm=_ofs.ops[0], correct=("equalizer",))
+_ofh = 1 + 0.4 * np.exp(-2j * np.pi * 3 * _ofraw["subcarriers"] / 64)
+_ofherr = float(np.abs(_ofeq["removed"]["equalizer"] - _ofh).max())
+_ofs4 = _ofsrc(20, 4)
+_ofx4 = _ofs4.waveform()
+_oflate = np.concatenate([np.zeros(9, complex), _ofx4[:-9]])          # 2.25 FFT-rate samples
+_oftim = _sws.rf.evm(_oflate, _ofs4.grid, _ofs4.transmitted()[0], ofdm=_ofs4.ops[0],
+                     correct=("timing",))
+_oftraw = _sws.rf.evm(_oflate, _ofs4.grid, _ofs4.transmitted()[0], ofdm=_ofs4.ops[0])["evm"]
+_ofcfo = _sws.rf.evm(_ofs.copy().freq_offset(f_hz=500.0).waveform(), _ofs.grid, _ofsent,
+                     ofdm=_ofs.ops[0], correct=("common_phase",))
+_ofslope = float(np.polyfit(_ofs.transmitted()[1],
+                            np.unwrap(_ofcfo["removed"]["common_phase_rad"]), 1)[0] / (2 * np.pi))
+_ofnot = _qrefusal(lambda: _sws.rf.evm(_ofx, _ofs.grid, _ofsent, ofdm=_ofs.ops[0],
+                                       correct=("frequency",)))
+check("an OFDM EVM counts everything until a correction is named, and returns what each one "
+      "took out: a two-path channel reads |H - 1| = 0.4 raw and the equaliser returns H(k) "
+      "per subcarrier; a delay inside the prefix is found as its phase slope; a 500 Hz "
+      "frequency error comes back as each symbol's rotation, 2*pi*f*t; and a single-carrier "
+      "correction is refused by name",
+      abs(_ofraw["evm"] - 0.4) < 1e-9 and _ofeq["evm"] < 1e-12 and _ofherr < 1e-12
+      and _oftraw > 0.5 and _oftim["evm"] < 1e-9
+      and abs(_oftim["removed"]["timing_s"] * 20e6 - 2.25) < 1e-6
+      and abs(_ofslope / 500.0 - 1) < 2e-3 and "leakage between subcarriers" in _ofnot,
+      f"two-path channel: {_ofraw['evm']:.6f} raw, {_ofeq['evm']:.1e} equalised, largest "
+      f"|removed - H(k)| {_ofherr:.1e}; 2.25 samples late: {_oftraw:.3f} raw, "
+      f"{_oftim['evm']:.1e} with timing removed, found "
+      f"{_oftim['removed']['timing_s'] * 20e6:.7f} samples; 500 Hz off: per-symbol phase slope "
+      f"{_ofslope:.2f} Hz, {100 * _ofcfo['evm']:.3f} % left (the leakage between subcarriers)")
+
+# ---- the pieces measure each other: an OFDM receiver reads back a composed multipath channel
+_ofmg = Grid(fs=20e6, n=1 << 14, fc_hz=2.4e9 + 1e6)
+_ofmp = dict(_ofnum, constellation="qpsk", prbs=15, prbs_seed=_ofseed)
+_ofmtau, _ofmgain = 0.33e-6, 0.4
+_ofmtx = Signal(seed=1, grid=_ofmg).ofdm(**_ofmp)
+_ofmx = _sws.recipes.multipath(_ofmtx, delays_s=[0.0, _ofmtau], gains=[1.0, _ofmgain]).waveform()
+_ofmsent = _ofmtx.transmitted()[0]
+_ofmraw = _sws.rf.evm(_ofmx, _ofmg, _ofmsent, ofdm=_ofmp)
+_ofmeq = _sws.rf.evm(_ofmx, _ofmg, _ofmsent, ofdm=_ofmp, correct=("equalizer",))
+_ofmk = np.asarray(_ofmeq["subcarriers"])
+_ofmh = 1.0 + _ofmgain * np.exp(-2j * np.pi * (_ofmg.fc_hz + _ofmk * 312.5e3) * _ofmtau)
+_ofmerr = float(np.abs(_ofmeq["removed"]["equalizer"] - _ofmh).max())
+_ofmno = float(np.abs(_ofmeq["removed"]["equalizer"]
+                      - (1.0 + _ofmgain * np.exp(-2j * np.pi * _ofmk * 312.5e3 * _ofmtau))).max())
+check("an OFDM frame through recipes.multipath: the per-subcarrier equaliser returns "
+      "H(k) = 1 + g exp(-j 2 pi (fc + k scs) tau) for an echo 6.6 samples late, the carrier's "
+      "turn included, and the raw EVM is the echo's size",
+      abs(_ofmraw["evm"] - _ofmgain) < 1e-3 and _ofmerr < 1e-3 and _ofmno > 0.5 * _ofmgain,
+      f"raw EVM {_ofmraw['evm']:.6f} against {_ofmgain}; |equaliser - H(k)| <= {_ofmerr:.1e} "
+      f"(bound 1e-3, the fractional delay's interpolator); against the same echo without the "
+      f"carrier's turn {_ofmno:.3f}; equalised EVM {_ofmeq['evm']:.1e}")
 
 print()
 if fails:

@@ -495,6 +495,9 @@ def test_the_knob_sweep_covers_every_op_the_composer_can_execute():
                # so neither can be dropped into this sweep's real carrier chain. Each knob is
                # moved against an analytic result in tests/test_iq_domain.py.
                "iq", "upconvert", "downconvert",
+               # `ofdm` is a SOURCE of an I/Q record too. tests/test_ofdm.py moves every
+               # parameter and checks the samples and the recipe's content address move.
+               "ofdm",
                # the joins take a second SIGNAL (or a number that is also a signal), so there
                # is no scalar to swap here; tests/test_joins.py moves every parameter of each
                # and checks it moves the samples and the recipe's content address.

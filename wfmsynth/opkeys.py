@@ -29,6 +29,9 @@ SAID_AS = {
     ("iq", "pattern"): 'prbs=<order>, e.g. prbs=15 (with prbs_seed= / prbs_phase=); pattern= names a sequence on `carrier`',
     ("iq", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
     ("law", "level"): "threshold= (the crossing level; `trigger` calls it level=, a scope's word)",
+    ("ofdm", "pattern"): 'prbs=<order>, e.g. prbs=15 (with prbs_seed= / prbs_phase=)',
+    ("ofdm", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
+    ("ofdm", "symbols"): 'n_symbols= (how many OFDM symbols); the values on the resource grid come from constellation= with prbs= or bits=, and pilots=',
     ("switch", "level"): "threshold= (the crossing level; `trigger` calls it level=, a scope's word)",
     ("trigger", "threshold"): "level= (a scope's word; `gate`, `switch` and law('comparator') call it threshold=)",
 }
@@ -75,6 +78,7 @@ OP_KEYS = {
     "multipair": frozenset({"echo_db", "echo_f_hp_hz", "echo_td_ps", "fext_db", "levels", "local_seed", "n_ui", "next_db", "next_td_ps", "pattern", "remote_seed", "tr_frac"}),
     "net": frozenset({"agents", "drivers", "elements", "follow", "holds", "nodes", "on_when", "probe", "rails", "rest", "schedule"}),
     "nonlinearity": frozenset({"a_base", "compression", "level_noise", "rise_fall_ratio"}),
+    "ofdm": frozenset({"active", "amp", "bits", "constellation", "cp", "n", "n_fft", "n_symbols", "name", "pilots", "prbs", "prbs_phase", "prbs_seed", "scs_hz", "source", "window"}),
     "offset": frozenset({"by"}),
     "open_drain": frozenset({"amp", "amp1", "amp2", "band_hi_hz", "band_limit_tr", "band_lo_hz", "c_bus_f", "causal", "center", "cycles", "decay", "df", "duty", "f0_hz", "f1_hz", "f2_hz", "f_hz", "fn", "jitter", "kind", "level", "method", "n", "n_ui", "offset", "pattern", "phase1_rad", "phase2_rad", "phase_rad", "pink_frac", "r_pullup_ohm", "r_sink_b_ohm", "r_sink_ohm", "rms", "second", "seed", "symmetry", "t_start_frac", "t_start_s", "t_step_frac", "t_step_s", "tau_frac", "tau_s", "tr_frac", "tr_s", "v0", "v_dd", "v_hi", "v_lo", "width_frac", "width_s"}),
     "optical": frozenset({"bw_hz", "er_db", "p_avg", "photons_per_unit", "rin_db_per_hz", "shot"}),

@@ -57,6 +57,8 @@ from . import rf as RF
 from .rf import AWGN_KEYS as _AWGN_KEYS, DAC_KEYS as _DAC_KEYS
 from . import states as STATES
 from .states import KEYS as _STATES_KEYS
+from . import ofdm as OFDM
+from .ofdm import KEYS as _OFDM_KEYS
 
 
 # --------------------------------------------------------------- op executors
@@ -480,6 +482,9 @@ def _sent(ops, grid, who):
     if src["op"] == "iq":
         a = _iq_symbols(src, grid)
         return a, IQ.symbol_times(len(a), grid)
+    if src["op"] == "ofdm":                          # a resource grid, a row per OFDM symbol
+        rg = OFDM.resource_grid(src, grid, _grid_n(grid, src))
+        return rg["grid"], rg["t_s"]
     if src["op"] == "sequence":
         sym, t_s = [], []
         for s, seg in zip(SEQ.layout(src["segments"], grid), src["segments"]):
@@ -489,7 +494,16 @@ def _sent(ops, grid, who):
             if s["state"] != "continue":             # a restart counts from its own start
                 t = t + s["t_start_s"]
             keep = (t >= s["t_start_s"]) & (t < s["t_stop_s"])
+            if sub.ops and sub.ops[0]["op"] == "ofdm":
+                # an OFDM symbol was sent only if its whole useful part is in the segment
+                keep &= t + 1.0 / sub.ops[0]["scs_hz"] <= s["t_stop_s"] + 0.5 / grid.fs
             sym.append(a[keep]), t_s.append(t[keep])
+        if len({a.shape[1:] for a in sym}) > 1:
+            raise ValueError(f"{who}: the sequence's segments do not send one kind of symbol "
+                             f"-- single symbols from `iq`, rows of a resource grid from "
+                             f"`ofdm`, or grids of different active subcarriers -- so they "
+                             f"are not one array. Ask each segment for its own: "
+                             f"sig.subchains()[<namespace>].transmitted().")
         return np.concatenate(sym), np.concatenate(t_s)
     more = {
         "switch": " A `switch` chooses among its inputs sample by sample, so no one symbol "
@@ -500,8 +514,8 @@ def _sent(ops, grid, who):
         "carrier": " A carrier's symbols are physics.carrier_symbols(kind, n_ui, seed, pattern).",
     }.get(src["op"], "")
     raise ValueError(f"{who}: the chain starts with `{src['op']}`, and transmitted symbols "
-                     f"come from an `iq` source, or a `sequence` of chains that start with "
-                     f"one.{more}")
+                     f"come from an `iq` or `ofdm` source, or a `sequence` of chains that "
+                     f"start with one.{more}")
 
 
 def _op_iq(x, p, streams, grid, idx):
@@ -509,6 +523,11 @@ def _op_iq(x, p, streams, grid, idx):
     return IQ.shape(_iq_symbols(p, grid), grid, n=_grid_n(grid, p), pulse=p.get("pulse", "rrc"),
                     beta=p.get("beta", IQ.RRC_BETA), span_ui=p.get("span_ui", IQ.RRC_SPAN_UI),
                     amp=p.get("amp", 1.0))
+
+
+def _op_ofdm(x, p, streams, grid, idx):
+    return OFDM.run({k: p[k] for k in _OFDM_KEYS if k in p}, grid, idx, n=_grid_n(grid, p),
+                    sink=getattr(streams, "sink", None))
 
 
 def _op_upconvert(x, p, streams, grid, idx):
@@ -1681,6 +1700,7 @@ _EXEC = {"carrier": _op_carrier, "symbols": _op_symbols, "coded": _op_coded,
          "sample_clock": _op_sample_clock, "burst": _op_burst, "pass_fet": _op_pass_fet,
          "modulate": _op_modulate, "law": _op_law, "filter": _op_filter,
          "iq": _op_iq, "upconvert": _op_upconvert, "downconvert": _op_downconvert,
+         "ofdm": _op_ofdm,
          "combine": _op_combine, "gain": _op_gain, "offset": _op_offset, "gate": _op_gate,
          "delay": _op_delay,
          "sequence": _op_sequence, "switch": _op_switch, "use": _op_use,
@@ -1708,7 +1728,7 @@ OP_KIND = {
     "timing": "shape", "ssc": "shape", "intra_pair_skew": "shape", "eo": "shape",
     "dcd": "shape", "open_drain": "shape", "net": "channel", "burst": "shape", "pass_fet": "shape",
     "modulate": "shape",
-    "iq": "source", "upconvert": "shape", "downconvert": "instrument",
+    "iq": "source", "upconvert": "shape", "downconvert": "instrument", "ofdm": "source",
     "supply_coupling": "supply", "drift": "supply",
     "lossy": "channel", "reflect": "channel", "resonant_reflect": "channel", "crosstalk": "channel",
     "cascade": "channel",
@@ -1941,6 +1961,8 @@ _LEAD_REJECT = {
                "guard, a lead-in here would have to invent history the capture never had",
     "iq": "its pulses are placed from the record's start and a burst has no earlier symbols to "
           "render; the record's head IS the transmitter turning on",
+    "ofdm": "its symbols are placed from the record's start and a burst has no earlier symbols "
+            "to render; the record's head IS the transmitter turning on",
     "upconvert": "the carrier's phase is counted from the record's start, which a lead-in "
                  "moves -- the delivered window would open on a different carrier phase under "
                  "the same recipe",
@@ -2010,7 +2032,7 @@ def _lead_source_geometry(ops, grid):
         raise ValueError("a lead-in needs a source op (add a carrier first)")
     src = ops[0]
     if src["op"] not in ("carrier", "symbols", "coded"):
-        if src["op"] in ("sequence", "switch"):       # sources, but not ones that can extend
+        if src["op"] in ("sequence", "switch", "iq", "ofdm"):   # sources that cannot extend
             raise ValueError(f"lead_in: the {src['op']!r} op cannot be rendered with a "
                              f"lead-in because {_LEAD_REJECT[src['op']]}")
         raise ValueError(f"a lead-in needs the first op to be the source; ops[0] is "
@@ -2565,6 +2587,43 @@ class Signal:
             IQ.bits_per_symbol(constellation)
         return self._add("iq", **params)
 
+    def ofdm(self, name=None, **params):
+        """First op of a COMPLEX BASEBAND chain: OFDM symbols -- an inverse FFT of each row
+        of a resource grid, a cyclic prefix in front of it. Needs `Grid(fs=..., n=...)` with
+        ``fs = n_fft * scs_hz`` or a whole multiple of it (any other rate is refused, naming
+        the rate; nothing is resampled).
+
+            Signal(seed=1, grid=g).ofdm(n_fft=64, scs_hz=312.5e3, cp=16, active=52,
+                                        constellation="qam16", prbs=15)
+            Signal(seed=1, grid=g).ofdm("my_20mhz", constellation="qpsk", prbs=15)   # a named set
+
+        `n_fft` subcarriers `scs_hz` apart; `cp` the cyclic prefix and `window` a
+        raised-cosine edge inside it, both in samples at the FFT rate (`cp` may be a list,
+        cycled over the symbols); `active` a count of subcarriers about the centre (the
+        centre left out) or a list of signed subcarrier numbers; `pilots` the known elements
+        (a list of subcarriers, or dicts of `subcarriers` / `values` / `every` / `first`);
+        `constellation` that of the data elements ('bpsk' | 'qpsk' | 'qam16' |
+        'qam64'), filled from `prbs=<order>` (`prbs_seed=`, `prbs_phase=`) or `bits=[...]`;
+        `n_symbols` how many symbols (default: as many as fit); `amp` scales the envelope,
+        whose mean power is otherwise one.
+
+        `name` is a parameter set registered with `wfmsynth.ofdm.register`: the recipe then
+        holds the name AND its numbers. Conventions, and what composes instead of being a
+        parameter (frames, gaps, a preamble, per-subcarrier constellations):
+        `wfmsynth/ofdm.py`.
+
+        GROUND TRUTH is `Signal.transmitted()`: the resource grid ``[symbol, subcarrier]``
+        and the time each symbol's useful part starts; `wfmsynth.ofdm.resource_grid` adds
+        which elements are pilots and the data bits. Each symbol boundary is an
+        ``ofdm_symbol`` event. `wfmsynth.ofdm.demodulate` is the receiver and
+        `rf.evm(..., ofdm=sig.ops[0])` the error per resource element."""
+        OPKEYS.check("ofdm", params)
+        if name is not None:
+            params = OFDM.named(name, params)
+        params = OFDM.jsonable(params)
+        OFDM.check(_stated(self._drawn(params)))     # refused where it is written
+        return self._add("ofdm", **params)
+
     def upconvert(self, **params):
         """Complex baseband -> a REAL PASSBAND record: ``Re{x * exp(j*2*pi*fc_hz*t)}``, on the
         same grid. After this the record is an ordinary voltage, so `probe`, `scope`,
@@ -2613,7 +2672,11 @@ class Signal:
 
         The source is an `iq` op, or a `sequence` of chains that each start with one (a
         preamble, then a payload): then every segment's symbols whose centres fall inside it,
-        in time order, on the record's clock. `wfmsynth.sequence.layout` gives each segment's
+        in time order, on the record's clock. For an `ofdm` source `symbols` is the RESOURCE
+        GRID, complex ``[symbol, subcarrier]`` over the active subcarriers in ascending
+        order, and `t_s` the start of each symbol's useful part (where a receiver's FFT
+        opens); in a `sequence`, the symbols whose useful part lies wholly inside their
+        segment. `wfmsynth.sequence.layout` gives each segment's
         `t_start_s` / `t_stop_s`, so `t_s` says which segment a symbol belongs to.
 
         Times are the transmitter's: anything downstream with group delay (a channel, a

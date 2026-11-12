@@ -152,6 +152,10 @@ _LEVEL = "threshold= (the crossing level; `trigger` calls it level=, a scope's w
 SAID_AS = {
     ("iq", "pattern"): _PRBS,
     ("iq", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
+    ("ofdm", "pattern"): "prbs=<order>, e.g. prbs=15 (with prbs_seed= / prbs_phase=)",
+    ("ofdm", "seed"): "prbs_seed= (the PRBS's starting state, which is its phase)",
+    ("ofdm", "symbols"): "n_symbols= (how many OFDM symbols); the values on the resource "
+                         "grid come from constellation= with prbs= or bits=, and pilots=",
     ("carrier", "prbs"): "pattern='prbs7' (also 'prbs15', 'clock', ...), with seed= for its "
                          "phase; prbs=<order> is how `iq` and `coded` say it",
     ("carrier", "transition_s"): "tr_s= (the 10-90 % time of an edge, in seconds)",

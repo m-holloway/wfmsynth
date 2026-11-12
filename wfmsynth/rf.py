@@ -117,8 +117,10 @@ in `correct=`, and the amount it took out is returned in ``["removed"]`` with it
 figure can never be read without the impairment that was hidden to get it.
 
 The receiver is always the source's own: a root-raised-cosine matched filter sampled at the
-symbol centres (`iq.demodulate`). A record that was already matched-filtered, or whose pulse is
-not a root-raised-cosine, needs its own receiver and `iq.evm` on the symbols.
+symbol centres (`iq.demodulate`) -- or, for a record from `ofdm(...)`, an FFT per symbol
+(`ofdm.demodulate`), asked for with ``evm(..., ofdm=sig.ops[0])`` and measured per resource
+element. A record that was already matched-filtered, or whose pulse is not a
+root-raised-cosine, needs its own receiver and `iq.evm` on the symbols.
 
 On a REAL passband record `spectrum`, `band_power` and `aclr` apply as they are (pass
 `center_hz`); `ccdf` and `evm` are about the envelope and say to `downconvert` first.
@@ -965,13 +967,14 @@ def _equalizer(y, s, keep, taps):
 
 
 def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), skip=0,
-        delay_s=0.0, equalizer_taps=None, beta=IQ.RRC_BETA, span_ui=IQ.RRC_SPAN_UI):
+        delay_s=0.0, equalizer_taps=None, beta=IQ.RRC_BETA, span_ui=IQ.RRC_SPAN_UI, ofdm=None):
     """Error-vector magnitude of a complex baseband record: RMS distance between the received
     symbols and the reference, over the RMS of the reference.
 
         rf.evm(x, grid, sent)                                   # against the truth, as it stands
         rf.evm(x, grid, sent, correct=("gain", "phase"))        # after one complex gain
         rf.evm(x, grid, reference="decided", constellation="qam16")
+        rf.evm(x, grid, sent, ofdm=sig.ops[0])                  # an OFDM record: see the end
 
     The receiver is a root-raised-cosine matched filter (`beta`, `span_ui`) sampled at the
     symbol centres, `delay_s` later than the transmitter's (a known group delay; whole symbols
@@ -1047,8 +1050,33 @@ def evm(x, grid, sent=None, reference="truth", constellation=None, correct=(), s
                                          ``coarse_frequency_hz``, ``line``, and
                                          ``residual_turn`` (blind) or ``inside`` and
                                          ``settled_turn`` (decision-directed from zero)
+
+    AN OFDM RECORD has a different receiver, so say so: ``ofdm=`` the source's parameters
+    (``sig.ops[0]``), with `sent` the resource grid `Signal.transmitted()` returns. The error
+    is then per RESOURCE ELEMENT against the truth, the contract is the same -- nothing
+    fitted unless `correct` names it, what it took out in ``["removed"]`` -- and the
+    corrections are OFDM's own: ``"timing"``, ``"common_phase"``, ``"gain"``,
+    ``"equalizer"`` (one coefficient per subcarrier). `wfmsynth.ofdm.evm` states each and
+    what the result holds; `reference="decided"` and the single-carrier arguments are
+    refused by name.
     """
     a = _measured_envelope(x, "evm")
+    if ofdm is not None:
+        stray = [k for k, v, d in (("reference", reference, "truth"),
+                                   ("constellation", constellation, None),
+                                   ("equalizer_taps", equalizer_taps, None),
+                                   ("beta", beta, IQ.RRC_BETA),
+                                   ("span_ui", span_ui, IQ.RRC_SPAN_UI))
+                 if v is not d and v != d]
+        if stray:
+            raise ValueError(
+                f"evm: with ofdm= the receiver is an FFT per symbol and the reference is the "
+                f"resource grid that was sent, so {stray} "
+                f"{'does' if len(stray) == 1 else 'do'} not apply: an OFDM record is measured "
+                f"against sent= only, its equaliser is one coefficient per subcarrier "
+                f"(correct=('equalizer',), no tap count), and it has no pulse to match.")
+        from . import ofdm as OFDM
+        return OFDM.evm(a, grid, sent, ofdm, correct=correct, skip=skip, delay_s=delay_s)
     fs, baud = IQ._rate(grid, "evm")
     if reference not in ("truth", "decided"):
         raise ValueError(f"evm: reference is 'truth' (against sent=) or 'decided' (against the "

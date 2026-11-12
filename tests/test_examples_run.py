@@ -45,6 +45,7 @@ DEMOS = [
     "iq_recordings.py",
     "multi_driver_bus.py",
     "non_integer_sps.py",
+    "ofdm_frame.py",
     "optical_field.py",
     "provenance.py",
     "quickstart.py",

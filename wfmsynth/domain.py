@@ -10,9 +10,9 @@ A record is in one of three domains:
                about its optical carrier, so |E|^2 is power. `waveform()` returns complex128.
                See "THE OPTICAL FIELD" below.
 
-The domain a chain STARTS in is its SOURCE's when the grid does not state one: `iq(...)`, an
-I/Q capture, or a `sequence` / `switch` of I/Q chains is an envelope, `carrier` / `symbols` /
-`coded` / a real capture a voltage (`follow`). A grid may state it -- `Grid(domain="iq")`,
+The domain a chain STARTS in is its SOURCE's when the grid does not state one: `iq(...)`,
+`ofdm(...)`, a first `awgn` (complex noise), an I/Q capture, or a `sequence` / `switch` of I/Q
+chains is an envelope, `carrier` / `symbols` / `coded` / a real capture a voltage (`follow`). A grid may state it -- `Grid(domain="iq")`,
 `Grid(domain="real")`, or `fc_hz=`, which only an envelope has -- and a source that
 contradicts a stated domain is refused by name. Four ops move between the domains --
 `upconvert` (iq -> real passband), `downconvert` (real -> iq), `eo` (a real drive -> optical)
@@ -132,6 +132,7 @@ COMPLEX = (IQ, OPTICAL)        # the domains whose samples are complex
 ACCEPTS = {
     "capture": ANY,            # a source: emits whatever domain the grid declares
     "iq": (IQ,),               # a source of complex symbols
+    "ofdm": (IQ,),             # a source of complex symbols on many subcarriers
     "upconvert": (IQ,),
     "downconvert": (REAL,),
     # `filter` states its response on the GRID (a corner in Hz from DC, taps, a symbol rate),
@@ -281,9 +282,9 @@ def refuse(op, dom, i=None):
             f"source of a real voltage. An I/Q record starts with "
             f".iq(<constellation>, prbs=<order>); a real one needs a Grid without "
             f"domain='iq'.")
-    if dom == REAL and op == "iq" and not i:
+    if dom == REAL and op in ("iq", "ofdm") and not i:
         return ValueError(
-            f"iq: this chain's grid STATES domain='real', and iq is the source of a "
+            f"{op}: this chain's grid STATES domain='real', and {op} is the source of a "
             f"complex baseband record. Leave domain= off the Grid -- the record's domain then "
             f"follows its source -- or state Grid(..., domain='iq', fc_hz=...). {REBUILT}")
     instead = _INSTEAD[dom].get(op)

@@ -55,6 +55,9 @@ Modules / public API:
                 pulse-width or runt condition, keep the window (or segments, or an average)
   baseband      a channel stated at RF (lossy, sparam) applied to an I/Q record's envelope:
                 the same response read at fc_hz + f
+  ofdm          Signal.ofdm(): an OFDM source (an inverse FFT and a cyclic prefix per symbol)
+                on an I/Q record, its resource grid, demodulate() and the EVM per element;
+                register() for a caller's named parameter sets
   states        carrier("states"): a level that dwells in one of a few states for a time drawn
                 from a stated distribution and jumps to the next -- burst noise, or an
                 activity schedule for gate(by=) / switch(select=); intervals(), occupancy()
@@ -103,7 +106,7 @@ from . import (physics, impairments, events, grammar, pam4, grid, instrument, st
                measure, sweep, cdr, eye, sparam, stream, simreal, rx, scene, optical, coding, bus,
                acquire, patterns, quinary, hdf5, capture, net, scenario, stages, iq, domain,
                tolerance, subchain, joins, sequence, channels, trigger, iqfile,
-               rf, baseband, states, recipes)
+               rf, baseband, states, recipes, ofdm)
 from .physics import (N, T, Jitter, response_cache, tx_ffe, carrier_symbols, from_symbols, resonant_reflection, de_emphasis_taps,
                       nominal_nonlinearity, crosstalk_matrix, crosstalk_sum, hybrid_echo,
                       single_pair_observation, db_to_coupling, differential_pair,
@@ -176,7 +179,7 @@ __all__ = [
     # were importable as `ws.<name>` but absent here, so `from wfmsynth import *` missed
     # them. (`opkeys` stays out on purpose: it is the generated parameter table.)
     "capture", "hdf5", "resample", "net", "scenario", "stages", "iq", "domain", "joins",
-    "trigger", "rf", "baseband", "recipes",
+    "trigger", "rf", "baseband", "recipes", "ofdm",
     "LAW_KINDS", "FILTER_KINDS",
     "iqfile", "read_iq", "to_sigmf", "to_interleaved",
     "Hold", "Agent", "merge_holds", "hold_windows",
