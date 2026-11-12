@@ -507,7 +507,7 @@ def test_the_map_recovered_from_the_reference_channel_matches_the_truth():
         rec = bench(laser_kw, noise=noise)
         w = rec.waveforms()
         truth = lam_of(rec.signal("ref"))
-        got = M.swept_map(w["ref"], FS, 2e-9, at_s=0.0, wavelength_nm=1549.0)
+        got = M.swept_map(w["ref"], G, 2e-9, at_s=0.0, wavelength_nm=1549.0)
         assert np.abs(got - truth).max() < tol * fringe_nm
     # the linear sweep one would otherwise assume is 23 pm out on the second of those
     assert np.abs(truth - lam_of(bench().signal("ref"))).max() < 1e-12
@@ -516,7 +516,7 @@ def test_the_map_recovered_from_the_reference_channel_matches_the_truth():
     assert np.abs(lam_of(rec.signal("ref")) - (1549.0 + 2.0 * T / DUR)).max() > 0.02
     # a falling sweep says so
     down = bench(dict(start_nm=1551.0, stop_nm=1549.0))
-    got = M.swept_map(down.waveforms()["ref"], FS, 2e-9, at_s=0.0, wavelength_nm=1551.0,
+    got = M.swept_map(down.waveforms()["ref"], G, 2e-9, at_s=0.0, wavelength_nm=1551.0,
                       rising=False)
     assert np.abs(got - lam_of(down.signal("ref"))).max() < 3e-3 * fringe_nm
 
@@ -525,7 +525,7 @@ def test_transmission_on_the_recovered_axis_gives_the_stated_ring():
     rec = bench(dict(start_nm=1549.0, stop_nm=1551.0, bow_nm=0.02, ripple_nm=3e-3,
                      ripple_hz=40.0))
     w = rec.waveforms()
-    lam = M.swept_map(w["ref"], FS, 2e-9, at_s=0.0, wavelength_nm=1549.0)
+    lam = M.swept_map(w["ref"], G, 2e-9, at_s=0.0, wavelength_nm=1549.0)
     wl, t = M.transmission(w["dut"], lam)
     op = [o for o in rec.signal("dut").ops if o["op"] == "resonator"][0]
     assert np.all(np.diff(wl) >= 0)
@@ -544,7 +544,7 @@ def test_a_mode_hop_breaks_the_fringe_count_by_the_hop_less_whole_fringes():
     rec = bench(hop)
     w, ev = rec.realize()
     truth = lam_of(rec.signal("ref"))
-    got = M.swept_map(w["ref"], FS, 2e-9, at_s=0.0, wavelength_nm=1549.0)
+    got = M.swept_map(w["ref"], G, 2e-9, at_s=0.0, wavelength_nm=1549.0)
     k = int(0.07 * FS)
     fringe_nm = 1550.0 ** 2 / C_NM / 2e-9
     assert np.abs(got - truth)[:k - 500].max() < 3e-3 * fringe_nm
@@ -575,7 +575,7 @@ def test_a_gas_cell_line_is_an_absolute_anchor():
         assert abs(C_NM / d["wavelength_nm"] ** 2 * d["fwhm_nm"] / 2e9 - 1.0) < 5e-3
     # anchor the fringe count on the time the first line is crossed: no start wavelength
     at = float(np.argmin(np.where(T < 0.07, w["gas"], 1.0))) / FS
-    got = M.swept_map(w["ref"], FS, 2e-9, at_s=at, wavelength_nm=1549.73)
+    got = M.swept_map(w["ref"], G, 2e-9, at_s=at, wavelength_nm=1549.73)
     assert np.abs(got - truth).max() < 2e-5                        # 0.02 pm; measured 0.01
 
 
@@ -640,12 +640,12 @@ def test_resonances_reads_a_lorentzian_it_is_handed():
 
 def test_the_swept_measures_refuse_what_they_cannot_read():
     with pytest.raises(ValueError, match="swept_map.*complex"):
-        M.swept_map(laser().waveform(), FS, 2e-9, at_s=0.0, wavelength_nm=1549.0)
+        M.swept_map(laser().waveform(), G, 2e-9, at_s=0.0, wavelength_nm=1549.0)
     with pytest.raises(ValueError, match="under two whole fringes"):
-        M.swept_map(pd(R.mzi(laser(start_nm=1550.0), delay_s=2e-9)) + 0.0, FS, 2e-9,
+        M.swept_map(pd(R.mzi(laser(start_nm=1550.0), delay_s=2e-9)) + 0.0, G, 2e-9,
                     at_s=0.0, wavelength_nm=1550.0)
     with pytest.raises(ValueError, match="at_s=.*inside the record"):
-        M.swept_map(np.cos(np.arange(1000.0)), FS, 2e-9, at_s=1.0, wavelength_nm=1550.0)
+        M.swept_map(np.cos(np.arange(1000.0)), G, 2e-9, at_s=1.0, wavelength_nm=1550.0)
     with pytest.raises(ValueError, match="one wavelength per sample"):
         M.transmission(np.ones(10), np.ones(9))
     with pytest.raises(ValueError, match="no `laser`"):

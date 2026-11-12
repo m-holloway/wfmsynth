@@ -281,9 +281,14 @@ def _draw(spec, seed, role):
 
 
 # ---- finding and replacing them in an op ------------------------------------------------------
+def is_toleranced(v):
+    """True for the dict `tol()` or `corners()` returns: a value still to be drawn."""
+    return isinstance(v, dict) and any(k in v for k in _MARK)
+
+
 def _find(v, path, out, where):
     if isinstance(v, dict):
-        if path and any(k in v for k in _MARK):
+        if path and is_toleranced(v):
             out.append(path)
             return
         for k, c in v.items():

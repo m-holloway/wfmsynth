@@ -232,14 +232,16 @@ def _fringe_end(c, guess, x):
     off = np.where(np.abs(plus - guess) <= np.abs(minus - guess), plus, minus) - guess
     if len(c) < 8:
         return guess + off
-    basis = np.stack([x, x * x], axis=1).astype(float)
-    return guess + basis @ np.linalg.lstsq(basis, off, rcond=None)[0]
+    x = np.asarray(x, float)
+    lin, quad = np.linalg.lstsq(np.stack([x, x * x], axis=1), off, rcond=None)[0]
+    return guess + lin * x + quad * x * x     # not `basis @ coef`: numpy 2.0 on macOS warns
 
 
-def swept_map(ref, fs, delay_s, at_s, wavelength_nm, rising=True):
+def swept_map(ref, grid, delay_s, at_s, wavelength_nm, rising=True):
     """The wavelength at every sample of a sweep, RECOVERED from its reference channel: the
     photocurrent `ref` of an interferometer whose arms differ by `delay_s`
-    (`wfmsynth.recipes.mzi`), sampled at `fs`.
+    (`wfmsynth.recipes.mzi`), on the record's `grid` (its sample rate is what is read,
+    as by every measure here).
 
     The fringe is cos(2*pi*nu*delay_s), so its phase -- taken from the analytic signal of
     the fringe about its mid level, and unwrapped -- counts optical frequency in units of
@@ -257,10 +259,10 @@ def swept_map(ref, fs, delay_s, at_s, wavelength_nm, rising=True):
     fringe left at each end is read from the fringe's own shape (`_fringe_end`)."""
     from scipy.signal import hilbert
     ref = np.asarray(voltage(ref, "swept_map"), float)
-    n = len(ref)
+    n, fs = len(ref), grid.fs
     if not (float(delay_s) > 0 and float(wavelength_nm) > 0 and float(fs) > 0):
-        raise ValueError("swept_map: fs, delay_s (the interferometer's arm difference, in "
-                         "seconds) and wavelength_nm (the anchor) are positive.")
+        raise ValueError("swept_map: the grid's fs, delay_s (the interferometer's arm "
+                         "difference, in seconds) and wavelength_nm (the anchor) are positive.")
     k = float(at_s) * float(fs)
     if not 0 <= k <= n - 1:
         raise ValueError(f"swept_map: at_s={at_s!r} is the time of the anchor and lies "

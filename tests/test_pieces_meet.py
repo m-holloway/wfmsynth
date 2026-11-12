@@ -5,6 +5,10 @@ gain on an envelope and `recipes.multipath` (#89), the state-dwell source (#90).
 checks that only exist once they are in one tree -- one piece measured by another that shares
 no code with it. (A complex gain on an optical field, #89 meeting #92, is in
 tests/test_optical_domain.py with the rest of the field's stages.)
+
+Then the recipes (#91) and the swept laser (#93, #94) arrived: an enable written as a
+`sequence` meets an envelope and a field, an I/Q multitone meets `multipath`, and every recipe
+answers a toleranced number the same way.
 """
 from __future__ import annotations
 
@@ -74,3 +78,100 @@ def test_an_ofdm_burst_follows_a_state_schedule_and_the_intervals_say_when():
     assert np.array_equal(x[on], ref[on]) and not np.any(x[inside & ~on])
     assert sig.roles() == ["gate/1/by/states/0"]      # the schedule is the one thing drawn
     assert [e.kind for e in events if e.kind == "ofdm_symbol"]    # both truths in one list
+
+
+# ------------------------------------------------------- recipes (#91) meet #89, #93 and #86
+R = ws.recipes
+
+
+def _closed(grid, **bounce):
+    """Where `bounce_times` says the contact is closed, as a mask over the record."""
+    closes, opens = R.bounce_times(**bounce)
+    edges = np.round(np.sort(np.concatenate([closes, opens])) * grid.fs).astype(int)
+    return np.searchsorted(edges, np.arange(grid.n), side="right") % 2 == 1
+
+
+@pytest.mark.parametrize("what", ["an envelope", "a laser's field"])
+def test_a_bouncing_contact_gates_an_envelope_and_a_field_to_the_sample(what):
+    """`recipes.bounce` is a `sequence` of levels: a VOLTAGE wherever it sits, so it keys an
+    I/Q transmitter or shutters a laser. Closed, the samples are the source's; open, nothing;
+    and the instants are `bounce_times`'."""
+    bounce = dict(t_s=200e-6, gap_s=40e-6)
+    if what == "an envelope":
+        grid, src = G, tx
+    else:
+        grid = Grid(fs=20e6, n=1 << 14)
+        src = lambda: Signal(seed=1, grid=grid).laser(start_nm=1549.0, stop_nm=1549.01)  # noqa: E731
+    ref, sig = src().waveform(), src().gate(by=R.bounce(**bounce))
+    x, events = sig.realize()
+    closed = _closed(grid, **bounce)
+    flips = [e.t_s for e in events if e.kind == "transition"]
+    truth = np.sort(np.concatenate(R.bounce_times(**bounce)))
+    print(f"{what}: closed {closed.mean():.4f} of the record, {len(flips)} transitions, "
+          f"largest |t - bounce_times| {np.abs(np.asarray(flips) - truth).max() * grid.fs:.2f} "
+          f"samples")
+    assert np.iscomplexobj(x) and 0.6 < closed.mean() < 0.7
+    assert np.array_equal(x[closed], ref[closed]) and not np.any(x[~closed])
+    assert len(flips) == 7 and np.abs(np.asarray(flips) - truth).max() < 0.51 / grid.fs
+    assert sig.roles() == []
+
+
+def test_a_bounce_is_still_refused_as_the_peer_of_an_envelope():
+    """A voltage is an enable or a factor on an envelope, never a second envelope."""
+    with pytest.raises(ValueError, match="REAL waveform.*peer"):
+        tx().combine(R.bounce(t_s=200e-6, gap_s=40e-6)).waveform()
+
+
+def test_an_iq_multitone_reads_a_multipath_channel_at_every_tone():
+    """Nine tones on bins through a second path 6.6 samples late: tone k comes back scaled by
+    H = 1 + g*exp(-j*2*pi*(fc + f_k)*tau), the carrier's turn included."""
+    df, tau, gain = G.fs / G.n, 0.33e-6, 0.4
+    plan = dict(f_lo_hz=-2048 * df, f_hi_hz=2048 * df, n_tones=9)
+    comb = R.multitone(domain="iq", sig=Signal(seed=1, grid=G), **plan)
+    rx = R.multipath(comb, delays_s=[0.0, tau], gains=[1.0, gain])
+    f = np.asarray(R.multitone_plan(**plan)[0])
+    k = np.round(f / df).astype(int) % G.n
+    h = np.fft.fft(rx.waveform())[k] / np.fft.fft(comb.waveform())[k]
+    err = np.abs(h - (1.0 + gain * np.exp(-2j * np.pi * (G.fc_hz + f) * tau))).max()
+    no_turn = np.abs(h - (1.0 + gain * np.exp(-2j * np.pi * f * tau))).max()
+    print(f"|H measured - H stated| <= {err:.2e} over 9 tones (bound 2e-3, the record's "
+          f"first 7 samples have no second path); without the carrier's turn {no_turn:.3f}")
+    assert err < 2e-3 and no_turn > 0.5 * gain and rx.roles() == []
+
+
+LASER = Signal(seed=1, grid=Grid(fs=1e6, n=1 << 12)).laser(start_nm=1549.0, stop_nm=1551.0)
+T = ws.tol(1.0, 10)
+
+
+@pytest.mark.parametrize("call", [
+    lambda: R.fading(doppler_hz=T),
+    lambda: R.multipath(tx(), delays_s=[0.0, T], gains=[1.0, 0.5]),
+    lambda: R.flicker(1e3, 1e5, rms=T),
+    lambda: R.hum(50.0, amp=0.02, harmonics={3: T}),
+    lambda: R.ripple(500e3, amp=T),
+    lambda: R.pickup(1e6, amp=T),
+    lambda: R.bounce(t_s=2e-3, gap_s=T),
+    lambda: R.oscillator_startup(T, startup_s=200e-6),
+    lambda: R.multitone(1e6, 9e6, 9, rms=T),
+    lambda: R.buck(v_in=12.0, duty=0.5, f_sw_hz=500e3, l_h=T, c_f=22e-6, r_load_ohm=0.5),
+    lambda: R.mzi(LASER, delay_s=T),
+    lambda: R.stray_reflection(LASER, delay_s=40e-12, reflectivity=T),
+    lambda: R.ring(LASER, wavelength_nm=1550.0, q=T),
+    lambda: R.gas_cell(LASER, lines_nm=[T]),
+])
+def test_every_recipe_that_converts_its_numbers_refuses_a_tolerance_the_same_way(call):
+    with pytest.raises(ValueError, match=r"^\w+: \w+= is a ws.tol\(\.\.\.\) or holds one.*"
+                                         r"takes a number.*where the number ends up"):
+        call()
+
+
+def test_a_recipe_argument_that_reaches_its_op_untouched_takes_a_tolerance():
+    """`intermittent`'s dwells and `ring(by=)` are handed on as they are, so the part varies
+    from unit to unit under a `unit/` role."""
+    gate = Signal(seed=1, grid=Grid(fs=1e6, n=1 << 12)).carrier("dc", level=1.0).gate(
+        by=R.intermittent(ws.tol(5e-4, 10), 50e-6))
+    ring = R.ring(LASER, wavelength_nm=1550.0, q=1e4, by=ws.tol(0.0, tol_abs=0.2))
+    assert "gate/1/by/unit/0/dwell.0" in gate.roles() and ring.roles() == ["unit/1/by"]
+    seen = ring.photodetect(shot=False)
+    dips = {int(np.argmin(seen.unit(k).waveform())) for k in range(3)}
+    assert len(dips) == 3

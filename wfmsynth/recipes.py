@@ -80,6 +80,11 @@ ON A SWEPT LASER'S FIELD (`wfmsynth.swept`), devices and what a bench adds
 A SOURCE takes `sig=`, the Signal to build on. Left out it is `Signal()`, a sub-chain for
 another op; given `ws.Signal(seed=1, grid=g)`, the result is the record.
 
+AN ARGUMENT IS A NUMBER. A function here converts what it is given into the parameters of
+its ops, so a `ws.tol(...)` handed to one is refused, naming where the tolerance goes: on
+the op's own parameter, in the chain written out. The exceptions reach their op untouched
+and may be toleranced: both of `intermittent`'s dwells, and `ring(by=)`.
+
 WHAT IS NOT HERE, because it is not a chain of what exists (GitHub #91):
 
     a contact that opens fast and recovers slowly    needs one draw used twice: the enable
@@ -95,12 +100,47 @@ WHAT IS NOT HERE, because it is not a chain of what exists (GitHub #91):
 """
 from __future__ import annotations
 
+import functools
+import inspect
+
 import numpy as np
 
 from . import swept as SW
+from . import tolerance as TOL
 from .compose import Signal
 
 
+def _numbers(where="write the chain out -- summary() of what this returns shows its ops "
+                   "-- with ws.tol(...) on that op's parameter", passes=()):
+    """A recipe converts its arguments into the parameters of the ops it returns, so each is
+    a NUMBER: a `ws.tol(...)` handed to one is refused by name, with `where` the tolerance
+    goes instead. An argument in `passes` reaches its op untouched and may be one, as both
+    of `intermittent`'s may."""
+    def wrap(fn):
+        names = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def checked(*args, **kwargs):
+            for name, v in names.bind(*args, **kwargs).arguments.items():
+                held = list(v.values()) if isinstance(v, dict) else v
+                if name not in passes and (TOL.is_toleranced(v) or (
+                        isinstance(held, (list, tuple))
+                        and any(TOL.is_toleranced(e) for e in held))):
+                    raise ValueError(
+                        f"{fn.__name__}: {name}= is a ws.tol(...) or holds one, and "
+                        f"{fn.__name__} converts its arguments into the numbers of the ops "
+                        f"it returns, so it takes a number. For a part that varies from unit "
+                        f"to unit put the tolerance where the number ends up: {where}.")
+            return fn(*args, **kwargs)
+        return checked
+    return wrap
+
+
+_RESONATOR = ("tx.resonator(wavelength_nm=, intrinsic_hz=ws.tol(...), "
+              "coupling_hz=ws.tol(...))")
+
+
+@_numbers()
 def fading(doppler_hz, k_db=None, los_hz=0.0, shape="jakes"):
     """A FADING GAIN: the complex factor a moving, scattering path puts on an envelope, as a
     chain to hand to `gain(by=)`. Mean power 1.
@@ -138,6 +178,7 @@ def fading(doppler_hz, k_db=None, los_hz=0.0, shape="jakes"):
     return s
 
 
+@_numbers()
 def multipath(tx, delays_s, gains, doppler_hz=None, shape="jakes"):
     """A MULTIPATH channel: the sum of delayed, scaled copies of one transmitted envelope.
 
@@ -205,6 +246,7 @@ def _corners(f_lo_hz, f_hi_hz, per_decade):
     return np.geomspace(float(f_lo_hz), float(f_hi_hz), max(m, 2))
 
 
+@_numbers()
 def flicker(f_lo_hz, f_hi_hz, rms=1.0, per_decade=2, tr_s=None):
     """Noise whose spectrum falls as 1/f between `f_lo_hz` and `f_hi_hz`, as a sub-chain.
 
@@ -267,6 +309,7 @@ def _onto(who, sig):
 
 
 # ------------------------------------------------------------------ clutter, for `combine`
+@_numbers()
 def hum(f_hz, amp, harmonics=None, phase_rad=0.0, f_drift_hz=None, f_wander_hz=None):
     """MAINS HUM: a sine at the line frequency and its harmonics, as a sub-chain to `combine`.
 
@@ -312,6 +355,7 @@ def hum(f_hz, amp, harmonics=None, phase_rad=0.0, f_drift_hz=None, f_wander_hz=N
     return s
 
 
+@_numbers()
 def ripple(f_sw_hz, amp, duty=0.5, spike=None, f_ring_hz=None, q=4.0, spread_pct=None,
            f_spread_hz=None):
     """A switching converter's OUTPUT RIPPLE as a waveform, a sub-chain to `combine`.
@@ -373,6 +417,7 @@ def ripple(f_sw_hz, amp, duty=0.5, spike=None, f_ring_hz=None, q=4.0, spread_pct
     return s
 
 
+@_numbers()
 def pickup(fc_hz, amp, message=None, depth=0.5, dev_hz=None):
     """RADIO PICKUP: a carrier that is not yours, coupled in at a stated level; a sub-chain to
     `combine`.
@@ -431,6 +476,7 @@ def _flights(gap_s, n, ratio):
     return [float(gap_s) * float(ratio) ** k for k in range(int(n))]
 
 
+@_numbers()
 def bounce(t_s, gap_s, n=3, ratio=0.5, touch_s=None):
     """CONTACT BOUNCE on closing, as an enable: 0 while open, 1 while closed.
 
@@ -487,6 +533,7 @@ def intermittent(closed_s, open_s, tr_s=None):
 
 
 # ------------------------------------------------------------------ sources
+@_numbers()
 def oscillator_startup(f_hz, startup_s, rise_s=None, ppm=0.0, settle_s=None, amp=1.0,
                        sig=None):
     """AN OSCILLATOR COMING UP: its amplitude grows exponentially and bends over into its
@@ -589,6 +636,7 @@ def multitone_plan(f_lo_hz, f_hi_hz, n_tones, phase="newman", notch=None, seed=N
     return f, np.mod(ph, 2.0 * np.pi), kept
 
 
+@_numbers()
 def multitone(f_lo_hz, f_hi_hz, n_tones, phase="newman", notch=None, rms=1.0, seed=None,
               domain="real", sig=None):
     """A MULTITONE: `n_tones` equal tones evenly spaced from `f_lo_hz` to `f_hi_hz`.
@@ -679,6 +727,7 @@ def buck_ripple(v_in, duty, f_sw_hz, l_h, c_f, r_load_ohm, r_on_ohm=0.05):
             "settle_s": float(1.0 / np.abs(poles.real).min())}
 
 
+@_numbers()
 def buck(v_in, duty, f_sw_hz, l_h, c_f, r_load_ohm, r_on_ohm=0.05, tr_s=20e-9, sig=None):
     """A SYNCHRONOUS BUCK CONVERTER as a circuit: its output voltage, in VOLTS.
 
@@ -749,6 +798,7 @@ def _two_paths(tx, delay_s, direct, delayed, who):
     return out.combine([tx.copy().delay(by=float(delay_s)).gain(by=float(delayed))])
 
 
+@_numbers()
 def mzi(tx, delay_s, extinction_db=None):
     """A MACH-ZEHNDER INTERFEROMETER with arms `delay_s` apart, one output port.
 
@@ -772,6 +822,7 @@ def mzi(tx, delay_s, extinction_db=None):
     return _two_paths(tx, delay_s, 0.5 * (1.0 + rho), 0.5 * (1.0 - rho), "mzi")
 
 
+@_numbers()
 def stray_reflection(tx, delay_s, reflectivity):
     """A STRAY REFLECTION: a weak copy of the field, `delay_s` late, added to it.
 
@@ -791,16 +842,7 @@ def stray_reflection(tx, delay_s, reflectivity):
     return _two_paths(tx, delay_s, 1.0, reflectivity, "stray_reflection")
 
 
-def _plain(who, **values):
-    for k, v in values.items():
-        if isinstance(v, dict):
-            raise ValueError(
-                f"{who}: {k}= is converted into the resonator's own numbers here, so it "
-                f"takes a number. For a part that varies from unit to unit put the "
-                f"tolerance where the number ends up: tx.resonator(wavelength_nm=, "
-                f"intrinsic_hz=ws.tol(...), coupling_hz=ws.tol(...)).")
-
-
+@_numbers(_RESONATOR, passes=("by",))
 def ring(tx, wavelength_nm, q, extinction_db=None, fsr_nm=None, coupling="under",
          split_hz=None, by=None):
     """A RING RESONATOR on a bus waveguide, stated as a ring is specified.
@@ -819,8 +861,6 @@ def ring(tx, wavelength_nm, q, extinction_db=None, fsr_nm=None, coupling="under"
 
     `q` is the LOADED Q, the one a sweep measures. `split_hz` and `by` are the
     resonator's: a backscatter doublet, and a resonance that moves during the sweep."""
-    _plain("ring", wavelength_nm=wavelength_nm, q=q, extinction_db=extinction_db,
-           fsr_nm=fsr_nm)
     if coupling not in ("under", "over"):
         raise ValueError(f"ring: coupling is 'under' (the bus takes less than the ring "
                          f"loses) or 'over'; got {coupling!r}.")
@@ -842,6 +882,7 @@ def ring(tx, wavelength_nm, q, extinction_db=None, fsr_nm=None, coupling="under"
         **extra)
 
 
+@_numbers(_RESONATOR)
 def gas_cell(tx, lines_nm, depth=0.5, width_hz=1e9):
     """A GAS CELL: absorption lines at stated wavelengths, the absolute reference of a sweep.
 
@@ -852,7 +893,6 @@ def gas_cell(tx, lines_nm, depth=0.5, width_hz=1e9):
     what a pressure-broadened line does to the light, by the same equation. A line is at
     its wavelength whatever the laser does, so the time a sweep crosses one anchors the map
     a fringe count gives (`ws.measure.swept_map(at_s=, wavelength_nm=)`)."""
-    _plain("gas_cell", depth=depth, width_hz=width_hz)
     if not (0.0 < float(depth) < 1.0 and float(width_hz) > 0 and len(lines_nm)):
         raise ValueError(f"gas_cell: depth={depth!r} is the fraction of the power a line "
                          f"takes at its centre (between 0 and 1), width_hz={width_hz!r} its "

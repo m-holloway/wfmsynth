@@ -415,8 +415,17 @@ def follow(grid, op):
 def grid_for(ops, grid):
     """The grid an INHERITED chain is rendered on: `grid` (the record's), in the domain the
     chain's own ops need. For a sub-chain and for a named chain of a `Channels` record, which
-    did not state the grid they are given; never for a Signal that did."""
+    did not state the grid they are given; never for a Signal that did.
+
+    A chain that STARTS with a `sequence` or `switch` of real chains is a voltage wherever it
+    sits, as one that starts with `carrier` is: an enable written as a sequence of levels
+    (`recipes.bounce`) gates an envelope or a field. Only REAL is read off the segments. A
+    complex one may be an envelope or a field (a capture of complex samples is either), and
+    the record it joins says which."""
     want = needs(ops)
+    if want is None and ops and ops[0].get("op") in ("sequence", "switch") \
+            and source_needs(ops[0]) == REAL:
+        want = REAL
     if grid is None or want is None or want == of(grid):
         return grid
     import dataclasses

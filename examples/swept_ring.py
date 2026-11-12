@@ -85,7 +85,7 @@ def measure(rec, on="recovered"):
     it, and the dip's numbers. Nothing here looks at the recipe except the start wavelength."""
     w = rec.waveforms()
     lam = (ws.swept.wavelength_map(rec.signal("ref"))["wavelength_nm"] if on == "truth"
-           else ws.measure.swept_map(w["ref"], rec.grid.fs, REF_DELAY_S, at_s=0.0,
+           else ws.measure.swept_map(w["ref"], rec.grid, REF_DELAY_S, at_s=0.0,
                                      wavelength_nm=1549.8))
     wl, t = ws.measure.transmission(w["dut"], lam)
     return max(ws.measure.resonances(wl, t), key=lambda d: d["extinction_db"]), (wl, t)
@@ -96,7 +96,7 @@ design = bench(**SLOW)
 print(design.summary())
 map_true = ws.swept.wavelength_map(design.signal("ref"))
 w = design.waveforms()
-map_got = ws.measure.swept_map(w["ref"], FS, REF_DELAY_S, at_s=0.0, wavelength_nm=1549.8)
+map_got = ws.measure.swept_map(w["ref"], design.grid, REF_DELAY_S, at_s=0.0, wavelength_nm=1549.8)
 linear = 1549.8 + 0.4 * map_true["t_s"] / design.grid.duration
 print(f"\n   sweep: 1549.8 -> 1550.2 nm in {design.grid.duration * 1e3:.0f} ms. It is not "
       f"linear: {np.abs(map_true['wavelength_nm'] - linear).max() * 1e3:.2f} pm off a straight "

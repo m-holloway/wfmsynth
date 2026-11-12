@@ -5281,7 +5281,7 @@ _swfr = 1550.0 ** 2 / _swC / 2e-9                                        # one f
 _swb = _swbench(bow_nm=0.02, ripple_nm=3e-3, ripple_hz=40.0)
 _sww = _swb.waveforms()
 _swtruth = _SW.wavelength_map(_swb.signal("ref"))["wavelength_nm"]
-_swgot = _swM.swept_map(_sww["ref"], _swg.fs, 2e-9, at_s=0.0, wavelength_nm=1549.0)
+_swgot = _swM.swept_map(_sww["ref"], _swg, 2e-9, at_s=0.0, wavelength_nm=1549.0)
 _swmerr = float(np.abs(_swgot - _swtruth).max())
 _swlin = float(np.abs(_swtruth - (1549.0 + 2.0 * _swt / _swT)).max())
 _swwl, _swtr = _swM.transmission(_sww["dut"], _swgot)
@@ -5306,7 +5306,7 @@ check("on a sweep that is NOT linear (a bow and a ripple), the time-to-wavelengt
 _swh = _swbench(hops=[{"t_s": 0.07, "by_nm": 0.03}])
 _swhw, _swhev = _swh.realize()
 _swht = _SW.wavelength_map(_swh.signal("ref"))["wavelength_nm"]
-_swhe = (_swM.swept_map(_swhw["ref"], _swg.fs, 2e-9, at_s=0.0, wavelength_nm=1549.0) - _swht) / _swfr
+_swhe = (_swM.swept_map(_swhw["ref"], _swg, 2e-9, at_s=0.0, wavelength_nm=1549.0) - _swht) / _swfr
 _swhk = int(0.07 * _swg.fs)
 check("a mode hop is a step in the map and an event, and it breaks what a fringe count can "
       "know: after it the recovered map is off by the hop less a whole number of fringes",
@@ -5333,6 +5333,71 @@ check("refused by name: a copy without the carrier's turn (optical_mpi) on a las
       and "past this grid's Nyquist" in _swref[2] and "would alias" in _swref[3]
       and "carrier was never stated" in _swref[4] and "laser(start_nm=...)" in _swref[4],
       "; ".join(m.split(":")[0] + ": " + m.split(":", 1)[1].strip()[:58] + "..." for m in _swref))
+
+print("\n== the recipes meet an envelope and a field: an enable written as a sequence, a "
+      "multitone through multipath, a tolerance handed to a recipe ==")
+_pmb = dict(t_s=200e-6, gap_s=40e-6)
+_pmedges = np.sort(np.concatenate(_sws.recipes.bounce_times(**_pmb)))
+_pmres = []
+for _pmname, _pmsrc in (
+        ("an OFDM envelope", lambda: Signal(seed=1, grid=_ofmg).ofdm(**_ofmp)),
+        ("a laser's field", lambda: Signal(seed=1, grid=Grid(fs=20e6, n=1 << 14))
+         .laser(start_nm=1549.0, stop_nm=1549.01))):
+    _pmref = _pmsrc().waveform()
+    _pmx, _pmev = _pmsrc().gate(by=_sws.recipes.bounce(**_pmb)).realize()
+    _pmclosed = np.searchsorted(np.round(_pmedges * 20e6).astype(int),
+                                np.arange(_pmref.size), side="right") % 2 == 1
+    _pmflips = np.asarray([e.t_s for e in _pmev if e.kind == "transition"])
+    _pmres.append((_pmname, np.iscomplexobj(_pmx)
+                   and np.array_equal(_pmx[_pmclosed], _pmref[_pmclosed]),
+                   float(np.abs(_pmx[~_pmclosed]).max()), float(_pmclosed.mean()),
+                   _pmflips.size, float(np.abs(_pmflips - _pmedges).max() * 20e6)))
+check("recipes.bounce, a sequence of levels, is a voltage wherever it sits: it keys an OFDM "
+      "envelope and shutters a laser's field -- closed, the samples are the source's bit for "
+      "bit; open, nothing; and the 7 transitions are bounce_times' to half a sample",
+      all(same and off == 0.0 and n == 7 and dt < 0.51 for _, same, off, _, n, dt in _pmres),
+      "; ".join(f"{name}: closed {frac:.4f} of the record, identical there, |x| <= {off:g} "
+                f"open, {n} transitions within {dt:.2f} samples"
+                for name, _, off, frac, n, dt in _pmres))
+
+_pmdf, _pmtau, _pmgain = _ofmg.fs / _ofmg.n, 0.33e-6, 0.4
+_pmplan = dict(f_lo_hz=-2048 * _pmdf, f_hi_hz=2048 * _pmdf, n_tones=9)
+_pmcomb = _sws.recipes.multitone(domain="iq", sig=Signal(seed=1, grid=_ofmg), **_pmplan)
+_pmrx = _sws.recipes.multipath(_pmcomb, delays_s=[0.0, _pmtau], gains=[1.0, _pmgain])
+_pmf = np.asarray(_sws.recipes.multitone_plan(**_pmplan)[0])
+_pmk = np.round(_pmf / _pmdf).astype(int) % _ofmg.n
+_pmh = np.fft.fft(_pmrx.waveform())[_pmk] / np.fft.fft(_pmcomb.waveform())[_pmk]
+_pmerr = float(np.abs(_pmh - (1.0 + _pmgain * np.exp(
+    -2j * np.pi * (_ofmg.fc_hz + _pmf) * _pmtau))).max())
+_pmno = float(np.abs(_pmh - (1.0 + _pmgain * np.exp(-2j * np.pi * _pmf * _pmtau))).max())
+check("an I/Q multitone (a row of spur ops) through recipes.multipath: each of 9 tones comes "
+      "back scaled by H = 1 + g exp(-j 2 pi (fc + f_k) tau) for an echo 6.6 samples late, the "
+      "carrier's turn included",
+      _pmerr < 2e-3 and _pmno > 0.5 * _pmgain and _pmrx.roles() == [],
+      f"|H measured - H stated| <= {_pmerr:.1e} (bound 2e-3: the record's first 7 samples "
+      f"hold no echo); against the echo without the carrier's turn {_pmno:.3f}")
+
+_pmtol = _sws.tol(1.0, 10)
+_pmlas = Signal(seed=1, grid=Grid(fs=1e6, n=1 << 12)).laser(start_nm=1549.0, stop_nm=1551.0)
+_pmsaid = [_qrefusal(f) for f in (
+    lambda: _sws.recipes.fading(doppler_hz=_pmtol),
+    lambda: _sws.recipes.flicker(1e3, 1e5, rms=_pmtol),
+    lambda: _sws.recipes.hum(50.0, amp=0.02, harmonics={3: _pmtol}),
+    lambda: _sws.recipes.bounce(t_s=2e-3, gap_s=_pmtol),
+    lambda: _sws.recipes.buck(v_in=12.0, duty=0.5, f_sw_hz=5e5, l_h=_pmtol, c_f=22e-6,
+                              r_load_ohm=0.5),
+    lambda: _sws.recipes.mzi(_pmlas, delay_s=_pmtol),
+    lambda: _sws.recipes.gas_cell(_pmlas, lines_nm=[_pmtol]))]
+_pmby = _sws.recipes.ring(_pmlas, wavelength_nm=1550.0, q=1e4,
+                          by=_sws.tol(0.0, tol_abs=0.2)).photodetect(shot=False)
+_pmdips = [int(np.argmin(_pmby.unit(k).waveform())) for k in range(3)]
+check("a ws.tol handed to a recipe that converts its numbers is refused by name the same way "
+      "by all of them (7 tried), saying where the tolerance goes; an argument that reaches "
+      "its op untouched, ring(by=), takes one and the dip moves from unit to unit",
+      all("is a ws.tol(...) or holds one" in m and "where the number ends up" in m
+          for m in _pmsaid) and len(set(_pmdips)) == 3 and _pmby.roles() == ["unit/1/by"],
+      f"{_pmsaid[4][:76]}...; ring(by=tol(0, tol_abs=0.2 nm)): dip at samples {_pmdips} of "
+      f"4096 on units 0..2, role {_pmby.roles()}")
 
 print()
 if fails:
