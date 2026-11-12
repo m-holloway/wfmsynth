@@ -12,6 +12,61 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## 0.47.0 — 2026-11-12
+
+A segmented acquisition of an event that happens rarely (#97): many occurrences, each rendered
+on its own short grid, each a little different, laid end to end as `trigger(n_segments=)` lays
+its windows. Every existing call, recipe and rendered sample is unchanged.
+
+### Added
+
+- **`ws.Segments(chain, n=, arrival=, trigger=dict(...), seed=, grid=, variants=)`.** `grid`
+  is one occurrence's render, so the cost is n x that render whatever the arrivals span
+  (measured: the same time, 0.98x, for spans of 0.09 s and 9e4 s). Each occurrence is
+  triggered by `trigger`'s own condition finder, arming and jitter, and the output is its
+  output: the windows end to end and one `Event(kind="trigger")` each, with `segment`,
+  `timestamp_s` (on the acquisition's clock), `start`, `jitter_s` and, with variants,
+  `variant`. Events an occurrence's chain placed are re-timed into its window. A render too
+  short for the window is refused naming the occurrence and the length that would do.
+- **Per-occurrence values.** `ws.tol(..., per="segment")` and `ws.corners(..., per=
+  "segment")` draw again for every occurrence (role `vary/<op index>/<parameter>`, or
+  `vary/<group>`), nested inside the unit: a tolerance without `per=` stays one draw for the
+  acquisition, and `seg.unit(seed)` is another unit with the same occurrences.
+  `ws.trend("ramp", start=, stop= | rate_per_s=)` and `ws.trend("step", before=, after=, at= |
+  at_s=)` move a value across the occurrences, by index or by arrival time.
+- **Arrival** is a `carrier("states")` dwell spec (`fixed` is a period; `exponential`,
+  `lognormal`, `uniform`, `table` are drawn under the role `arrival`). An occurrence arriving
+  while the previous capture's render is still running is missed and counted.
+- **Variants**: `variants={"late": dict(p=0.02, chain=...)}` (role `variant`) or
+  `dict(at=[...], chain=...)`, recorded per occurrence; a variant's parts are named under it
+  (`late/vary/1/by`).
+- **Ground truth and siblings.** `seg.occurrences()` (arrival, missed, variant and every
+  per-occurrence value, from the recipe alone); `ws.segment_params(recipe, op)`, `op_params`
+  per occurrence; `roles()` lists `arrival`, `variant`, each `vary/...`, `trigger`,
+  `segment/<k>/<role>` and the unit parts, and `contrast()` re-rolls exactly one
+  (`segment/*/<role>` is that role in every occurrence); `seg.without("trend/*")` removes a
+  trend and keeps every draw, arrival and noise sample. One recipe, one `sha256()`,
+  `Segments.from_recipe` bit for bit; `unit_of` and `tolerance.resolved` read it.
+- `examples/segmented_events.py`: 300 relay closures with a per-closure contact, a sagging
+  rail and a rare chattering contact. From the windows alone it finds the 7 chattering
+  closures (exactly the recipe's) and that the sag follows time, not the closure count
+  (residual 16.3 mV against time, 25.2 mV against count).
+- `wfmsynth.validate`: five checks under "a segmented acquisition of a rare event".
+- SKILL.md gotcha 46: a chain moved from a long render into `Segments` renders on the short
+  grid, and what it sizes from the grid's length changes with it.
+
+### How it stays exact
+
+- A tolerance written without `per=` is the dict it always was (no `per` key), and an op
+  with no per-occurrence value carries no `_segment` key, so every existing recipe's JSON and
+  digest are unchanged. `tools/digest_compare.py` against 0.46.1: 31 chains and 588 example
+  renders in common, 0 differ.
+- The only change on the render path is `Signal._run`'s private `_delay_s` (0 unless
+  `Segments` passes one) and a refusal of an op carrying `_segment`, which no existing chain
+  can.
+- A per-occurrence value is a pure function of the recipe: one uniform number per occurrence
+  from its role's stream, k-th for occurrence k, so more occurrences extend the same draws.
+
 ## 0.46.1 — 2026-11-12
 
 ### Changed
