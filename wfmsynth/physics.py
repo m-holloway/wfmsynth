@@ -1989,6 +1989,7 @@ def _cycles_and_t(f_hz, cycles, n, fs, grid):
 # sample.
 EDGE_SNAP_SAMPLES = 1e-7
 EDGE_FD_HALF = 4
+EDGE_BLOCK = 4096          # edges interpolated at a time: bounds the temporaries, not the result
 
 
 def _samples_per_period(f_hz, cycles, n, fs, grid):
@@ -2040,11 +2041,15 @@ def _edge_train(n, spp, duty, phase_rad):
     jumps = np.zeros(n)
     np.add.at(jumps, np.clip(m[inside], 0, None), step[inside])
     ideal = -1.0 + np.cumsum(jumps)
-    frac = d > 0
-    if frac.any():
-        off, corr = _delayed_step(d[frac])
-        idx = m[frac][:, None] + off[None, :]
-        val = step[frac][:, None] * corr
+    # In blocks of edges, in order: each block's (edges, taps) temporaries are then a few
+    # hundred kilobytes whatever the record holds, and the additions land in the order one
+    # pass over all the edges would make them, so the result is the same bits.
+    frac = np.flatnonzero(d > 0)
+    for a in range(0, frac.size, EDGE_BLOCK):
+        sel = frac[a:a + EDGE_BLOCK]
+        off, corr = _delayed_step(d[sel])
+        idx = m[sel][:, None] + off[None, :]
+        val = step[sel][:, None] * corr
         ok = (idx >= 0) & (idx < n)
         np.add.at(ideal, idx[ok], val[ok])
     return ideal

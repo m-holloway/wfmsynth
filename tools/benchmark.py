@@ -82,6 +82,18 @@ def op_carrier_nrz(n):
     return lambda: P.nrz(n_ui=n // SPUI, tr_frac=0.4, seed=1, n=n)
 
 
+# A period that is NOT a whole number of samples, and short: every edge is interpolated to
+# its own time (`physics._edge_train`), so the number of edges is of the order of the record
+# and the per-edge temporaries are what could grow. 4.67 samples a period is the densest
+# train the edge shaper's 2-sample floor still resolves.
+def op_carrier_square(n):
+    return lambda: P.square(cycles=n / 4.67, n=n)
+
+
+def op_carrier_cmos(n):
+    return lambda: P.cmos(cycles=n / 4.67, n=n, fs=1.0, tr_s=2.0)
+
+
 def op_prbs(n):
     return lambda: P.prbs(13, n // SPUI)
 
@@ -193,6 +205,8 @@ def batch_dataset(n):
 
 CASES = {
     "op:carrier_nrz": op_carrier_nrz,
+    "op:carrier_square": op_carrier_square,
+    "op:carrier_cmos": op_carrier_cmos,
     "op:prbs": op_prbs,
     "op:lossy_causal": op_lossy_causal,
     "op:lossy_flat": op_lossy_flat,

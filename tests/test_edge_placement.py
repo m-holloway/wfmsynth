@@ -165,3 +165,20 @@ def test_the_consumers_of_these_carriers_still_render_without_warning():
                .pass_fet(gate=dict(f_hz=3.3e5)).waveform())
     assert np.isfinite(od).all() and np.isfinite(fet).all()
     assert od.min() > -0.01 and od.max() < 3.31
+
+
+def test_interpolating_in_blocks_bounds_the_temporaries_and_not_the_result(monkeypatch):
+    """A dense train (4.67 samples a period) has an edge every other sample. The per-edge
+    temporaries are made a block of edges at a time: the same bits as one pass, and a peak
+    near the six records the old construction held (measured 6.3; one pass over all edges was 21)."""
+    import tracemalloc
+    n = 1 << 19
+    blocked = P.square(cycles=n / 4.67, n=n)
+    monkeypatch.setattr(P, "EDGE_BLOCK", 1 << 30)
+    assert np.array_equal(P.square(cycles=n / 4.67, n=n), blocked)
+    monkeypatch.undo()
+    tracemalloc.start()
+    P.square(cycles=n / 4.67, n=n)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 7.0 * blocked.nbytes, f"{peak / blocked.nbytes:.1f} records"
