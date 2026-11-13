@@ -3174,6 +3174,15 @@ check("delay: a tone under a moving delay is within the error the op reports, ac
       "measured / reported at 0.002, 0.05, 0.2, 0.39 fs: "
       + ", ".join(f"{e:.1e} / {b:.1e}" for e, b in _cerr)
       + f"; stated for the band below 0.4 fs: {_JN.describe_delay(_cg.fs)['error']:.2e}")
+_cerr = []
+for _cf0 in (2e3, 50e3, 200e3, 390e3):
+    _cyd = _csin(_cf0).delay(by=5.37 / _cg.fs).waveform()           # a CONSTANT fraction: one FIR
+    _cex = np.sin(2 * np.pi * _cf0 * (_ct - 5.37 / _cg.fs))
+    _cerr.append((np.abs(_cyd - _cex)[24:-16].max(), _JN.delay_error(_cf0, _cg.fs)))
+check("delay: a constant fractional delay (one fixed FIR) is within the reported error",
+      all(e <= b + 1e-13 for e, b in _cerr),
+      "measured / reported at 0.002, 0.05, 0.2, 0.39 fs: "
+      + ", ".join(f"{e:.1e} / {b:.1e}" for e, b in _cerr))
 _cyd = _csin(2e3).delay(by=_csin(_cfj, amp=_camp, offset=_cd0,
                                   phase_rad=-2 * np.pi * _cfj * _cd0)).waveform()
 _cyt = _csin(2e3).timing(pj=dict(amp_ps=_camp * 1e12, f_hz=_cfj)).waveform()

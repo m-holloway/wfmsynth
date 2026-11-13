@@ -259,6 +259,17 @@ clock = (ws.Signal(seed=1, grid=g)                # as everywhere else in this l
 assert clock.min() >= -0.2 and clock.max() <= 3.5     # real volts, not stretched onto +/-1
 ```
 
+**Where a one-shot source rests.** `step` and `pulse` are bipolar about `offset`, like `sine` and
+`square`: they rest at `offset - amp` and go to `offset + amp`, an excursion of `2*amp`. `exp`
+is one-sided, `offset` toward `offset + amp`. So "rest at 0, dip to -1.3" is `amp=-0.65,
+offset=-0.65` on a `pulse`; for "rest at X, go to Y" it is `amp=(Y-X)/2, offset=(X+Y)/2`, or
+`**ws.physics.levels(X, Y)`:
+
+```python
+dip = ws.Signal(grid=g).carrier("pulse", **ws.physics.levels(0.0, -1.3),
+                                t_start_s=1e-3, width_s=0.25e-3, tr_s=50e-6)   # rests at 0
+```
+
 `cmos` stays in real volts (0 V is 0, not -1) and `tr_s` is an absolute edge time in seconds,
 unlike `square`'s `tr_frac` — a real gate's edge does not shrink as it is clocked faster. Like
 every other edge in this library, an under-resolved `tr_s` (fewer than ~2 samples) clamps to the
