@@ -4271,6 +4271,22 @@ NUMERIC_CHANGES = (
      "bit for bit."),
 )
 
+# 0.48.0: a record that idles at a level starts there (#100). One text, one entry per op it
+# reaches, so a recipe is warned about exactly the ops it holds.
+_STEADY_START = (
+    "a record that idles at a level no longer opens on a false edge. The stage used to start as "
+    "if the input before the record were zero: a ring, a sag at BOTH ends (a zero-phase channel), "
+    "an echo that had not arrived, a filter charging up from zero. It now takes the line to have "
+    "been at the first sample's value before the record and to stay at the last one after it. A "
+    "record that starts and ends at exactly zero is unchanged bit for bit; any other moves in "
+    "the first and last samples (by the whole level at the worst) and, for a response with a long "
+    "tail, by a small and falling amount further in (see docs/COMPATIBILITY.md).")
+NUMERIC_CHANGES += tuple(
+    ("0.48.0", op, _STEADY_START) for op in (
+        "lossy", "sparam", "cascade", "reflect", "resonant_reflect", "probe", "ctle", "tx_ffe",
+        "de_emphasis", "rx_ffe", "hybrid_echo", "multipair", "crosstalk/next",
+        "crosstalk_matrix/next", "scope/gaussian"))
+
 
 def _version_tuple(v):
     """``(major, minor, patch)`` from a version string, ignoring any suffix. ``None`` when it
@@ -4294,11 +4310,14 @@ def _version_tuple(v):
 
 
 def _ops_present(ops):
-    """What a `NUMERIC_CHANGES` entry can name: every top-level op, and ``carrier/<kind>`` for
-    every carrier of that kind ANYWHERE in the recipe -- the source, a sub-chain, a bare
+    """What a `NUMERIC_CHANGES` entry can name: every top-level op, ``<op>/<kind>`` for one that
+    states a kind, and ``carrier/<kind>`` for every carrier of that kind ANYWHERE in the recipe -- the source, a sub-chain, a bare
     carrier spec (``gate=dict(kind="square", ...)``), a `net` driver's source. A change to
     one kind of carrier must not warn every recipe that has a carrier at all."""
     present = {o.get("op") for o in ops}
+    # an op whose `kind` is a choice of mechanism (`crosstalk(kind="next")`, `scope(kind="gaussian")`)
+    # can be named by the choice: `<op>/<kind>`
+    present |= {f"{o.get('op')}/{o['kind']}" for o in ops if isinstance(o.get("kind"), str)}
 
     def walk(v):
         if isinstance(v, dict):
@@ -4331,7 +4350,12 @@ def _warn_on_numeric_drift(recipe_version, ops):
     if have is None:
         return
     present = _ops_present(ops)
+    running = _version_tuple(__version__)
     for changed_in, op, what in NUMERIC_CHANGES:
+        # a build older than the change cannot have rendered it differently: an entry for a
+        # version not yet reached (an unreleased one, or an install whose metadata lags) is silent
+        if running is not None and _version_tuple(changed_in) > running:
+            continue
         if op in present and have < _version_tuple(changed_in):
             warnings.warn(
                 f"this recipe was written by wfmsynth {recipe_version} and contains {op!r}, "
