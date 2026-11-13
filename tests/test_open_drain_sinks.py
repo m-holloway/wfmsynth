@@ -118,3 +118,23 @@ def test_others_refusals_name_the_entry_and_suggest():
         _bus(others=spec)
     with pytest.raises(ValueError, match="non-empty list"):
         _bus(others=[])
+
+
+def test_open_drain_low_v_refuses_a_bad_resistance_by_name():
+    for bad in (0.0, -5.0, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match=r"r_sink_ohms\[1\]"):
+            P.open_drain_low_v(4.7e3, [60.0, bad])
+        with pytest.raises(ValueError, match="r_pullup_ohm"):
+            P.open_drain_low_v(bad, [60.0])
+    assert P.open_drain_low_v(4.7e3, []) == pytest.approx(3.3)
+
+
+def test_an_others_source_of_another_length_names_the_entry_and_the_fix():
+    import wfmsynth as ws
+    g = ws.Grid(fs=2e9, n=4000)
+    a = ws.Signal(grid=g).carrier("pulse", amp=-1.0, offset=1.0, t_start_s=1e-6, width_s=1e-6,
+                                  tr_s=20e-9)
+    with pytest.raises(ValueError, match=r"others\[0\].*2000.*4000.*same grid"):
+        a.open_drain(r_pullup_ohm=4.7e3, c_bus_f=1e-10,
+                     others=[dict(source={"kind": "nrz", "n": 2000},
+                                  r_sink_ohm=60.0)]).waveform()

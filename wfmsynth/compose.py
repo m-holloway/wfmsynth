@@ -804,6 +804,12 @@ def _op_open_drain(x, p, streams, grid, idx):
                         len(xa), f"open_drain: `others[{j}].source`",
                         carrier=lambda s, j=j: _carrier(
                             {"kind": "nrz", **s}, streams, grid, f"open_drain_other{idx}_{j}"))
+        if np.shape(xo) != np.shape(xa):
+            raise ValueError(
+                f"open_drain: others[{j}].source rendered {len(xo)} samples and the record has "
+                f"{len(xa)}. Every sink's source must be on the record's grid: render it on the "
+                f"same grid (the same n), and leave `n=` off a carrier spec or state "
+                f"n={len(xa)}.")
         extra.append((xo < 0.5 * (np.percentile(xo, 1) + np.percentile(xo, 99)),
                       float(e.get("r_sink_ohm", p.get("r_sink_ohm", 20.0)))))
     if not sink.any() and (sink_b is None or not sink_b.any()) and not any(
@@ -1199,10 +1205,11 @@ def _op_dfe(x, p, streams, grid, idx):
 #
 # Two separate faults. The SIGN and SCALE are wrong -- displacing rising edges by +d/2 and
 # falling by -d/2 makes the high pulse SHORTER by 2*d, so the realised DCD is -2x the number
-# asked for. And the request is QUANTISED to whole samples: 0.256 and 1.024 samples produce the
-# BIT-IDENTICAL record above, so any sub-sample DCD -- which is all of them, 1 ps is 0.256
-# samples here -- is unreachable. That defect lives in `physics.py`, which this unit does not
-# own; it is logged in BACKLOG.md with these numbers.
+# asked for. And the request WAS QUANTISED to whole samples (fixed in 0.48.0, #98; the table is
+# what 0.47.0 measured): 0.256 and 1.024 samples produced the BIT-IDENTICAL record above, so
+# any sub-sample DCD -- which is all of them, 1 ps is 0.256 samples here -- was
+# unreachable. That defect lives in `physics.py`, which this unit does
+# not own; it is logged in BACKLOG.md with these numbers.
 #
 # `_op_dcd` is the direct knob, in ps, on the waveform, with the standard definition:
 #
@@ -3480,8 +3487,9 @@ class Signal:
         pulse width -- so ``dcd(ps=4.0)`` makes the high pulses 4 ps wider than the low ones and
         nothing else. Realised to 0.05 % (see `_op_dcd`), sub-sample.
 
-        The old route, ``carrier(..., jitter=dict(dcd=<samples>))``, is off by -2x AND quantised
-        to whole samples; the numbers are in the block comment above `_dcd_displacement`.
+        The old route, ``carrier(..., jitter=dict(dcd=<samples>))``, is off by -2x (the numbers are in the block
+        comment above `_dcd_displacement`); since 0.48.0 it is no longer quantised to whole
+        samples.
         params: ps | frac_ui, threshold, plateau_ui."""
         return self._add("dcd", **params)
 

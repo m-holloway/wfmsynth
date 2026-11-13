@@ -783,8 +783,9 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
 
     LINEAR, NOT CIRCULAR
     --------------------
-    The response is applied as a LINEAR convolution: the record is zero-padded past the
-    channel's own impulse-response length, transformed there, and truncated back, so the
+    The response is applied as a LINEAR convolution: the record is padded past the
+    channel's own impulse-response length with its end samples held (`zero_edges()` restores
+    zeros), transformed there, and truncated back, so the
     channel's answer to the record's last samples does not wrap onto its first. See
     `apply_transfer` for the mechanics and `response_extent` for how the padding is sized.
     `guard=` states that length in samples instead of measuring it; ``linear=False`` restores
@@ -2307,8 +2308,20 @@ def open_drain_low_v(r_pullup_ohm, r_sink_ohms, v_dd=3.3):
     """The settled low of an open-drain line while the sinks with these on-resistances all pull
     at once: the divider against their parallel resistance, v_dd * R / (R + r_pullup).
     One sink gives v_dd * r / (r + r_pullup); none gives v_dd (released)."""
-    g = sum(1.0 / float(r) for r in r_sink_ohms)
-    return float(v_dd) / (1.0 + float(r_pullup_ohm) * g)
+    rp = float(r_pullup_ohm)
+    if not np.isfinite(rp) or rp <= 0:
+        raise ValueError(f"open_drain_low_v: r_pullup_ohm must be positive and finite, got "
+                         f"{r_pullup_ohm!r}")
+    if not np.isfinite(float(v_dd)):
+        raise ValueError(f"open_drain_low_v: v_dd must be finite, got {v_dd!r}")
+    g = 0.0
+    for i, r in enumerate(r_sink_ohms):
+        ri = float(r)
+        if not np.isfinite(ri) or ri <= 0:
+            raise ValueError(f"open_drain_low_v: r_sink_ohms[{i}] must be positive and finite "
+                             f"(an on-resistance in ohms), got {r!r}")
+        g += 1.0 / ri
+    return float(v_dd) / (1.0 + rp * g)
 
 
 def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.0, v0=None,
