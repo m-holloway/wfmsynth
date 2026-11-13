@@ -21,8 +21,17 @@ from wfmsynth.compose import Signal
 from wfmsynth.grid import Grid
 
 
+@pytest.fixture(autouse=True)
+def _the_build_that_carries_every_change(monkeypatch):
+    """`wfmsynth.__version__` is read from installed metadata, which lags a version bump until
+    the package is reinstalled; these tests are about recipes written before or after a change,
+    so the running build is, here, the one that carries the newest entry."""
+    newest = max(C.NUMERIC_CHANGES, key=lambda e: C._version_tuple(e[0]))[0]
+    monkeypatch.setattr("wfmsynth.__version__", newest)
+
+
 def _recipe(with_de_emphasis=True):
-    s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=2048)).carrier("nrz", n_ui=256)
+    s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=2048)).carrier("sine", f_hz=1e9)
     if with_de_emphasis:
         s = s.de_emphasis(db=-3.5)
     return s.recipe()
@@ -38,7 +47,7 @@ def _replay(r):
 def test_a_recipe_predating_the_change_warns_and_names_the_op():
     r = _recipe()
     r["wfmsynth_version"] = "0.40.0"
-    msgs = _replay(r)
+    msgs = [m for m in _replay(r) if "changed in 0.41.0" in m]   # 0.48.0 moved it again
     assert len(msgs) == 1
     assert "de_emphasis" in msgs[0]
     assert "0.40.0" in msgs[0] and "0.41.0" in msgs[0]
@@ -99,7 +108,7 @@ def test_the_table_is_well_formed():
         # `carrier/<kind>` names one kind of carrier, wherever in the recipe it sits
         assert op.split("/")[0] in C._EXEC, f"{op!r} is not an executable op"
         if "/" in op:
-            assert op.startswith("carrier/"), op
+            assert op.split("/")[1], op          # `carrier/<kind>` or `<op>/<kind>`
         assert len(what) > 40 and what.strip().endswith("."), f"{op}: explain what changed"
 
 
@@ -118,11 +127,79 @@ def test_a_change_to_one_kind_of_carrier_warns_only_recipes_holding_that_kind():
     got = _replay(_square_recipe("0.45.0"))
     assert len(got) == 1 and "carrier/square" in got[0] and "0.46.0" in got[0]
     assert _replay(_square_recipe("0.46.0")) == []
-    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("nrz", n_ui=64).recipe()
+    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("sine", f_hz=1e9).recipe()
     r["wfmsynth_version"] = "0.45.0"
+    assert _replay(r) == []
+    # 0.48.0 moved the symbol carriers' edges (#98): an `nrz` is warned, from before then only
+    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("nrz", n_ui=64).recipe()
+    r["wfmsynth_version"] = "0.47.0"
+    got = _replay(r)
+    assert len(got) == 1 and "carrier/nrz" in got[0] and "0.48.0" in got[0]
+    r["wfmsynth_version"] = "0.48.0"
     assert _replay(r) == []
     r = Signal(seed=1, grid=Grid(fs=10e9, n=4096)).carrier(
         "cmos", v_lo=0.0, v_hi=3.3, f_hz=10e6, tr_s=2e-9).recipe()
     r["wfmsynth_version"] = "0.45.0"
     got = _replay(r)
     assert len(got) == 1 and "carrier/cmos" in got[0]
+
+
+def _idle_recipe(version, **kw):
+    r = Signal(seed=1, grid=Grid(fs=1e9, n=2048)).carrier("dc", level=3.3).lossy(
+        loss_db=3, loss_at_ghz=0.1).recipe()
+    r["wfmsynth_version"] = version
+    return r
+
+
+def test_a_record_that_starts_from_a_held_level_warns_a_pre_0_48_recipe_for_that_op_only():
+    """0.48.0 (#100): `lossy`, and the other stages that began at zero, hold the first sample.
+    An older recipe holding one is told; one holding none of them, or already current, is not."""
+    got = [m for m in _replay(_idle_recipe("0.47.0")) if "changed in 0.48.0" in m]
+    assert len(got) == 1 and "'lossy'" in got[0] and "false edge" in got[0]
+    assert _replay(_idle_recipe("0.48.0")) == []
+    r = Signal(seed=1, grid=Grid(fs=1e9, n=2048)).carrier("dc", level=3.3).recipe()
+    r["wfmsynth_version"] = "0.47.0"
+    assert _replay(r) == []
+
+
+def test_a_change_to_one_kind_of_an_op_warns_only_recipes_that_choose_it():
+    """`crosstalk` is moved only for `kind="next"` (a delayed copy of the aggressor's level);
+    the derivative form `fext`, the default, is not, so it must not be warned."""
+    def recipe(kind):
+        s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=2048)).carrier("dc", level=1.0)
+        r = s.crosstalk(kind=kind).recipe()
+        r["wfmsynth_version"] = "0.47.0"
+        return r
+    assert len(_replay(recipe("next"))) == 1
+    assert _replay(recipe("fext")) == []
+
+
+def test_an_entry_newer_than_the_running_build_is_silent(monkeypatch):
+    """A build older than a change cannot have rendered it differently, so it does not tell a
+    recipe it predates that change: the entries for an unreleased version say nothing yet."""
+    monkeypatch.setattr("wfmsynth.__version__", "0.47.0")
+    assert _replay(_idle_recipe("0.46.0")) == []
+    monkeypatch.setattr("wfmsynth.__version__", "0.48.0")
+    assert len(_replay(_idle_recipe("0.46.0"))) == 1
+
+
+def _drift(version, ops):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        C._warn_on_numeric_drift(version, ops)
+    return [str(c.message) for c in caught if "numerics changed" in str(c.message)]
+
+
+def test_digitize_and_capture_resamples_are_named_for_0_48_0():
+    for op in ("digitize", "capture"):
+        msgs = _drift("0.47.0", [{"op": "carrier", "kind": "dc"}, {"op": op}])
+        assert any(f"contains {op!r}" in m for m in msgs), op
+
+
+def test_a_stage_in_a_nested_sub_chain_is_found():
+    nested = {"op": "crosstalk",
+              "aggressor": {"ops": [{"op": "carrier", "kind": "dc"}, {"op": "lossy"}]}}
+    msgs = _drift("0.47.0", [nested])
+    assert any("contains 'lossy'" in m for m in msgs)
+    # and a recipe already at 0.48.0 stays silent
+    assert _drift("0.48.0", [nested]) == []

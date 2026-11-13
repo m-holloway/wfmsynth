@@ -29,6 +29,7 @@ order, which is what makes the round-trip exact.
 """
 from __future__ import annotations
 import dataclasses
+import difflib
 from dataclasses import asdict as _asdict, dataclass, field
 from typing import Optional
 import warnings
@@ -61,6 +62,12 @@ from . import ofdm as OFDM
 from .ofdm import KEYS as _OFDM_KEYS
 from . import swept as SW
 from .swept import LASER_KEYS as _LASER_KEYS, RESONATOR_KEYS as _RESONATOR_KEYS
+
+
+def _resample_held(x, up, down):
+    """`resample_poly` with the record's end samples held past its ends, not zeros: a record
+    that idles at a level is resampled to that level from its first sample to its last."""
+    return resample_poly(x, up, down, padtype="edge" if P._EDGE_HOLD else "constant")
 
 
 # --------------------------------------------------------------- op executors
@@ -184,7 +191,9 @@ def _op_roles(op, i):
     if name == "hybrid_echo":
         return _spec_roles(op.get("own", {"n_ui": 32, "seed": 7}), f"echo{i}")
     if name == "open_drain":
-        return _spec_roles(op.get("second"), f"open_drain_second{i}")
+        return (_spec_roles(op.get("second"), f"open_drain_second{i}")
+                + [r for j, e in enumerate(op.get("others") or ()) if isinstance(e, dict)
+                   for r in _spec_roles(e.get("source"), f"open_drain_other{i}_{j}")])
     if name == "pass_fet":
         return _spec_roles(op.get("gate", {}), f"pass_fet_gate{i}", "square")
     if name == "net":
@@ -405,7 +414,7 @@ def _op_capture(x, p, streams, grid, idx):
                 f"capture: the file's fs_hz={float(fs_hz):g} does not match the record's "
                 f"fs={float(grid_fs):g}; pass resample=True to resample onto the record's rate")
         target = int(round(len(y) * float(grid_fs) / float(fs_hz)))
-        y = resample_poly(y, target, len(y))
+        y = _resample_held(y, target, len(y))
     n_target = _grid_n(grid, p)
     if n_target is not None and len(y) != n_target:
         if not p.get("resample"):
@@ -413,7 +422,7 @@ def _op_capture(x, p, streams, grid, idx):
                 f"capture: {len(y)} samples do not match the record length {n_target} "
                 f"(Grid.n or carrier n=); pass resample=True to resample onto it, or match "
                 f"the Grid's n to the file's own length")
-        y = resample_poly(y, n_target, len(y))
+        y = _resample_held(y, n_target, len(y))
     if p.get("fc_hz") is not None or p.get("annotations"):
         from . import iqfile as IQF
         IQF.check_centre(p.get("fc_hz"), grid)
@@ -786,7 +795,25 @@ def _op_open_drain(x, p, streams, grid, idx):
             {"kind": "nrz", **s}, streams, grid, f"open_drain_second{idx}"))
         mid_b = 0.5 * (np.percentile(xb, 1) + np.percentile(xb, 99))
         sink_b = xb < mid_b
-    if not sink.any() and (sink_b is None or not sink_b.any()):
+    _check_open_drain_others(p)
+    extra = []
+    for j, e in enumerate(p.get("others") or ()):
+        # each extra sink is rendered like `second`: a carrier spec, or a sub-chain under
+        # `open_drain/<idx>/others/<j>/source`
+        xo = SUB.render(e["source"], streams, grid, f"open_drain/{idx}/others/{j}/source",
+                        len(xa), f"open_drain: `others[{j}].source`",
+                        carrier=lambda s, j=j: _carrier(
+                            {"kind": "nrz", **s}, streams, grid, f"open_drain_other{idx}_{j}"))
+        if np.shape(xo) != np.shape(xa):
+            raise ValueError(
+                f"open_drain: others[{j}].source rendered {len(xo)} samples and the record has "
+                f"{len(xa)}. Every sink's source must be on the record's grid: render it on the "
+                f"same grid (the same n), and leave `n=` off a carrier spec or state "
+                f"n={len(xa)}.")
+        extra.append((xo < 0.5 * (np.percentile(xo, 1) + np.percentile(xo, 99)),
+                      float(e.get("r_sink_ohm", p.get("r_sink_ohm", 20.0)))))
+    if not sink.any() and (sink_b is None or not sink_b.any()) and not any(
+            m.any() for m, _r in extra):
         # the sink decision thresholds the incoming carrier at the MIDPOINT of its OWN
         # excursion, so a carrier that never varies (a `dc` level, any sign) straddles
         # nothing and never sinks -- the line then does exactly nothing for the whole
@@ -797,17 +824,58 @@ def _op_open_drain(x, p, streams, grid, idx):
             "midpoint) -- the line reads as released (v_dd) for the whole record. A "
             "constant carrier can never sink; use one that actually toggles.",
             RuntimeWarning, stacklevel=2)
-    y = open_drain_line(sink, grid.fs,
-                        r_pullup_ohm=float(p["r_pullup_ohm"]), c_bus_f=float(p["c_bus_f"]),
-                        v_dd=v_dd, r_sink_ohm=float(p.get("r_sink_ohm", 20.0)),
-                        v0=p.get("v0"), sink_b_on=sink_b,
-                        r_sink_b_ohm=(float(p["r_sink_b_ohm"]) if "r_sink_b_ohm" in p else None))
+    if extra:
+        rs_a = float(p.get("r_sink_ohm", 20.0))
+        sinks = [(sink, rs_a)]
+        if sink_b is not None:
+            sinks.append((sink_b, float(p["r_sink_b_ohm"]) if "r_sink_b_ohm" in p else rs_a))
+        y = open_drain_line(None, grid.fs, r_pullup_ohm=float(p["r_pullup_ohm"]),
+                            c_bus_f=float(p["c_bus_f"]), v_dd=v_dd, v0=p.get("v0"),
+                            sinks=sinks + extra)
+    else:
+        y = open_drain_line(sink, grid.fs,
+                            r_pullup_ohm=float(p["r_pullup_ohm"]), c_bus_f=float(p["c_bus_f"]),
+                            v_dd=v_dd, r_sink_ohm=float(p.get("r_sink_ohm", 20.0)),
+                            v0=p.get("v0"), sink_b_on=sink_b,
+                            r_sink_b_ohm=(float(p["r_sink_b_ohm"]) if "r_sink_b_ohm" in p
+                                          else None))
     if p.get("center"):
         lo, hi = float(np.percentile(y, 1)), float(np.percentile(y, 99))
         span = max(hi - lo, 1e-30)
         keep = max(float(np.percentile(xa, 99)) - float(np.percentile(xa, 1)), 1e-30)
         y = (y - 0.5 * (lo + hi)) * (keep / span)
     return y
+
+
+def _check_open_drain_others(p):
+    """`open_drain(others=[dict(source=..., r_sink_ohm=...), ...])`: refuse what nothing would
+    read, by name, where it is written (the builder) and where it is run (a hand-written recipe)."""
+    others = p.get("others")
+    if others is None:
+        return
+    entry_keys = ("source", "r_sink_ohm")
+    if isinstance(others, (str, bytes, dict)) or not isinstance(others, (list, tuple)) \
+            or not others:
+        raise ValueError(f"open_drain: others is a non-empty list of dict(source=<a carrier "
+                         f"spec or sub-chain>, r_sink_ohm=<its on-resistance>), one per extra "
+                         f"sink; got {others!r}. A single second sink is `second=`.")
+    for j, e in enumerate(others):
+        if not isinstance(e, dict):
+            raise ValueError(f"open_drain: others[{j}] is {type(e).__name__}; each entry is "
+                             f"dict(source=..., r_sink_ohm=...).")
+        for k in e:
+            if k not in entry_keys:
+                near = difflib.get_close_matches(k, entry_keys, n=1, cutoff=0.5)
+                raise ValueError(f"open_drain: others[{j}] has {k!r}, which nothing reads"
+                                 + (f" -- did you mean {near[0]!r}?" if near else
+                                    f"; an entry takes {' and '.join(entry_keys)}."))
+        if e.get("source") is None:
+            raise ValueError(f"open_drain: others[{j}] needs source=<a carrier spec or "
+                             f"sub-chain>: when that device pulls the line low.")
+        r = e.get("r_sink_ohm", p.get("r_sink_ohm", 20.0))
+        if isinstance(r, bool) or not isinstance(r, (int, float)) or not r > 0:
+            raise ValueError(f"open_drain: others[{j}] r_sink_ohm must be a positive number of "
+                             f"ohms, got {r!r}.")
 
 
 def _op_intra_pair_skew(x, p, streams, grid, idx):
@@ -1124,7 +1192,8 @@ def _op_dfe(x, p, streams, grid, idx):
 #
 # The only way to reach it was `carrier(..., jitter=dict(dcd=<samples>))`, which routes through
 # `physics._edge_disp`'s `(dcd/2)*sign(diff(levels))` and then through `_place_symbols`'s
-# `searchsorted` on the INTEGER sample grid. MEASURED on a 1024 UI clock pattern at
+# `searchsorted` on the INTEGER sample grid (until 0.48.0, which places edges at their own times;
+# the sign and scale fault below remains). MEASURED on a 1024 UI clock pattern at
 # fs=256e9/baud=16e9 (mean high pulse width minus mean low pulse width, which is the definition
 # of DCD):
 #
@@ -1136,10 +1205,11 @@ def _op_dfe(x, p, streams, grid, idx):
 #
 # Two separate faults. The SIGN and SCALE are wrong -- displacing rising edges by +d/2 and
 # falling by -d/2 makes the high pulse SHORTER by 2*d, so the realised DCD is -2x the number
-# asked for. And the request is QUANTISED to whole samples: 0.256 and 1.024 samples produce the
-# BIT-IDENTICAL record above, so any sub-sample DCD -- which is all of them, 1 ps is 0.256
-# samples here -- is unreachable. That defect lives in `physics.py`, which this unit does not
-# own; it is logged in BACKLOG.md with these numbers.
+# asked for. And the request WAS QUANTISED to whole samples (fixed in 0.48.0, #98; the table is
+# what 0.47.0 measured): 0.256 and 1.024 samples produced the BIT-IDENTICAL record above, so
+# any sub-sample DCD -- which is all of them, 1 ps is 0.256 samples here -- was
+# unreachable. That defect lives in `physics.py`, which this unit does
+# not own; it is logged in BACKLOG.md with these numbers.
 #
 # `_op_dcd` is the direct knob, in ps, on the waveform, with the standard definition:
 #
@@ -1504,7 +1574,7 @@ def _op_digitize(x, p, streams, grid, idx, win=None):
     # default path and every reference below is then the whole record, bit-identically.
     n_out = p.get("n_out")
     if n_out and n_out != len(x):
-        x = resample_poly(x, n_out, len(x))
+        x = _resample_held(x, n_out, len(x))
     span = float(np.ptp(x if win is None else x[win])) + 1e-9
     if "noise_rms" in p:                      # absolute noise floor (signal-independent)
         x = x + streams.role(f"noise/{idx}").normal(0.0, p["noise_rms"], len(x))
@@ -2151,8 +2221,9 @@ def _lead_extent(ops, grid, seed, n, rel=LEAD_IN_REL):
         return np.fft.rfft(d)
 
     cap = int(min(P.PROBE_MAX, max(4 * n, 4 * P.PROBE_N0)))
-    return int(P.response_extent(make_H, rel=rel, n0=min(P.PROBE_N0, max(8, n)),
-                                 probe_max=cap, warn=False))
+    with P.zero_edges():          # an impulse at index 0 is not a step down from a held level
+        return int(P.response_extent(make_H, rel=rel, n0=min(P.PROBE_N0, max(8, n)),
+                                     probe_max=cap, warn=False))
 
 
 def _lead_source_reach(src, n, n_ui):
@@ -2838,7 +2909,9 @@ class Signal:
 
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
-        pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter.
+        pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter (in samples; each edge is
+        placed at its own time, so a symbol rate that does not divide the sample rate and a
+        jitter under one sample are both exact, to the edge shaper's resolution).
 
         STATE `n_ui`. It is the number of symbols in the record and it defaults to 32,
         stretched over the whole record whatever `Grid(baud=)` says: the symbol rate of the
@@ -3414,8 +3487,9 @@ class Signal:
         pulse width -- so ``dcd(ps=4.0)`` makes the high pulses 4 ps wider than the low ones and
         nothing else. Realised to 0.05 % (see `_op_dcd`), sub-sample.
 
-        The old route, ``carrier(..., jitter=dict(dcd=<samples>))``, is off by -2x AND quantised
-        to whole samples; the numbers are in the block comment above `_dcd_displacement`.
+        The old route, ``carrier(..., jitter=dict(dcd=<samples>))``, is off by -2x (the numbers are in the block
+        comment above `_dcd_displacement`); since 0.48.0 it is no longer quantised to whole
+        samples.
         params: ps | frac_ui, threshold, plateau_ui."""
         return self._add("dcd", **params)
 
@@ -3446,7 +3520,13 @@ class Signal:
 
     def timing(self, **params):
         """Compose arbitrary clock timing into the carrier (the timing-modulation enabler).
-        params: ssc, pj, wander, rj_ps, phase_noise (see cdr.timing_source)."""
+        params: ssc, pj, wander, rj_ps, phase_noise (see cdr.timing_source).
+
+        `rj_ps` draws a fresh offset for every SAMPLE, not every edge, so the jitter an edge
+        shows depends on the filtering after it: 0.5 ps asked reads 0.32 ps per edge through a
+        6 GHz scope at 20 GSa/s. For "x ps rms per edge" ask the source instead,
+        `carrier(..., jitter=dict(rj=x_ps * fs / 1e12))` (in samples), which moves each edge once
+        before the edge shaper."""
         return self._add("timing", **params)
 
     def ssc(self, **params):
@@ -3489,7 +3569,17 @@ class Signal:
         The sink decision thresholds each incoming carrier at the MIDPOINT of its OWN
         excursion, so a `dc` carrier -- any level, any sign -- straddles nothing and never
         sinks; only a carrier that actually toggles drives the bus. If NEITHER device ever
-        sinks the op warns, since the line then does exactly nothing for the whole record."""
+        sinks the op warns, since the line then does exactly nothing for the whole record.
+
+        `others=[dict(source=..., r_sink_ohm=...), ...]` adds any number of further sinks beside
+        `second=`, each with its own source (a carrier spec or a sub-chain, as `second`) and its
+        own on-resistance (default `r_sink_ohm`). The line resolves every device that is pulling
+        as parallel conductances against the pull-up, so each device has its own settled low,
+        v_dd * r_k / (r_k + r_pullup) (`physics.open_drain_low_v`), two at once give the lower
+        parallel level, and the rise after the last release is Rp * Cb. That is the shape of a
+        shared bus with a controller and several targets, or a target stretching the clock; see
+        the I2C-like bus in docs/COOKBOOK.md."""
+        _check_open_drain_others(params)
         return self._add("open_drain", **params)
 
     def lossy(self, **params):
@@ -3506,7 +3596,12 @@ class Signal:
 
         On an I/Q record the same law is read at fc_hz + f -- the channel's baseband
         equivalent, so `loss_at_ghz` still means RF and the grid need not hold the carrier
-        (`wfmsynth.baseband`; `method` is then refused)."""
+        (`wfmsynth.baseband`; `method` is then refused).
+
+        The record's first and last samples are HELD: the line was at the first sample's value
+        before the record and stays at the last one after it, so a record idling at a level
+        comes out at that level times the channel's DC gain, with no false edge at either end
+        (0.48.0; `physics.zero_edges()` pads with zeros instead)."""
         return self._add("lossy", **params)
 
     def sparam(self, **params):
@@ -4257,6 +4352,44 @@ NUMERIC_CHANGES = (
      "up to one sample at each edge that is not on a sample, or that rounding had put one "
      "sample late; a record whose edges were all on samples and correctly placed is unchanged "
      "bit for bit."),
+    *(("0.48.0", op,
+       "each symbol edge is placed at its own time to a fraction of a sample, instead of on "
+       "a whole sample. A record whose samples per UI is not a whole number had the grid's "
+       "rounding as up to one sample of sawtooth timing error (14.4 ps rms at 20 GSa/s and "
+       "40.00061 samples per UI), and `jitter=` under a sample was quantised to whole "
+       "samples (a floor of about half a sample rms, 25 ps at 20 GSa/s). A record with a "
+       "whole number of samples per UI and no `jitter=`, or whose displaced edges all fall "
+       "on samples, is unchanged bit for bit.")
+      for op in ("carrier/nrz", "carrier/pam4", "carrier/pam3", "carrier/pam5", "carrier/pam8",
+                 "symbols", "coded")),
+)
+
+# 0.48.0: a record that idles at a level starts there (#100). One text, one entry per op it
+# reaches, so a recipe is warned about exactly the ops it holds.
+_STEADY_START = (
+    "a record that idles at a level no longer opens on a false edge. The stage used to start as "
+    "if the input before the record were zero: a ring, a sag at BOTH ends (a zero-phase channel), "
+    "an echo that had not arrived, a filter charging up from zero. It now takes the line to have "
+    "been at the first sample's value before the record and to stay at the last one after it. A "
+    "record that starts and ends at exactly zero is unchanged bit for bit; any other moves in "
+    "the first and last samples (by the whole level at the worst) and, for a response with a long "
+    "tail, by a small and falling amount further in (see docs/COMPATIBILITY.md).")
+NUMERIC_CHANGES += tuple(
+    ("0.48.0", op, _STEADY_START) for op in (
+        "lossy", "sparam", "cascade", "reflect", "resonant_reflect", "probe", "ctle", "tx_ffe",
+        "de_emphasis", "rx_ffe", "hybrid_echo", "multipair", "crosstalk/next",
+        "crosstalk_matrix/next", "scope/gaussian"))
+NUMERIC_CHANGES += (
+    ("0.48.0", "digitize",
+     "`n_out=` resamples with the record's end samples held past its ends, not zeros (#100). "
+     "A record that idles at a nonzero level no longer gets a false edge at its first and last "
+     "samples; a record that starts and ends at exactly zero is unchanged. Without `n_out=` "
+     "the op is unchanged."),
+    ("0.48.0", "capture",
+     "`resample=True` resamples with the record's end samples held past its ends, not zeros "
+     "(#100). A capture that idles at a nonzero level no longer gets a false edge at its first "
+     "and last samples; one that starts and ends at exactly zero is unchanged. Without "
+     "`resample=True` the op is unchanged."),
 )
 
 
@@ -4282,15 +4415,22 @@ def _version_tuple(v):
 
 
 def _ops_present(ops):
-    """What a `NUMERIC_CHANGES` entry can name: every top-level op, and ``carrier/<kind>`` for
-    every carrier of that kind ANYWHERE in the recipe -- the source, a sub-chain, a bare
+    """What a `NUMERIC_CHANGES` entry can name: every op at any depth, ``<op>/<kind>`` for one that
+    states a kind, and ``carrier/<kind>`` for every carrier of that kind ANYWHERE in the recipe -- the source, a sub-chain, a bare
     carrier spec (``gate=dict(kind="square", ...)``), a `net` driver's source. A change to
     one kind of carrier must not warn every recipe that has a carrier at all."""
-    present = {o.get("op") for o in ops}
+    present = set()
 
     def walk(v):
         if isinstance(v, dict):
             kind = v.get("kind")
+            name = v.get("op")
+            if isinstance(name, str):
+                # every op at ANY depth -- a sub-chain held by a parameter included -- and, for
+                # one that states a kind (`crosstalk(kind="next")`), `<op>/<kind>`
+                present.add(name)
+                if isinstance(kind, str):
+                    present.add(f"{name}/{kind}")
             if isinstance(kind, str) and (v.get("op") == "carrier" or "op" not in v):
                 present.add(f"carrier/{kind}")
             if v.get("op") == "pass_fet":
@@ -4319,7 +4459,12 @@ def _warn_on_numeric_drift(recipe_version, ops):
     if have is None:
         return
     present = _ops_present(ops)
+    running = _version_tuple(__version__)
     for changed_in, op, what in NUMERIC_CHANGES:
+        # a build older than the change cannot have rendered it differently: an entry for a
+        # version not yet reached (an unreleased one, or an install whose metadata lags) is silent
+        if running is not None and _version_tuple(changed_in) > running:
+            continue
         if op in present and have < _version_tuple(changed_in):
             warnings.warn(
                 f"this recipe was written by wfmsynth {recipe_version} and contains {op!r}, "

@@ -138,6 +138,35 @@ not.
   is unchanged bit for bit. The entries are keyed `carrier/square` and `carrier/cmos` and
   match that kind of carrier anywhere in a recipe, so a recipe holding only `nrz` or `sine`
   carriers is not warned. To reproduce an old record exactly, render it with 0.45.x.
+- **0.48.0, a record that idles at a level (#100).** `lossy`, `sparam`, `cascade`, `reflect`,
+  `resonant_reflect`, `hybrid_echo`, `probe` (ground lead, compensation), `ctle`, `tx_ffe`,
+  `de_emphasis`, `rx_ffe`, the near-end `crosstalk`, `scope(kind="gaussian")` and the resample
+  behind `digitize(n_out=)` started a record as if the input before it were zero, so a record
+  idling at 3.3 V opened with a ring, a sag (a zero-phase `lossy` at both ends) or an echo
+  that had not yet arrived. They now take the line to have been at the first sample's value
+  and to stay at the last one, as `scope`, `filter` and the other IIR stages already did.
+  **A record whose first and last samples are exactly zero is unchanged bit for bit.** Any
+  other moves in its first and last samples, by up to the whole level at the worst
+  (a ground-lead probe on 3.3 V: 0.794 of the level at the head, now 0), and by a small, falling
+  amount further in for a response with a long tail: for `lossy` on an 8-inch channel, at most
+  1.4 % of a step 200 samples from the ends, 0.35 % at 1000 and 0.08 % at 4000. That interior
+  change is the line's history that the zero pad was missing. The entries are keyed on the op,
+  and on `crosstalk/next` and `scope/gaussian` where only that kind moves, and warn a recipe
+  stamped before 0.48.0. To reproduce an old record exactly, render it with 0.47.x. Inside a
+  script, `physics.zero_edges()` renders the zero-padded form, which is also how an impulse
+  response is read off an impulse at index 0 (a stage that holds its first sample answers that
+  as a step down from 1).
+
+- **0.48.0, `nrz`, `pam<N>`, `symbols` and `coded` carriers.** Each symbol edge is at its own
+  time to a fraction of a sample, not on a whole one. A record whose samples per UI is not a
+  whole number had up to one sample of sawtooth timing error that was the grid's (14.43 ps rms
+  at 20 GSa/s and 40.00061 samples per UI; now 0.09 ps, the measure's own floor), and `jitter=`
+  under a sample was quantised to whole samples (24.97 ps rms for 0.0125 to 5 ps asked; now
+  within 2 % from 0.5 ps up). A record with a whole number of samples per UI and no `jitter=`,
+  or whose displaced edges all fall on samples, is unchanged bit for bit. Keyed `carrier/nrz`,
+  `carrier/pam3`, `carrier/pam4`, `carrier/pam5`, `carrier/pam8`, `symbols` and `coded`, so a
+  recipe holding only analog carriers is not warned; another `pam<N>` is moved and not named.
+  To reproduce an old record exactly, render it with 0.47.x.
 
 ---
 

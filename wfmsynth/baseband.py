@@ -55,7 +55,8 @@ That ringing lives at the band's edges, where an envelope that fits its grid hol
 agreement above is stated for a band-limited envelope.
 
 The convolution is LINEAR, as for the real ops (`physics.apply_transfer`): the record is
-zero-padded past the response's own length. `linear=False` is the circular form; `guard=`
+padded past the response's own length with its end samples held, not zeros (a record that
+idles at a level starts there; `physics.zero_edges()` restores the zero pad). `linear=False` is the circular form; `guard=`
 states the length. `method="overlap"` is refused: the block path is real-only.
 """
 from __future__ import annotations
@@ -113,6 +114,18 @@ def apply(x, make_H, linear=True, guard=None, method="fft", who="baseband"):
     if not linear:
         return np.fft.ifft(np.fft.fft(x) * make_H(n))
     guard = max(1, int(_extent(make_H, n) if guard is None else guard))
+    if P._EDGE_HOLD and (x[0] != 0 or x[-1] != 0):
+        # the carrier was already there: hold the ends past the response's reach, as
+        # `physics.apply_transfer` does, so an unmodulated envelope stays where it is
+        nfft = P.next_smooth_length(n + 2 * guard)
+        xp = np.empty(nfft, complex)
+        xp[:guard] = x[0]
+        xp[guard:guard + n] = x
+        xp[guard + n:2 * guard + n] = x[-1]
+        xp[2 * guard + n:] = 0.0
+        X = np.fft.fft(xp)
+        X *= make_H(nfft)
+        return np.fft.ifft(X)[guard:guard + n].copy()
     nfft = P.linear_fft_length(n, guard)
     X = np.fft.fft(x, nfft)
     X *= make_H(nfft)

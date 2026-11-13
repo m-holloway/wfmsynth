@@ -86,6 +86,31 @@ T = np.linspace(0.0, 1.0, N, endpoint=False)
 # want the algebraic tail chased further pass `guard=` (or a smaller `rel`) and pay for it.
 
 SMOOTH_RADIX = (2, 3, 5)       # "5-smooth"/regular lengths: the FFT's fast path
+# Whether a linear stage holds the record's end samples out past its response, or pads with zeros.
+# On, the line is taken to have been at the first sample's value before the record and to stay at
+# the last one after it, as `scope_bandwidth` already does. `zero_edges()` turns it off, which is
+# how an impulse at index 0 is read as an impulse and not as a step down from a held 1.
+_EDGE_HOLD = True
+
+
+class zero_edges:
+    """``with zero_edges():`` pads every linear stage with zeros past the record, as every stage
+    did before the ends were held (#100). It is how to read an impulse response off an impulse at
+    index 0 (`compose`'s lead-in sizer and `stream.channel_fir` do), how to model a transmission
+    that STARTS at the first sample, and how to reproduce a record rendered before 0.48.0. Like
+    `response_cache` it is a module-level switch, not thread-safe."""
+
+    def __enter__(self):
+        global _EDGE_HOLD
+        self._prev, _EDGE_HOLD = _EDGE_HOLD, False
+        return self
+
+    def __exit__(self, *exc):
+        global _EDGE_HOLD
+        _EDGE_HOLD = self._prev
+        return False
+
+
 RESPONSE_REL = 1e-5            # -100 dB below the peak: where an impulse response is "over"
 PROBE_N0 = 4096                # first probe length for the response-extent measurement
 PROBE_MAX = 1 << 21            # stop doubling the probe here, and warn
@@ -140,23 +165,28 @@ def response_extent(make_H, rel=RESPONSE_REL, n0=PROBE_N0, probe_max=PROBE_MAX, 
     head. If `probe_max` is reached first the result is a LOWER BOUND and a warning says so --
     `warn=False` for a caller that is imposing `probe_max` as a deliberate cap and has said so
     in its own documentation (`apply_transfer` does exactly that)."""
+    return _response_arc(make_H, rel, n0, probe_max, warn)[0]
+
+
+def _response_arc(make_H, rel=RESPONSE_REL, n0=PROBE_N0, probe_max=PROBE_MAX, warn=True):
+    """`response_extent`, and WHERE the response sits: ``(extent, lag_min)`` -- the first lag, in
+    samples, at or above `rel` of the peak (negative for a response with a pre-cursor)."""
     n = int(n0)
     while True:
         h = np.fft.irfft(np.asarray(make_H(n), complex), n)
         peak = float(np.abs(h).max())
         if peak == 0.0:
-            return 1
-        extent = _circular_support(np.abs(h) >= rel * peak)
+            return 1, 0
+        start, extent = _circular_arc(np.abs(h) >= rel * peak)
         if extent <= n // 2:
-            return extent
+            return extent, (start if start <= n // 2 else start - n)
         if n >= probe_max:
-            if not warn:
-                return extent
-            warnings.warn(
-                f"response_extent: response still fills the probe at n={n} "
-                f"(support {extent}); padding with a lower bound, so a little wrap may remain",
-                RuntimeWarning, stacklevel=2)
-            return extent
+            if warn:
+                warnings.warn(
+                    f"response_extent: response still fills the probe at n={n} "
+                    f"(support {extent}); padding with a lower bound, so a little wrap may remain",
+                    RuntimeWarning, stacklevel=3)
+            return extent, (start if start <= n // 2 else start - n)
         n *= 2
 
 
@@ -342,13 +372,38 @@ def _apply_overlap_save(x, make_H, guard, rel, chunk=OVERLAP_CHUNK):
         xs = np.concatenate([x, np.zeros(pad)])
         z = stream_convolve(xs, taps, chunk)
         del xs
-        return z[pad:pad + n].copy()
-    z = stream_convolve(x, taps, chunk)
-    if lag_min == 0:
-        return z
-    out = np.zeros(n)
-    out[lag_min:] = z[:max(0, n - lag_min)]
-    return out
+        out = z[pad:pad + n].copy()
+    else:
+        z = stream_convolve(x, taps, chunk)
+        if lag_min == 0:
+            out = z
+        else:
+            out = np.zeros(n)
+            out[lag_min:] = z[:max(0, n - lag_min)]
+    return _hold_ends(out, x, taps, lag_min) if _EDGE_HOLD else out
+
+
+def _hold_ends(y, x, taps, lag_min):
+    """Add to `y`, the zero-padded convolution of `x` with `taps`, what the line's history and
+    its future contribute if the end samples are HELD: ``x[0]`` before the record, ``x[-1]``
+    after it. Only the first ``lag_min + len(taps)`` and last ``-lag_min`` outputs move.
+
+    With ``C(k)`` the running sum of the taps up to lag k, output t gains ``x[0] * (C(inf) -
+    C(t))`` from the samples before t = 0 and ``x[-1] * C(t - n)`` from those after t = n - 1.
+    Nothing is built at the record's length, so the block path keeps its memory."""
+    n = len(x)
+    cum = np.cumsum(taps)
+    total = float(cum[-1])
+    top = lag_min + len(taps)                           # one past the response's last lag
+    if x[0] != 0.0 and top > 0:
+        t = np.arange(min(n, top))
+        k = np.clip(t - lag_min, -1, len(taps) - 1)     # -1 -> nothing yet summed
+        y[:len(t)] += x[0] * (total - np.where(k < 0, 0.0, cum[np.maximum(k, 0)]))
+    if x[-1] != 0.0 and lag_min < 0:
+        t = np.arange(max(0, n + lag_min), n)
+        k = np.clip(t - n - lag_min, 0, len(taps) - 1)
+        y[t[0]:] += x[-1] * cum[k]
+    return y
 
 
 def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
@@ -359,6 +414,19 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
     interval whatever `nfft` is). The record is zero-padded to a 5-smooth length at or above
     ``len(x) + len(h) - 1``, multiplied there, and truncated back -- so no part of the response
     to the record's tail lands on its head.
+
+    THE RECORD'S ENDS ARE HELD. Before sample 0 the line is taken to have been at ``x[0]`` and
+    after the last sample to stay at ``x[-1]``, so a record that idles at a level comes out at
+    that level times the response's DC gain from its first sample to its last, rather than
+    starting as if the input before it had been zero (#100). The hold reaches as far as the
+    response does, in the direction it does (a causal response needs only the head; a zero-phase
+    one both ends), and a record whose end samples are exactly zero is zero-padded as before, bit
+    for bit. Two consequences worth stating. An impulse at index 0 is no longer an impulse
+    response but a step down from a held level: read an impulse response with the impulse past the
+    first sample, or inside ``with zero_edges():`` (what `compose`'s lead-in sizer and
+    `stream.channel_fir` do). And the guard cap (twice the record) bounds how far the hold
+    reaches, so a response with an algebraic tail leaves a residual there -- 0.05 % of the level
+    at the ends of the slow channel in `tests/test_steady_state_start.py`.
 
     `guard` fixes ``len(h)`` in samples instead of measuring it (`response_extent` does the
     measuring). ``linear=False`` restores the pinned-length CIRCULAR convolution, which is what
@@ -416,6 +484,7 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
                              "no circular form. Pass linear=True, or method='fft'.")
         warn_if_awkward_length(n, "apply_transfer(linear=False)")
         return np.fft.irfft(np.fft.rfft(x) * make_H(n), n)
+    lag_min = None
     if guard is None:
         # The guard is capped at TWICE the record. A response that long is one whose level at
         # those lags is already at `rel`, so each further doubling of the transform buys less
@@ -423,8 +492,9 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
         # stop-band floor) pads an 8 k record to 1.1 M and spends 0.22 s doing it. Past the cap
         # the remaining wrap is bounded by the response's own level there; `guard=` overrides.
         cap = int(min(probe_max, max(4 * n, 4 * n0)))
-        guard = min(response_extent(make_H, rel=rel, n0=min(n0, max(8, n)), probe_max=cap,
-                                    warn=False), 2 * n)
+        extent, lag_min = _response_arc(make_H, rel=rel, n0=min(n0, max(8, n)), probe_max=cap,
+                                        warn=False)
+        guard = min(extent, 2 * n)
     guard = max(1, int(guard))
     if method == "auto":
         method = ("overlap" if n >= OVERLAP_MIN_N and guard <= OVERLAP_MAX_FRAC * n else "fft")
@@ -440,6 +510,27 @@ def apply_transfer(x, make_H, linear=True, guard=None, radix=SMOOTH_RADIX,
             "impulse response without aliasing (it is probably mostly delay, or longer than "
             f"the {PROBE_MAX}-sample probe cap); falling back to the whole-record transform.",
             RuntimeWarning, stacklevel=2)
+    if lag_min is None:                          # the caller stated a length, not where it sits
+        pre = post = guard
+    else:
+        cap = max(guard, 2 * n)
+        pre = int(min(max(0, lag_min + extent), cap))
+        post = int(min(max(0, -lag_min), cap))
+    if _EDGE_HOLD and (x[0] != 0.0 or (post and x[-1] != 0.0)):
+        # the line was already there: hold the end samples out past the response's reach on
+        # each side, instead of zeros -- see `_hold_edges`. A record that starts and ends at
+        # exactly zero is padded with zeros either way, and takes the path below unchanged.
+        nfft = next_smooth_length(n + pre + post, radix)
+        xp = np.zeros(nfft)
+        xp[:pre] = x[0]
+        xp[pre:pre + n] = x
+        xp[pre + n:pre + n + post] = x[-1]
+        X = np.fft.rfft(xp)
+        del xp
+        X *= make_H(nfft)
+        y = np.fft.irfft(X, nfft)
+        del X
+        return y[pre:pre + n].copy()
     nfft = linear_fft_length(n, guard, radix)
     xp = np.zeros(nfft)
     xp[:n] = x
@@ -692,8 +783,9 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
 
     LINEAR, NOT CIRCULAR
     --------------------
-    The response is applied as a LINEAR convolution: the record is zero-padded past the
-    channel's own impulse-response length, transformed there, and truncated back, so the
+    The response is applied as a LINEAR convolution: the record is padded past the
+    channel's own impulse-response length with its end samples held (`zero_edges()` restores
+    zeros), transformed there, and truncated back, so the
     channel's answer to the record's last samples does not wrap onto its first. See
     `apply_transfer` for the mechanics and `response_extent` for how the padding is sized.
     `guard=` states that length in samples instead of measuring it; ``linear=False`` restores
@@ -701,11 +793,14 @@ def lossy_channel(x, length_in=6.0, tand=0.02, eps_r=4.3, f_nyq_ghz=8.0,
     transfer-function measurement wants (an input tone is an eigenvector of the circular
     product and of nothing else) and is otherwise kept only for comparison.
 
-    Note what the linear form implies at the record's HEAD: with nothing before sample 0 the
-    line is quiescent, so a record that begins mid-pattern starts with a turn-on edge. That is
-    the honest answer for a link that starts transmitting at t=0, and the wrong one for a
-    record that is a WINDOW on a link that was already running -- for which the fix is a
-    lead-in the caller renders and discards, not a wrap. `BACKLOG.md` carries that item."""
+    THE ENDS ARE HELD, NOT ZERO. The line is taken to have been at the first sample's value
+    before the record and to stay at the last one after it (`apply_transfer`), so a record that
+    idles at a level -- a rail, a bus, a clock -- starts and ends at that level times the
+    channel's DC gain instead of sagging toward zero (a zero-phase channel did so at BOTH ends,
+    by 0.65 V of a 3.3 V rail in the case that was reported, #100). A record that is a window on
+    a running pattern still starts on a line that has not seen the pattern's history, which the
+    lead-in (`Signal.with_lead_in`) supplies. `zero_edges()` restores the zero pad, for an
+    impulse response read off an impulse at index 0."""
     x = np.asarray(x, float)
     if grid is not None:
         f_nyq_ghz = grid.f_nyquist / 1e9                  # real frequency axis from the grid
@@ -750,7 +845,7 @@ def _coupled_kernel(aggressor, kind, d_samples, n):
     if kind == "fext":
         k = np.gradient(a)
     elif kind == "next":
-        d = int(d_samples); k = np.zeros(n); k[d:] = a[:n - d]
+        d = int(d_samples); k = np.full(n, a[0] if _EDGE_HOLD and n else 0.0); k[d:] = a[:n - d]
     else:
         raise ValueError(f"unknown crosstalk kind {kind!r}; use 'fext' or 'next'")
     return k / (np.abs(k).max() + 1e-9)
@@ -959,13 +1054,16 @@ def tx_ffe(x, taps, spb, pre=1):
     `pre` leading (pre-cursor) taps. This puts a deliberate PRE-CURSOR in the pulse response
     — the qualitative shape a real link has and a naive synthetic waveform lacks — and
     de-emphasizes post-cursor ISI. Apply at the transmitter, BEFORE the channel. Taps are
-    used as given (normalize to sum 1 for unity DC gain, or |taps| for a peak-power budget)."""
+    used as given (normalize to sum 1 for unity DC gain, or |taps| for a peak-power budget).
+    The line was already there: a tap that reaches past either end reads the end sample, so a
+    record idling at a level comes out at the level times the taps' sum from the first sample."""
     x = np.asarray(x, float)
     idx = np.arange(len(x))
     y = np.zeros_like(x)
     for k, c in enumerate(taps):
         d = (k - pre) * spb                        # pre-cursor taps (k<pre) pull from the future
-        y += c * np.interp(idx - d, idx, x, left=0.0, right=0.0)
+        edge = (x[0], x[-1]) if _EDGE_HOLD and len(x) else (0.0, 0.0)   # the line was already there
+        y += c * np.interp(idx - d, idx, x, left=edge[0], right=edge[1])
     return y
 
 
@@ -1181,7 +1279,9 @@ def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
         (a single load reflection returns to the source even when the source is matched).
 
     Both reduce to the incident `x` at a matched termination, so a matched line is bit-identical to
-    the forward-only path. `td_frac` is a fraction of the record; `td_samples` overrides with an
+    the forward-only path. The echoes of the record's first samples are those of a line that was
+    already at ``x[0]``: an idle line has its echoes from the first sample on, at the level times
+    the sum of the bounces, rather than gaining each as it arrives (`zero_edges()` for that). `td_frac` is a fraction of the record; `td_samples` overrides with an
     absolute sample delay; `td_ps` (with grid) states the one-way delay in picoseconds."""
     x = np.asarray(x, float)
     nx = len(x)
@@ -1208,7 +1308,9 @@ def multi_reflection(x, td_frac=0.12, gamma_s=0.3, gamma_l=0.4, n_bounce=6,
         if shift >= nx:
             break
         weight = (g ** k) if node == "load" else (g ** (k - 1))   # source sees the echo one bounce sooner
-        y = y + weight * gamma_l * RS.shift(x, shift, fill=0.0)
+        # a line idling at x[0] has had its echoes arriving all along; only a record that is the
+        # first sample of a transmission (all zero before it) is quiet until the first one lands
+        y = y + weight * gamma_l * RS.shift(x, shift, fill=float(x[0]) if _EDGE_HOLD else 0.0)
     return y
 
 
@@ -1684,17 +1786,38 @@ def _edge_disp(levels_per_ui, jitter, rng):
 
 
 def _place_symbols(levels_per_ui, n, spb, jitter=None, rng=None):
-    """Map a per-UI symbol-level array onto n samples. jitter=None -> uniform UI
-    boundaries (bit-identical legacy). With a Jitter, the interior symbol EDGES are
-    displaced (source jitter) before the piecewise-constant stream is returned."""
+    """Map a per-UI symbol-level array onto n samples, each symbol EDGE at its exact time.
+
+    An edge at ``te`` samples is the hard step at ``floor(te)`` DELAYED by the fraction, with the
+    fractional-delay interpolator the `square`/`cmos` edge train uses (`_delay_steps`). The edge
+    shaper's rise is then applied about the true time, so a ``spb`` that is not whole, or a
+    displacement under a sample, is not snapped to the grid. An edge within `EDGE_SNAP_SAMPLES`
+    of a sample IS on it and is left a hard step, so a whole ``spb`` with no jitter is the plain
+    piecewise-constant stream, bit-identical to what this returned before edges were fractional.
+    With a Jitter the interior edges are displaced (source jitter) first."""
     n_ui = len(levels_per_ui)
     if jitter is None:
-        idx = np.clip((np.arange(n) / spb).astype(int), 0, n_ui - 1)
-        return levels_per_ui[idx]
-    rng = rng or np.random.default_rng()
-    edges = np.arange(1, n_ui) * spb + _edge_disp(levels_per_ui, jitter, rng)
-    idx = np.clip(np.searchsorted(edges, np.arange(n), side="right"), 0, n_ui - 1)
-    return levels_per_ui[idx]
+        if spb == int(spb):
+            idx = np.clip((np.arange(n) / spb).astype(int), 0, n_ui - 1)
+            return levels_per_ui[idx]
+        te = np.arange(1, n_ui) * spb
+    else:
+        rng = rng or np.random.default_rng()
+        te = np.arange(1, n_ui) * spb + _edge_disp(levels_per_ui, jitter, rng)
+    near = np.round(te)
+    te = np.where(np.abs(te - near) <= EDGE_SNAP_SAMPLES, near, te)
+    m = np.floor(te).astype(np.int64)
+    if (np.diff(m) >= 0).all():
+        # the run of samples at each level, straight from the edges (a search of every sample
+        # against them is the dearer way to the same stream)
+        x = np.repeat(levels_per_ui, np.diff(np.clip(m, 0, n), prepend=0, append=n))
+    else:                                    # displaced past a neighbour: the order is theirs
+        idx = np.clip(np.searchsorted(m, np.arange(n), side="right"), 0, n_ui - 1)
+        x = levels_per_ui[idx]
+    d = te - m
+    if (d > 0).any():
+        x = _delay_steps(np.array(x, float), m, d, np.diff(levels_per_ui))
+    return x
 
 
 def carrier_symbols(kind, n_ui, seed=1, pattern="legacy", phase=0, pair=0,
@@ -1789,6 +1912,18 @@ def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=No
                       deliberately ISI-free contrast case.
     jitter=Jitter(...) applies transmitter jitter at the symbol edge times (source
                       jitter) before shaping; rng seeds it.
+
+    SHORT EDGES RING MORE BETWEEN SAMPLES. An edge between samples is placed with an 8-tap
+    Lagrange fractional delay (see `_delay_steps`), which is exact in time but not flat near the
+    Nyquist rate. When the shaped edge is as short as the floor (2 samples: `tr_frac * spb < 2`,
+    which also warns) a non-whole `spb` therefore peaks higher than a whole one. PRBS7 peak
+    (full scale 1.0), before -> after the change: spb 3.5 1.076 -> 1.103, 4.4 1.101 -> 1.150,
+    4.5 1.101 -> 1.133, 5.5 1.097 -> 1.080, 7.37 1.055 -> 1.086, 9.3 1.048 -> 1.079; whole spb
+    4.0 / 8.0 / 12.0 read 1.075 / 1.055 / 1.048 and are unchanged. At a 3-sample edge the excess is
+    0.8 point, at 4 it is up to 1.3, and from 5 up 0.6 or less (the scatter between sample
+    phases is of that order). Give the edge 5+ samples (a `tr_frac` that makes it so: 0.15 needs about 33 samples
+    per UI) and the ring is gone. Timing stays exact: 5e-3
+    sample peak to peak at the 2-sample floor.
     """
     n = N if n is None else int(n)
     spb = n / n_ui
@@ -1808,6 +1943,8 @@ def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
                       has to be analysable by an instrument.
     jitter=Jitter(...) applies transmitter jitter at the symbol edge times (source
                       jitter) before shaping; rng seeds it.
+
+    An edge shorter than about 3 samples rings more between samples than on them: see `nrz`.
     """
     n = N if n is None else int(n)
     spb = n / n_ui
@@ -2041,6 +2178,13 @@ def _edge_train(n, spp, duty, phase_rad):
     jumps = np.zeros(n)
     np.add.at(jumps, np.clip(m[inside], 0, None), step[inside])
     ideal = -1.0 + np.cumsum(jumps)
+    return _delay_steps(ideal, m, d, step)
+
+
+def _delay_steps(ideal, m, d, step):
+    """Delay each hard step of `ideal` (an edge of height `step` taking effect at sample `m`) by
+    its fraction `d` in [0, 1) of a sample, in place; the steps with `d == 0` stay as they are."""
+    n = len(ideal)
     # In blocks of edges, in order: each block's (edges, taps) temporaries are then a few
     # hundred kilobytes whatever the record holds, and the additions land in the order one
     # pass over all the edges would make them, so the result is the same bits.
@@ -2051,7 +2195,11 @@ def _edge_train(n, spp, duty, phase_rad):
         idx = m[sel][:, None] + off[None, :]
         val = step[sel][:, None] * corr
         ok = (idx >= 0) & (idx < n)
-        np.add.at(ideal, idx[ok], val[ok])
+        ms = m[sel]
+        if ms.size < 2 or (np.diff(ms) >= off.size).all():
+            ideal[idx[ok]] += val[ok]           # edges farther apart than the taps reach: no
+        else:                                   # sample is hit twice, and this is the same sum
+            np.add.at(ideal, idx[ok], val[ok])  # as add.at at a fraction of the cost
     return ideal
 
 
@@ -2170,8 +2318,28 @@ def rc_tau_for_rise_time(tr_s, lo_frac=0.3, hi_frac=0.7):
     return float(tr_s) / math.log((1.0 - lo) / (1.0 - hi))
 
 
+def open_drain_low_v(r_pullup_ohm, r_sink_ohms, v_dd=3.3):
+    """The settled low of an open-drain line while the sinks with these on-resistances all pull
+    at once: the divider against their parallel resistance, v_dd * R / (R + r_pullup).
+    One sink gives v_dd * r / (r + r_pullup); none gives v_dd (released)."""
+    rp = float(r_pullup_ohm)
+    if not np.isfinite(rp) or rp <= 0:
+        raise ValueError(f"open_drain_low_v: r_pullup_ohm must be positive and finite, got "
+                         f"{r_pullup_ohm!r}")
+    if not np.isfinite(float(v_dd)):
+        raise ValueError(f"open_drain_low_v: v_dd must be finite, got {v_dd!r}")
+    g = 0.0
+    for i, r in enumerate(r_sink_ohms):
+        ri = float(r)
+        if not np.isfinite(ri) or ri <= 0:
+            raise ValueError(f"open_drain_low_v: r_sink_ohms[{i}] must be positive and finite "
+                             f"(an on-resistance in ohms), got {r!r}")
+        g += 1.0 / ri
+    return float(v_dd) / (1.0 + rp * g)
+
+
 def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.0, v0=None,
-                    sink_b_on=None, r_sink_b_ohm=None):
+                    sink_b_on=None, r_sink_b_ohm=None, sinks=None):
     """Line voltage on an open-drain bus, integrated as a first-order RC.
 
       `sink_on`        boolean per sample: is device A pulling the line down.
@@ -2183,6 +2351,15 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
       `sink_b_on`      a SECOND device's boolean per sample (same shape as `sink_on`), or None
                        (the default -- one sink, unchanged from before this parameter existed)
       `r_sink_b_ohm`   device B's on-resistance; defaults to `r_sink_ohm` when B is given
+      `sinks`          ANY number of devices: ``[(on_mask, r_on_ohm), ...]``, each its own boolean
+                       per sample and its own on-resistance. Pass `sink_on=None` with it; it
+                       replaces `sink_on`/`sink_b_on`, which stay as the one- and two-sink forms.
+                       Each step resolves the sinks that are on as parallel conductances against
+                       the pull-up (see `open_drain_low_v` for the settled level), so a shared
+                       bus with a controller and several targets is one call: each device's own
+                       low is the divider of its own `r_on_ohm`, two pulling at once give the
+                       lower parallel level, and the rise after the last release is still
+                       Rp * Cb. A cookbook example is in docs/COOKBOOK.md ("an I2C-like bus").
 
     With one sink, two resistances give two time constants and two targets:
 
@@ -2202,6 +2379,14 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
     waveform shows is the rise time the arithmetic asked for, at any oversampling ratio above the
     resolvability check below.
     """
+    if sinks is not None:
+        if sink_on is not None or sink_b_on is not None:
+            raise ValueError("open_drain_line: `sinks` replaces sink_on / sink_b_on; give one "
+                             "form or the other, not both.")
+        return _open_drain_many(sinks, fs, r_pullup_ohm, c_bus_f, v_dd, v0)
+    if sink_on is None:
+        raise ValueError("open_drain_line needs sink_on=<boolean per sample> or "
+                         "sinks=[(on_mask, r_on_ohm), ...].")
     sink = np.asarray(sink_on)
     if sink.dtype != bool:
         sink = sink.astype(bool)
@@ -2286,6 +2471,59 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
             cur = v_a + (cur - v_a) * k_lo
         else:
             cur = v_dd + (cur - v_dd) * k_hi
+        v[i] = cur
+    return v
+
+
+def _open_drain_many(sinks, fs, r_pullup_ohm, c_bus_f, v_dd, v0):
+    """`open_drain_line` for any number of sinks: per sample the devices that are on add as
+    conductances, G = sum 1/r_k, so target = v_dd / (1 + Rp G) and tau = Rp Cb / (1 + Rp G),
+    stepped exactly as the one- and two-sink forms are."""
+    if isinstance(sinks, (str, bytes, dict)) or not hasattr(sinks, "__len__") or len(sinks) == 0:
+        raise ValueError("open_drain_line: sinks is a non-empty list of (on_mask, r_on_ohm) "
+                         "pairs, one per device.")
+    rp, cb, fs = float(r_pullup_ohm), float(c_bus_f), float(fs)
+    if rp <= 0 or cb <= 0:
+        raise ValueError("r_pullup_ohm and c_bus_f must be positive")
+    g = None
+    for k, pair in enumerate(sinks):
+        try:
+            mask, r = pair
+            r = float(r)
+        except (TypeError, ValueError):
+            raise ValueError(f"open_drain_line: sinks[{k}] must be an (on_mask, r_on_ohm) pair, "
+                             f"got {pair!r}.") from None
+        if not r > 0:
+            raise ValueError(f"open_drain_line: sinks[{k}] r_on_ohm must be positive, got {r!r}")
+        mask = np.asarray(mask).astype(bool)
+        if mask.ndim != 1 or (g is not None and mask.shape != g.shape):
+            raise ValueError(f"open_drain_line: sinks[{k}]'s mask must be 1-D and the same "
+                             f"length as the others, got shape {mask.shape}")
+        g = np.zeros(mask.shape) if g is None else g
+        g = g + mask * (1.0 / r)
+    dt = 1.0 / fs
+    tau_hi = rp * cb
+    if dt > 0.5 * tau_hi:
+        raise ValueError(
+            f"sample rate {fs:.4g} Sa/s cannot resolve the rise: dt = {dt:.4g} s against "
+            f"tau = {tau_hi:.4g} s (Rp * Cb). The rise is the edge this bus specifies, so a grid "
+            f"that cannot show it makes the record meaningless. Raise fs above "
+            f"{2.0 / tau_hi:.4g} Sa/s, or lower r_pullup_ohm / c_bus_f.")
+    tau_lo = tau_hi / (1.0 + rp * sum(1.0 / float(r) for _m, r in sinks))
+    if dt > 0.5 * tau_lo:
+        warnings.warn(
+            f"sample rate {fs:.4g} Sa/s does not resolve the fall: dt = {dt:.4g} s against "
+            f"tau = {tau_lo:.4g} s (every sink on at once, (Rp||Rs) * Cb). The level is "
+            f"correct and the rise is resolved; the falling edge completes inside one sample, "
+            f"as it would on a real capture at this rate.", RuntimeWarning, stacklevel=3)
+    den = 1.0 + rp * g
+    target = float(v_dd) / den
+    k = np.exp(-dt * den / tau_hi)
+    n = g.size
+    cur = (float(target[0]) if n else float(v_dd)) if v0 is None else float(v0)
+    v = np.empty(n, dtype=float)
+    for i in range(n):
+        cur = target[i] + (cur - target[i]) * k[i]
         v[i] = cur
     return v
 

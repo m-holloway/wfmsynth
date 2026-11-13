@@ -143,6 +143,7 @@ def _line(td_ps, grid=WIDE):
     return lambda x: SP.cascade_channel(x, path, grid=grid)
 
 
+@pytest.mark.usefixtures("zero_edges")     # a transfer function read off rfft(y)/rfft(x)
 def test_group_delay_adds_across_cascaded_line_sections():
     """Two sections in series delay by the sum of their delays. Measured off the waveform."""
     a, b = _line(125.0), _line(375.0)
@@ -152,6 +153,7 @@ def test_group_delay_adds_across_cascaded_line_sections():
     assert abs(both - (ga + gb)) < 1e-15, f"{both*1e12:.6f} ps != {(ga+gb)*1e12:.6f} ps"
 
 
+@pytest.mark.usefixtures("zero_edges")     # a transfer function read off rfft(y)/rfft(x)
 def test_group_delay_adds_across_ops_of_different_kinds():
     """A channel section and a receiver filter are different code paths with different delay
     mechanisms (a linear phase and a pole pair). The chain still has to be their sum."""
@@ -424,6 +426,8 @@ KNOBS = [
      dict(kind="nrz", n_ui=32, seed=9)),
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12, second=dict(kind="nrz", n_ui=32, seed=9)),
      "r_sink_b_ohm", 90.0),
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "others",
+     [dict(source=dict(kind="nrz", n_ui=32, seed=9), r_sink_ohm=60.0)]),
     # The hybrid echo and the summed four-pair observation. The echo's own transmit defaults to
     # the same carrier spec shape `crosstalk`'s aggressor uses, so only the echo's own knobs move
     # here; `multipair`'s three budgets are dB of LOSS, so a SMALLER number is MORE aggression.

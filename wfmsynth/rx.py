@@ -18,6 +18,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import signal as _sig
 
+from . import physics as _P
+
 _PAM4 = np.array([-1.0, -1 / 3, 1 / 3, 1.0])
 
 
@@ -25,12 +27,18 @@ def ctle(x, grid, fz_ghz, fp1_ghz, fp2_ghz, dc_gain=1.0):
     """Continuous-time linear equalizer: ``H(s) = dc_gain·(1 + s/ωz) / ((1+s/ωp1)(1+s/ωp2))``
     with the zero below the poles, so it peaks at high frequency and flattens a lossy channel.
     ``dc_gain`` is the exact DC gain; the corner frequencies are in GHz. Applied to the
-    waveform via a bilinear-transformed digital filter."""
+    waveform via a bilinear-transformed digital filter, started settled at the first sample's
+    value (a record idling at a level is not an input stepping up from zero)."""
     wz, wp1, wp2 = (2 * np.pi * f * 1e9 for f in (fz_ghz, fp1_ghz, fp2_ghz))
     num = dc_gain * np.array([1.0 / wz, 1.0])
     den = np.polymul([1.0 / wp1, 1.0], [1.0 / wp2, 1.0])
     b, a = _sig.bilinear(num, den, fs=grid.fs)
-    return _sig.lfilter(b, a, np.asarray(x, float))
+    x = np.asarray(x, float)
+    if not _P._EDGE_HOLD:
+        return _sig.lfilter(b, a, x)
+    # settled at the first sample's value, as `scope_bandwidth` is: a record idling at a level
+    # does not open on the filter charging up from zero
+    return _sig.lfilter(b, a, x, zi=_sig.lfilter_zi(b, a) * x[0])[0]
 
 
 def ffe(x, taps, tap_spacing, pre=0):
@@ -38,14 +46,22 @@ def ffe(x, taps, tap_spacing, pre=0):
     ``pre`` of them pre-cursor. Unlike CTLE (a fixed analog shape) this is an arbitrary-tap FIR the RX
     trains to the channel. ``tap_spacing = samples_per_ui`` is a T-spaced (baud-rate) FFE; ``= spb//2``
     is a fractionally (T/2) spaced FFE — the usual receiver form, insensitive to sampling phase.
-    Applied to the WAVEFORM (post-channel), companion to the transmit-side ``tx_ffe``."""
+    Applied to the WAVEFORM (post-channel), companion to the transmit-side ``tx_ffe``. A tap that
+    reaches past either end reads the end sample, as the other linear stages do."""
     x = np.asarray(x, float); taps = np.asarray(taps, float); n = len(x); y = np.zeros(n)
+    hold = _P._EDGE_HOLD and n > 0           # the line was already at x[0], and stays at x[-1]
     for k, c in enumerate(taps):
         d = int(round((k - pre) * tap_spacing))
         if d >= 0:
             y[d:] += c * x[:n - d]
+            if hold:
+                y[:d] += c * x[0]
         elif -d < n:
             y[:d] += c * x[-d:]
+            if hold:
+                y[d:] += c * x[-1]
+        elif hold:
+            y += c * x[-1]
     return y
 
 

@@ -34,6 +34,11 @@ record that begins mid-pattern begins with a TURN-ON EDGE — the line was never
 capture started. A real deep-memory capture is a window on a link that was already running and
 has no such edge.
 
+*Since 0.48.0 (#100) the line is no longer quiescent at sample 0 but held at the record's first
+sample, so a record that idles at a level has no turn-on edge; one that begins mid-pattern
+still lacks the pattern's history, which is what the lead-in supplies. The measurements below
+are of the zero-padded form (`physics.zero_edges()`).*
+
 Three measured consequences, on the shipped full-chain recipe (carrier -> channel -> reflection
 -> timing -> supply -> crosstalk -> front end -> converter -> export):
 
@@ -861,13 +866,18 @@ delivered in 0.46.0 with the test named).
    or a refusal.
 2. `coded(bits=, prbs=)` lets `bits` win and records `prbs` unused (as on `main`); `iq`
    refuses the same pair.
-3. Found while fixing ruling 1, the same grid placement in three other sources, unchanged:
-   an `nrz` / `pam<N>` / `symbols` carrier whose samples per UI is not a whole number puts
-   each edge on the next sample (measured: a clock pattern of 1000 UI on 32768 samples at
-   64 GSa/s, 15.5 ps peak to peak; under 1e-9 ps at 1024 UI); `carrier(jitter=)` displaces
-   edges by whole samples (U-13); `step` / `pulse` / `sawtooth` round their one edge or
-   flyback to a sample. `physics._edge_train` is the mechanism to reuse; each would need
-   its own `NUMERIC_CHANGES` entry.
+3. Found while fixing ruling 1, the same grid placement in other sources. `nrz` / `pam<N>` /
+   `symbols` / `coded` edges and `carrier(jitter=)` were fixed in 0.48.0 (#98;
+   `physics._place_symbols` through `_delay_steps`). Still on a sample, unchanged: `step` /
+   `pulse` / `sawtooth` round their one edge or flyback to a sample (`physics._edge_train` is the
+   mechanism to reuse; each needs its own `NUMERIC_CHANGES` entry); the label side of the
+   carrier, `events._symbol_edges` and `events._ui_bounds`, which give an edge or a UI window as
+   an INTEGER sample (`round` / `floor` of `ui * spb`), so on a non-whole samples-per-UI an event
+   label can sit up to a sample from the edge now rendered; the legacy random-corpus sources
+   (`physics.psk` / `qam`, `grammar._prbs_levels`), which are pinned by digest; and a PAM-N
+   whose `N` has no `NUMERIC_CHANGES` entry (only 3, 4, 5, 8 do).
+   `timing(rj_ps=)` stays per sample (documented in 0.48.0); a per-edge option on `timing` would
+   need edge detection on an arbitrary record, and `carrier(jitter=)` already is per edge.
 4. Python 3.9 with numpy 2.0.x on macOS arm64 raises spurious `matmul` floating-point
    warnings inside `net.py` (the results are finite and the tests of their values pass),
    which fails `test_the_demo_does_not_warn` for two examples there. Not seen on 3.14.
@@ -1010,6 +1020,39 @@ set once.
    delay. Stated in `wfmsynth.segments`; a fix needs a time origin every such op reads.
 6. *An optical field as the occurrence* (the delay on a field needs its laser's frame).
 
+### #100: a record that idles at a level starts there
+
+**Status:** DELIVERED in 0.48.0 (`physics.apply_transfer` and the stages listed in CHANGELOG
+0.48.0). `tests/test_steady_state_start.py` drives every stage that can be driven with a flat
+input at three levels and requires the first and last samples to equal the interior, which is
+the stage's DC gain times the level. What it settled and what it left:
+
+- *Held ends, one rule.* The line was at `x[0]` before the record and stays at `x[-1]` after
+  it. It is the rule `scope_bandwidth` and `filter` already had, applied to the frequency-domain
+  stages (a held pad as far out as the response reaches; the block path adds the same from its
+  taps), to the delays and FIRs (`reflect`, `tx_ffe`, `rx_ffe`, the near-end crosstalk delay),
+  to `ctle`, and to the `resample_poly` behind `digitize(n_out=)`. A record that starts and ends at
+  zero takes the old path, bit for bit. A pure DELAY longer than the response's width now also
+  gets the pad its lag needs on this path, which the linear length used to leave short (see the
+  note under #52).
+- *What it costs to hold at the guard cap.* The guard is capped at twice the record, so a
+  response with an algebraic tail (`lossy`'s sqrt(f) skin term) leaves a residual at the ends:
+  0.05 % of the level on the slow channel in the tests, and the interior of such a record moves
+  by up to 3.4 % of a step 200 samples in (causal; 0.35 % at 1000), the line's history the zero
+  pad was missing. Raising the guard buys it back at the cost of a longer transform.
+- *Not changed, with the reason.* (1) `dfe` starts its decision history at zero: it works on
+  per-symbol samples, and the decisions before the record are not knowable from them, so there is
+  no steady state to settle to without inventing a pattern. (2) `cdr.recover_clock` and the eye's
+  `_recover_clock` start the loop at zero state: that is a loop ACQUIRING lock on a phase whose
+  first value is random jitter, not a level the line idles at, and settling it at `phase[0]`
+  would be a different, and wrong, claim. (3) `probe_loading`, `scope(kind="brickwall")` and
+  the zero-phase Gaussian are circular, so a flat record is flat but a record whose ends differ
+  still wraps (#54, #58).
+- *An impulse at index 0.* A stage that holds its first sample answers it as a step down from
+  1. `physics.zero_edges()` is the way to read an impulse response there; `compose._lead_extent`
+  and `stream.channel_fir` use it. A user's own impulse probe needs the same or an impulse past
+  sample 0.
+
 ## Known limitations and claim boundaries
 
 Keep these statements synchronized with user-facing documentation:
@@ -1141,11 +1184,11 @@ of the raw samples would fix it without a parameter.
 when the decisions were taken on a clock that was not uniform. The decisions and their instants
 are right (`compose.dfe_decisions` returns both); only the waveform rendering is nominal.
 
-### `physics._edge_disp` realises DCD at -2x the request, quantised to whole samples
+### `physics._edge_disp` realises DCD at -2x the request (was also quantised to whole samples, fixed in 0.48.0)
 
 Not this unit's file (`wfmsynth/physics.py`), so it is logged rather than changed. `dcd` is now a
 first-class knob (`Signal.dcd(ps=)`, `compose._op_dcd`) with the standard definition; the SOURCE
-route still carries two defects. MEASURED on a 1024 UI clock pattern, fs=256e9, baud=16e9, as
+route carried two defects: the quantisation is fixed (0.48.0, #98); the -2x remains. MEASURED on a 1024 UI clock pattern, fs=256e9, baud=16e9, as
 `mean(high pulse width) - mean(low pulse width)` at the constructed 0 V threshold:
 
 | `jitter=dict(dcd=...)` (samples) | stated | realised high-minus-low | ratio |

@@ -415,6 +415,54 @@ wave = ws.uart_frame([0x55, 0xA3], samples_per_bit=16)   # idle-high start/stop 
 A second sink on the SAME physical line is resolved as a real resistor divider, not a boolean
 OR — `Signal(...).open_drain(r_pullup_ohm=..., c_bus_f=..., second=dict(kind="nrz", ...), r_sink_b_ohm=...)`.
 
+### An I2C-like bus: a controller, three targets, a stretched clock
+A real bus has more than two devices, each with its own output stage, so each pulls the line to
+its own low. `others=[dict(source=..., r_sink_ohm=...), ...]` adds any number of sinks beside
+`second=`. Every device that is pulling at a given sample is a conductance against the pull-up,
+so one device gives `v_dd * r / (r + r_pullup)` and two at once give the divider of their
+parallel resistance.
+
+```python
+from wfmsynth.physics import open_drain_low_v
+g = ws.Grid(fs=2e9, n=160_000)                          # 80 us
+RP, CB = 4.7e3, 100e-12                                 # 4.7 k pull-up, 100 pF of bus
+
+def holds(t0_us, width_us):                             # a device that pulls low for a while
+    return ws.Signal(grid=g).carrier("pulse", amp=-1.0, offset=1.0, t_start_s=t0_us * 1e-6,
+                                     width_s=width_us * 1e-6, tr_s=20e-9)
+
+sda = holds(5, 10).open_drain(r_pullup_ohm=RP, c_bus_f=CB, r_sink_ohm=25.0,     # the controller
+    others=[dict(source=holds(20, 10), r_sink_ohm=60.0),                       # target A
+            dict(source=holds(35, 10), r_sink_ohm=150.0),                      # target B
+            dict(source=holds(40, 10), r_sink_ohm=1200.0)])                    # target C: weak
+y = sda.waveform()
+```
+
+Each device's low, measured on the record, is the divider of its own resistance
+(`open_drain_low_v(RP, [r])`): 17.5 mV for the controller, 41.6 mV for A, 102.1 mV for B and
+671.2 mV for C. C's low is above the 0.4 V an I2C output may drive as low, which is
+the kind of defect this lets you build and label. Where B and C pull together (40 to 45 us) the
+line sits at 91.0 mV, the divider of `150 || 1200` ohm, lower than either alone.
+
+A target stretching the clock is one more sink on the clock line. The controller releases at
+50 us and the line would rise there, but the target is still holding it:
+
+```python
+stretch = holds(47, 25)                                 # the target holds SCL low until 72 us
+scl = (ws.Signal(grid=g).carrier("square", f_hz=100e3)
+       .open_drain(r_pullup_ohm=RP, c_bus_f=CB, r_sink_ohm=25.0,
+                   others=[dict(source=stretch, r_sink_ohm=90.0)]))
+```
+
+The clock's rising edges, read where SCL crosses 70 % of the supply (the I2C high threshold),
+are at 10.56, 20.56, 30.56 and 40.56 us, and then the next is at
+72.56 us, 0.56 us after the target lets go. That rise is the same as after any release: 30 to
+70 % takes 398 ns, which is `0.8473 * RP * CB`, however many devices were pulling before it.
+`others` entries take a bare carrier spec or a sub-chain as `source`, are recorded in the recipe,
+and a misspelt key is refused with the nearest name. For the same bus as shared nodes with
+a driver per device see `net`; `others=` is the lighter form when every device is a plain
+open-drain sink.
+
 ## Level coding (PAM4 Gray + precoding, PAM3)
 The bit-to-level layer, between a bit stream and a PAM carrier. It changes **symbol and error
 statistics, not the eye** — which is exactly why it is easy to leave out and hard to notice

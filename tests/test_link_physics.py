@@ -321,8 +321,9 @@ def test_the_agc_is_what_makes_a_stated_full_scale_downstream_mean_anything():
         for drive in (10.0, 0.1):
             bad = float(np.mean(decisions(drive, with_agc) != ref))
             # re-measured after the edge shaper was corrected; the shape of the claim is
-            # unchanged -- without AGC most decisions move, with it none do
-            want = {(False, 10.0): 0.857841, (False, 0.1): 0.338544}.get((with_agc, drive), 0.0)
+            # unchanged -- without AGC most decisions move, with it none do. 0.857841 became
+            # 0.855398 at 10x when the channel started holding the first sample (#100)
+            want = {(False, 10.0): 0.855398, (False, 0.1): 0.338544}.get((with_agc, drive), 0.0)
             assert bad == pytest.approx(want, abs=5e-4), (
                 f"{'AGC' if with_agc else 'no-AGC'} chain, drive {drive}x: {bad:.4%} "
                 f"disagreement, expected {want:.4%}")
@@ -500,7 +501,7 @@ def test_zero_dcd_is_the_interpolators_identity():
 # ---------------------------------------------------------------- THE GATE OBSERVED FAILING
 # What `carrier(..., jitter=dict(dcd=<samples>))` — the only route to DCD before this — realises
 # for mean(high)-mean(low), MEASURED on a 1024 UI clock pattern at fs=256e9, baud=16e9.
-INDIRECT_DCD_PS = {0.256: -7.835911, 1.024: -7.835911, 2.0: -15.673202, 4.0: -31.331451}
+INDIRECT_DCD_PS = {0.256: -2.011544, 1.024: -8.023478, 2.0: -15.673202, 4.0: -31.331451}
 
 
 @pytest.mark.parametrize("dcd_samples", sorted(INDIRECT_DCD_PS))
@@ -508,9 +509,10 @@ def test_the_indirect_dcd_route_still_fails_this(dcd_samples):
     """THE GATE OBSERVED FAILING, on the mechanism that was already there. `physics._edge_disp`
     displaces rising edges by +dcd/2 and falling by -dcd/2, which makes the HIGH pulse SHORTER
     by 2*dcd — so the realised DCD is about -2x the request, wrong in sign and in scale. And
-    `_place_symbols` places the displaced edges with `searchsorted` on the INTEGER sample grid,
-    so 0.256 samples (1 ps) and 1.024 samples (4 ps) produce the same -7.835911 ps: every
-    sub-sample DCD, which is all of them, is unreachable.
+    `_place_symbols` used to place the displaced edges on the INTEGER sample grid, so 0.256
+    samples (1 ps) and 1.024 samples (4 ps) produced the same -7.835911 ps. Edges now sit at
+    their own times (GitHub #98): each request is realised in proportion (-2.01 and -8.02 ps),
+    and the sign and scale fault is what remains.
 
     That code is in `physics.py`, which this unit does not own — the numbers are logged in
     BACKLOG.md. It stays reachable and measured here rather than being described."""
@@ -525,12 +527,14 @@ def test_the_indirect_dcd_route_still_fails_this(dcd_samples):
         assert got == pytest.approx(stated_ps, rel=2e-3)
 
 
-def test_the_indirect_route_quantises_sub_sample_dcd_to_a_bit_identical_record():
-    """The quantisation, on the bytes rather than on a statistic: two DCD requests a factor of
-    four apart come out of the source as the SAME waveform, sample for sample."""
+def test_the_indirect_route_no_longer_quantises_sub_sample_dcd():
+    """Two DCD requests a factor of four apart used to come out of the source as the SAME
+    waveform, sample for sample; they are now different records, in the ratio asked."""
     a, _ = _clock(1024, jitter=dict(dcd=0.256))
     b, _ = _clock(1024, jitter=dict(dcd=1.024))
-    assert np.array_equal(a, b), "if this ever fails the sub-sample quantisation was fixed"
+    assert not np.array_equal(a, b)
+    (ha, la), (hb, lb) = _ui_widths(a), _ui_widths(b)
+    assert (hb - lb) / (ha - la) == pytest.approx(4.0, rel=0.01)
     d, g = _clock(1024)
     p = _EXEC["dcd"](d, {"op": "dcd", "ps": 1.0}, Streams(0), g, 0)
     q = _EXEC["dcd"](d, {"op": "dcd", "ps": 4.0}, Streams(0), g, 0)

@@ -86,31 +86,34 @@ overload recovery; a wired-AND second sink; a pass-FET/analog switch; AM/FM/PM m
 `modulate()`) — every one of them the same op-chain, no second builder. See
 `.claude/skills/wfmsynth/SKILL.md` and `REFERENCE.md`.
 """
-def _read_version():
+def _read_version(package_file=__file__):
     """The single source is `pyproject.toml`'s `version =`. GitHub #54: `__version__` and
-    `pyproject.toml` were two independently-stated strings and had already drifted (0.39.1 vs
-    0.40.0), so `Signal.recipe()` stamped provenance with a version that did not match the
-    installed package. An installed distribution's own metadata is read first (the normal
-    case); a source checkout with no install (this repo's own `PYTHONPATH=$PWD` route) falls
-    back to reading `pyproject.toml` directly, next to this package -- so there is exactly one
-    place this number is ever written, not two that can disagree."""
-    try:
-        from importlib.metadata import version, PackageNotFoundError
-    except ImportError:                                    # pragma: no cover
-        version, PackageNotFoundError = None, Exception
-    if version is not None:
-        try:
-            return version("wfmsynth")
-        except PackageNotFoundError:
-            pass
+    `pyproject.toml` were two independently-stated strings and had already drifted. GitHub #101:
+    an editable install's metadata is written once, at install time, so after `git pull` it
+    names an older release than the code in front of you and every recipe stamp was wrong.
+
+    So the order is: a source checkout (a `pyproject.toml` of this project beside the package)
+    reads that file; only a real wheel install, which has none, reads the installed metadata.
+    A vendored copy inside another project is not mistaken for a checkout, because the file
+    must name `wfmsynth`."""
     import re
     from pathlib import Path
-    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    pyproject = Path(package_file).resolve().parent.parent / "pyproject.toml"
     try:
-        m = re.search(r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.M)
+        # bytes, decoded by hand: a BOM or CRLF line ends (a checkout on Windows) must not hide
+        # the line, and the quote may be either kind (TOML allows both)
+        text = pyproject.read_bytes().decode("utf-8-sig", "replace").replace("\r\n", "\n")
     except OSError:
-        m = None
-    return m.group(1) if m else "0.0.0+unknown"
+        text = ""
+    if re.search(r"""^name\s*=\s*["']wfmsynth["']""", text, re.M):
+        m = re.search(r"""^version\s*=\s*["']([^"']+)["']""", text, re.M)
+        if m:
+            return m.group(1)
+    try:
+        from importlib.metadata import version
+        return version("wfmsynth")
+    except Exception:                                      # not installed, or no metadata
+        return "0.0.0+unknown"
 
 
 __version__ = _read_version()

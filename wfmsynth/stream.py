@@ -70,8 +70,10 @@ def channel_fir(apply_fn, n_taps=512):
     impulse: ``apply_fn(impulse) -> response``, truncated/centred to ``n_taps``. Use the
     result with `stream_convolve` to apply that channel to a deep-memory record in chunks.
     ``apply_fn`` must be linear (e.g. a lossy/S-parameter channel with no added noise)."""
+    from .physics import zero_edges
     L = 4 * n_taps
     imp = np.zeros(L)
     imp[0] = 1.0
-    h = np.asarray(apply_fn(imp), float)
+    with zero_edges():                # the channels hold a record's first sample; an impulse
+        h = np.asarray(apply_fn(imp), float)      # at index 0 is a probe, not a step down
     return h[:n_taps]
