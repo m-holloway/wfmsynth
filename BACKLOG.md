@@ -34,6 +34,11 @@ record that begins mid-pattern begins with a TURN-ON EDGE — the line was never
 capture started. A real deep-memory capture is a window on a link that was already running and
 has no such edge.
 
+*Since 0.48.0 (#100) the line is no longer quiescent at sample 0 but held at the record's first
+sample, so a record that idles at a level has no turn-on edge; one that begins mid-pattern
+still lacks the pattern's history, which is what the lead-in supplies. The measurements below
+are of the zero-padded form (`physics.zero_edges()`).*
+
 Three measured consequences, on the shipped full-chain recipe (carrier -> channel -> reflection
 -> timing -> supply -> crosstalk -> front end -> converter -> export):
 
@@ -1009,6 +1014,39 @@ set once.
    sub-chain) keeps them on the occurrence's render clock, not shifted by the sub-sample
    delay. Stated in `wfmsynth.segments`; a fix needs a time origin every such op reads.
 6. *An optical field as the occurrence* (the delay on a field needs its laser's frame).
+
+### #100: a record that idles at a level starts there
+
+**Status:** DELIVERED in 0.48.0 (`physics.apply_transfer` and the stages listed in CHANGELOG
+0.48.0). `tests/test_steady_state_start.py` drives every stage that can be driven with a flat
+input at three levels and requires the first and last samples to equal the interior, which is
+the stage's DC gain times the level. What it settled and what it left:
+
+- *Held ends, one rule.* The line was at `x[0]` before the record and stays at `x[-1]` after
+  it. It is the rule `scope_bandwidth` and `filter` already had, applied to the frequency-domain
+  stages (a held pad as far out as the response reaches; the block path adds the same from its
+  taps), to the delays and FIRs (`reflect`, `tx_ffe`, `rx_ffe`, the near-end crosstalk delay),
+  to `ctle`, and to the `resample_poly` behind `digitize(n_out=)`. A record that starts and ends at
+  zero takes the old path, bit for bit. A pure DELAY longer than the response's width now also
+  gets the pad its lag needs on this path, which the linear length used to leave short (see the
+  note under #52).
+- *What it costs to hold at the guard cap.* The guard is capped at twice the record, so a
+  response with an algebraic tail (`lossy`'s sqrt(f) skin term) leaves a residual at the ends:
+  0.05 % of the level on the slow channel in the tests, and the interior of such a record moves
+  by up to 3.4 % of a step 200 samples in (causal; 0.35 % at 1000), the line's history the zero
+  pad was missing. Raising the guard buys it back at the cost of a longer transform.
+- *Not changed, with the reason.* (1) `dfe` starts its decision history at zero: it works on
+  per-symbol samples, and the decisions before the record are not knowable from them, so there is
+  no steady state to settle to without inventing a pattern. (2) `cdr.recover_clock` and the eye's
+  `_recover_clock` start the loop at zero state: that is a loop ACQUIRING lock on a phase whose
+  first value is random jitter, not a level the line idles at, and settling it at `phase[0]`
+  would be a different, and wrong, claim. (3) `probe_loading`, `scope(kind="brickwall")` and
+  the zero-phase Gaussian are circular, so a flat record is flat but a record whose ends differ
+  still wraps (#54, #58).
+- *An impulse at index 0.* A stage that holds its first sample answers it as a step down from
+  1. `physics.zero_edges()` is the way to read an impulse response there; `compose._lead_extent`
+  and `stream.channel_fir` use it. A user's own impulse probe needs the same or an impulse past
+  sample 0.
 
 ## Known limitations and claim boundaries
 

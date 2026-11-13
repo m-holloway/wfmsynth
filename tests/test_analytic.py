@@ -69,6 +69,7 @@ def _transfer(fn, grid, seed=0):
 
 
 # ===================================================================== channel loss
+@pytest.mark.usefixtures("zero_edges")     # a tone read off its bin: the ends are not part of it
 @pytest.mark.parametrize("fs,n", [(256e9, 1 << 14), (100e9, 1 << 13), (64e9, 1 << 15)])
 @pytest.mark.parametrize("loss_db,at_ghz", [(12.0, 8.0), (3.0, 4.0), (28.0, 16.0)])
 @pytest.mark.parametrize("causal", [False, True])
@@ -220,6 +221,7 @@ def test_a_fractional_echo_lands_at_the_delay_asked_for(td_ps, node):
     assert float((echo[:before] ** 2).sum() / w.sum()) < 1e-9, "energy before the echo arrives"
 
 
+@pytest.mark.usefixtures("zero_edges")     # echoes read off an impulse at index 0
 def test_a_cascaded_echo_lands_where_first_order_echoes_says_it_will():
     """`sparam.first_order_echoes` is the arithmetic's answer stated BEFORE the simulation.
     Run the cascade on an impulse and check the realised taps against it, including the

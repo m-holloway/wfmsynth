@@ -26,6 +26,74 @@ samples is called out explicitly under **Changed output** below.
   render bit-for-bit as before. New cookbook entry: an I2C-like bus with a controller, three
   targets and a stretched clock, with a validate check on the measured levels.
 
+A record that idles at a level starts there (#100). Most filtering stages started a record in
+steady state at its first sample, as `scope_bandwidth` promises; the probe's ground lead and
+`lossy` did not, and nor did the others that an audit of every stage that filters, convolves,
+delays or resamples found. They started as if the input before the record had been zero. They put a false edge at the head of any record
+that idles at a rail, a bus level or a clock's low, and a zero-phase `lossy` put another at the
+tail.
+
+### Changed output
+
+Only a record whose first or last sample is not exactly zero moves. One that starts and ends at
+zero takes the old path and is the same bits (`tests/test_steady_state_start.py`).
+
+- **The ends are held.** The line is taken to have been at the first sample's value before the
+  record and to stay at the last one after it, as the Bessel filters and `filter(...)` already
+  did. `physics.apply_transfer` pads with the end samples, as far out as the response reaches
+  (the head for a causal one, both ends for a zero-phase one), instead of with zeros; the block
+  path (`method="overlap"`) adds the same from the response's taps and never builds a
+  record-sized array. That reaches `lossy` (both forms, both paths, real and I/Q), `sparam`,
+  `cascade`, `resonant_reflect`, `hybrid_echo`, `probe` (ground lead and compensation), and the
+  causal `scope(kind="gaussian")`.
+- **Delays and taps read the end sample, not zero.** `reflect`'s echoes (an idle line has had
+  them all along), `tx_ffe` / `de_emphasis`, `rx_ffe`, the near-end `crosstalk` delay, and the
+  `resample_poly` behind `digitize(n_out=)` and `capture(resample=True)`. `ctle` starts settled
+  (`lfilter_zi`) as the other IIR stages do.
+
+Measured as the worst of the first and last 64 samples against the interior, as a fraction of a
+3.3 V level, before -> after (`wfmsynth.validate`): probe ground lead 0.794 -> 0, probe
+compensation 0.287 -> 7e-6, zero-phase `lossy` 0.198 -> 5.5e-4, causal `lossy` 0.412 -> 0,
+`reflect` 0.0545 -> 0, `resonant_reflect` 0.0387 -> 1e-5, `sparam` 0.995 -> 1e-5, `ctle`
+1.19 -> 0, `tx_ffe` 0.1 -> 0, `rx_ffe` 0.9 -> 0. The issue's snippet: the ground-lead probe
+opened at 0.032 V and rang up to 3.3; it is now 3.3 to 3e-5 V, and `lossy` reads 3.297 V at
+both ends against an interior of 3.299 V, where it read 2.638 V.
+
+**What else moves, and by how much.** Away from the ends a step is unchanged for a response
+that ends inside the guard, and changed by the history the zero pad was missing for one that does
+not. `lossy`'s sqrt(f) skin term has an algebraic tail, so the change falls off slowly. For a
+step in the middle of an 8-inch channel at 16 GSa/s (32768 samples), against the zero-padded
+record and as a fraction of the step, the largest change beyond 200, 1000 and 4000 samples from
+the ends is 1.4 / 0.35 / 0.08 % for the zero-phase form and 3.4 / 0.93 / 0.24 % for the causal one
+(`wfmsynth.validate`). The interior was low by that much before: the line's history was missing
+from it. A step through `reflect` moves nowhere past the first `2 * n_bounce * td` samples, bit
+for bit.
+
+**A data record through a long-memory channel feels it.** Holding the first symbol's level puts
+that symbol's slow tail under the whole record, where the zero pad had put the mean of zero-mean
+data. The shipped nearly closed eye (12.5 dB at 8 GHz, 16 GBd NRZ, the pinned test record) reads
+0.0197 where it read 0.0482. Neither is the link's: a data record is a window on a running
+pattern, which `with_lead_in` renders and discards, and which this change does not replace.
+
+**An impulse at index 0 is a step down, not an impulse.** A stage that holds its first sample
+answers an impulse there as the impulse response plus the settling from a held 1 to 0. Read an
+impulse response off an impulse that is not the first sample, or inside `with
+physics.zero_edges():` -- the lead-in sizer and `stream.channel_fir` do, so `lead_in="auto"` and
+the FIR they return are unchanged. (`scope`, `filter` and `probe_loading` already behaved this
+way.)
+
+`compose.NUMERIC_CHANGES` gains an entry for each op above, and a recipe can now name `<op>/<kind>`
+(`crosstalk/next`, `scope/gaussian`) as it names `carrier/<kind>`. Entries for 0.48.0 warn a
+recipe stamped earlier once the version is bumped. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+### Audited and already right
+
+Flat in, flat out at both ends, tested for each: `scope` (every kind), `input_bandwidth`,
+`probe` (loading, bandwidth), `ac_couple`, `agc`, `filter` (every kind, zero-phase too, and
+`doppler`), `supply_coupling`, `crosstalk` (fext), `intra_pair_skew`, `delay`, `sample_clock`,
+`timebase`, `net` and `open_drain` (initialised at the first level). Not fixed, with the reason,
+in BACKLOG: `dfe`, the CDR's jitter-transfer filters, and the circular `probe_loading` wrap.
+
 ## 0.47.0 — 2026-11-12
 
 A segmented acquisition of an event that happens rarely (#97): many occurrences, each rendered

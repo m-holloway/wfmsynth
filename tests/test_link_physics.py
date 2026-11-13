@@ -321,8 +321,9 @@ def test_the_agc_is_what_makes_a_stated_full_scale_downstream_mean_anything():
         for drive in (10.0, 0.1):
             bad = float(np.mean(decisions(drive, with_agc) != ref))
             # re-measured after the edge shaper was corrected; the shape of the claim is
-            # unchanged -- without AGC most decisions move, with it none do
-            want = {(False, 10.0): 0.857841, (False, 0.1): 0.338544}.get((with_agc, drive), 0.0)
+            # unchanged -- without AGC most decisions move, with it none do. 0.857841 became
+            # 0.855398 at 10x when the channel started holding the first sample (#100)
+            want = {(False, 10.0): 0.855398, (False, 0.1): 0.338544}.get((with_agc, drive), 0.0)
             assert bad == pytest.approx(want, abs=5e-4), (
                 f"{'AGC' if with_agc else 'no-AGC'} chain, drive {drive}x: {bad:.4%} "
                 f"disagreement, expected {want:.4%}")
