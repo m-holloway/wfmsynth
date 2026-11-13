@@ -12,7 +12,7 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
-## 0.48.0 — unreleased
+## 0.48.0 — 2026-11-13
 
 - **Fixed:** `__version__` and recipe stamps no longer go stale in an editable install after
   `git pull` (#101). A source checkout reads `pyproject.toml`; installed metadata is used only
