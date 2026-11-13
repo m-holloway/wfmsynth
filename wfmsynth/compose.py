@@ -4371,6 +4371,18 @@ NUMERIC_CHANGES += tuple(
         "lossy", "sparam", "cascade", "reflect", "resonant_reflect", "probe", "ctle", "tx_ffe",
         "de_emphasis", "rx_ffe", "hybrid_echo", "multipair", "crosstalk/next",
         "crosstalk_matrix/next", "scope/gaussian"))
+NUMERIC_CHANGES += (
+    ("0.48.0", "digitize",
+     "`n_out=` resamples with the record's end samples held past its ends, not zeros (#100). "
+     "A record that idles at a nonzero level no longer gets a false edge at its first and last "
+     "samples; a record that starts and ends at exactly zero is unchanged. Without `n_out=` "
+     "the op is unchanged."),
+    ("0.48.0", "capture",
+     "`resample=True` resamples with the record's end samples held past its ends, not zeros "
+     "(#100). A capture that idles at a nonzero level no longer gets a false edge at its first "
+     "and last samples; one that starts and ends at exactly zero is unchanged. Without "
+     "`resample=True` the op is unchanged."),
+)
 
 
 def _version_tuple(v):
@@ -4395,18 +4407,22 @@ def _version_tuple(v):
 
 
 def _ops_present(ops):
-    """What a `NUMERIC_CHANGES` entry can name: every top-level op, ``<op>/<kind>`` for one that
+    """What a `NUMERIC_CHANGES` entry can name: every op at any depth, ``<op>/<kind>`` for one that
     states a kind, and ``carrier/<kind>`` for every carrier of that kind ANYWHERE in the recipe -- the source, a sub-chain, a bare
     carrier spec (``gate=dict(kind="square", ...)``), a `net` driver's source. A change to
     one kind of carrier must not warn every recipe that has a carrier at all."""
-    present = {o.get("op") for o in ops}
-    # an op whose `kind` is a choice of mechanism (`crosstalk(kind="next")`, `scope(kind="gaussian")`)
-    # can be named by the choice: `<op>/<kind>`
-    present |= {f"{o.get('op')}/{o['kind']}" for o in ops if isinstance(o.get("kind"), str)}
+    present = set()
 
     def walk(v):
         if isinstance(v, dict):
             kind = v.get("kind")
+            name = v.get("op")
+            if isinstance(name, str):
+                # every op at ANY depth -- a sub-chain held by a parameter included -- and, for
+                # one that states a kind (`crosstalk(kind="next")`), `<op>/<kind>`
+                present.add(name)
+                if isinstance(kind, str):
+                    present.add(f"{name}/{kind}")
             if isinstance(kind, str) and (v.get("op") == "carrier" or "op" not in v):
                 present.add(f"carrier/{kind}")
             if v.get("op") == "pass_fet":

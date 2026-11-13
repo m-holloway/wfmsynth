@@ -181,3 +181,25 @@ def test_an_entry_newer_than_the_running_build_is_silent(monkeypatch):
     assert _replay(_idle_recipe("0.46.0")) == []
     monkeypatch.setattr("wfmsynth.__version__", "0.48.0")
     assert len(_replay(_idle_recipe("0.46.0"))) == 1
+
+
+def _drift(version, ops):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        C._warn_on_numeric_drift(version, ops)
+    return [str(c.message) for c in caught if "numerics changed" in str(c.message)]
+
+
+def test_digitize_and_capture_resamples_are_named_for_0_48_0():
+    for op in ("digitize", "capture"):
+        msgs = _drift("0.47.0", [{"op": "carrier", "kind": "dc"}, {"op": op}])
+        assert any(f"contains {op!r}" in m for m in msgs), op
+
+
+def test_a_stage_in_a_nested_sub_chain_is_found():
+    nested = {"op": "crosstalk",
+              "aggressor": {"ops": [{"op": "carrier", "kind": "dc"}, {"op": "lossy"}]}}
+    msgs = _drift("0.47.0", [nested])
+    assert any("contains 'lossy'" in m for m in msgs)
+    # and a recipe already at 0.48.0 stays silent
+    assert _drift("0.48.0", [nested]) == []
