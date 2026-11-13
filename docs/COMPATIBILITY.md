@@ -157,6 +157,16 @@ not.
   response is read off an impulse at index 0 (a stage that holds its first sample answers that
   as a step down from 1).
 
+- **0.48.1, `delay(by=<constant fractional>)` (#104).** Applied as one fixed 32-tap FIR after
+  the whole-sample shift, 20 times or more faster, and no dearer than the chain it delays.
+  The old path rebuilt the kernel at every sample from `arange(n) - d*fs`, and that position
+  carries rounding that grows with the sample index, so the new output differs from it by that
+  noise: at most 1.8e5 eps of the record's peak in the cases measured (70 000 samples, a third of
+  a sample; about 4e-11 on a record near 4), a few eps for a dyadic fraction such as 0.25, where
+  only the summation order differs (`tests/test_delay_constant.py` states and checks the bound).
+  The ends are held exactly as before. A whole-sample delay and a signal-valued `by` are
+  bit-identical. The entry is keyed on `delay` and warns a recipe stamped before 0.48.1.
+
 - **0.48.0, `nrz`, `pam<N>`, `symbols` and `coded` carriers.** Each symbol edge is at its own
   time to a fraction of a sample, not on a whole one. A record whose samples per UI is not a
   whole number had up to one sample of sawtooth timing error that was the grid's (14.43 ps rms

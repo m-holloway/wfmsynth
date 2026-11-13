@@ -4393,6 +4393,13 @@ NUMERIC_CHANGES += (
      "(#100). A capture that idles at a nonzero level no longer gets a false edge at its first "
      "and last samples; one that starts and ends at exactly zero is unchanged. Without "
      "`resample=True` the op is unchanged."),
+    ("0.48.1", "delay",
+     "a CONSTANT fractional `by` is applied as one fixed FIR (#104) instead of a kernel rebuilt "
+     "at every sample from `arange(n) - d*fs`, whose rounding grew with the sample index. Same "
+     "taps, same held ends, same stated error; the samples differ by that rounding, up to "
+     "about 2e5 eps of the record's peak at 70 000 samples (4e-11 for a record near 4), and by "
+     "a few eps where the fraction is a dyadic one (0.25, 0.5). A whole-sample delay and a "
+     "signal-valued `by` are bit-identical."),
 )
 
 

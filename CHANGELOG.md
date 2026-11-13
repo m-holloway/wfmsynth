@@ -12,6 +12,30 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## 0.48.1 — 2026-11-13
+
+- **Fixed (#104):** `delay(by=<a constant>)` that is not a whole number of samples is one fixed
+  FIR instead of a kernel rebuilt at every sample. On the issue's 540 540-sample record the
+  fractional delay cost 0.43 s against 0.02 s for the chain it delays (4.21 s against 0.05 s
+  in the report), and now costs 0.02 s: the same as no delay. A signal-valued `by` is
+  untouched. This also speeds the sub-sample source delay a `Segments` occurrence applies.
+- **Documented (#103):** `carrier("pulse")` and `carrier("step")` are bipolar about `offset`,
+  like `sine` and `square`: they rest at `offset - amp` and go to `offset + amp`, an excursion
+  of `2*amp`. Only `exp` goes from `offset` to `offset + amp`. Behaviour is unchanged (changing
+  it would move every tuned pulse); it is now in the docstrings, the carrier list, the
+  cookbook and the skill, with "rest at 0, dip to -1.3" as the worked example. New
+  `physics.levels(rest, to)` returns the `amp`/`offset` that make a `step` or `pulse` rest at
+  one level and go to another. `tests/test_oneshot_levels.py` pins where `step`, `pulse`
+  and `exp` rest and where they go.
+
+### Changed output
+
+One thing moves samples, by rounding only, and is recorded in `compose.NUMERIC_CHANGES`: a
+constant fractional `delay` differs from 0.48.0 by at most about 2e5 eps of the record's peak
+in the cases measured (the old per-sample kernel's own rounding), a few eps for a dyadic
+fraction. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). A recipe stamped before 0.48.1
+that holds a `delay` warns when replayed.
+
 ## 0.48.0 — 2026-11-13
 
 - **Fixed (#100):** a record that idles at a level now starts there. Stages that filter, delay,
