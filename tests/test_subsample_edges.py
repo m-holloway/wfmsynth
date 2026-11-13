@@ -99,3 +99,25 @@ def test_an_edge_between_samples_keeps_its_step_and_its_moment():
         out = P._delay_steps(edge, np.array([m]), np.array([te - m]), np.array([1.0]))
         assert out[:40].max() < 1e-12 and abs(out[-1] - 1.0) < 1e-12
         assert (1.0 - out).sum() == pytest.approx(te, abs=1e-9)
+
+
+def _prbs7_peak(spb, k):
+    n_ui = 500
+    return float(P.nrz(n_ui=n_ui, n=int(round(spb * n_ui)), tr_frac=k / spb,
+                       tr_floor_samples=2.0).max())
+
+
+def test_the_ring_of_a_short_edge_between_samples_is_what_the_docs_say():
+    """Measured, not wished away: at the 2-sample floor a non-whole spb peaks up to ~3 points
+    above a whole one (the 8-tap Lagrange step is not flat near Nyquist); from a 4-sample edge
+    it is about a point, the size of the scatter between sample phases. `nrz`'s docstring and the reference quote
+    these numbers."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        floor = [_prbs7_peak(s, 2.0) for s in (7.37, 9.3, 12.3)]
+        whole = _prbs7_peak(12.0, 2.0)
+        assert all(whole < p < whole + 0.04 for p in floor)
+        assert _prbs7_peak(4.4, 2.0) < 1.16
+        for s in (8.4, 12.3):
+            assert abs(_prbs7_peak(s, 4.0) - _prbs7_peak(round(s), 4.0)) < 0.015

@@ -1912,6 +1912,18 @@ def nrz(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, jitter=None, rng=No
                       deliberately ISI-free contrast case.
     jitter=Jitter(...) applies transmitter jitter at the symbol edge times (source
                       jitter) before shaping; rng seeds it.
+
+    SHORT EDGES RING MORE BETWEEN SAMPLES. An edge between samples is placed with an 8-tap
+    Lagrange fractional delay (see `_delay_steps`), which is exact in time but not flat near the
+    Nyquist rate. When the shaped edge is as short as the floor (2 samples: `tr_frac * spb < 2`,
+    which also warns) a non-whole `spb` therefore peaks higher than a whole one. PRBS7 peak
+    (full scale 1.0), before -> after the change: spb 3.5 1.076 -> 1.103, 4.4 1.101 -> 1.150,
+    4.5 1.101 -> 1.133, 5.5 1.097 -> 1.080, 7.37 1.055 -> 1.086, 9.3 1.048 -> 1.079; whole spb
+    4.0 / 8.0 / 12.0 read 1.075 / 1.055 / 1.048 and are unchanged. At a 3-sample edge the excess is
+    0.8 point, at 4 it is up to 1.3, and from 5 up 0.6 or less (the scatter between sample
+    phases is of that order). Give the edge 5+ samples (a `tr_frac` that makes it so: 0.15 needs about 33 samples
+    per UI) and the ring is gone. Timing stays exact: 5e-3
+    sample peak to peak at the 2-sample floor.
     """
     n = N if n is None else int(n)
     spb = n / n_ui
@@ -1931,6 +1943,8 @@ def pam4(n_ui=32, tr_frac=0.15, seed=1, n=None, causal=False, pattern="legacy",
                       has to be analysable by an instrument.
     jitter=Jitter(...) applies transmitter jitter at the symbol edge times (source
                       jitter) before shaping; rng seeds it.
+
+    An edge shorter than about 3 samples rings more between samples than on them: see `nrz`.
     """
     n = N if n is None else int(n)
     spb = n / n_ui

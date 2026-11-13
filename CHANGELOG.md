@@ -14,29 +14,46 @@ samples is called out explicitly under **Changed output** below.
 
 ## 0.48.0 — 2026-11-13
 
-- **Fixed:** `__version__` and recipe stamps no longer go stale in an editable install after
-  `git pull` (#101). A source checkout reads `pyproject.toml`; installed metadata is used only
+- **Fixed (#100):** a record that idles at a level now starts there. Stages that filter, delay,
+  convolve or resample used to begin as if the line had been at zero, which put a false edge at
+  the head of the record (and, for a zero-phase `lossy`, at the tail).
+- **Fixed (#98):** carrier symbol edges sit at their own times, not on whole samples. A symbol
+  rate off the sample rate no longer walks as a sawtooth of timing error (14.43 ps rms to 0.09),
+  and `jitter=` under a sample is realised (it had a 25 ps floor).
+- **Fixed (#101):** `__version__` and recipe stamps no longer go stale in an editable install
+  after `git pull`. A source checkout reads `pyproject.toml`; installed metadata is used only
   when there is no checkout (a wheel install).
-- **Added:** any number of sinks on an open-drain line (#102). `physics.open_drain_line(sinks=[(on_mask, r_on_ohm), ...])`
-  resolves every device that is pulling as parallel conductances against the pull-up, with the
-  same exact exponential stepping; `open_drain(others=[dict(source=..., r_sink_ohm=...), ...])`
-  is the same on a `Signal`, beside `second=` (sources are carrier specs or sub-chains, recorded
-  in the recipe; a misspelt key is refused with the nearest name). `physics.open_drain_low_v`
-  gives the settled low for a set of sinks. `sink_on` / `sink_b_on` and every existing recipe
-  render bit-for-bit as before. New cookbook entry: an I2C-like bus with a controller, three
-  targets and a stretched clock, with a validate check on the measured levels.
-
-A record that idles at a level starts there (#100). Most filtering stages started a record in
-steady state at its first sample, as `scope_bandwidth` promises; the probe's ground lead and
-`lossy` did not, and nor did the others that an audit of every stage that filters, convolves,
-delays or resamples found. They started as if the input before the record had been zero. They put a false edge at the head of any record
-that idles at a rail, a bus level or a clock's low, and a zero-phase `lossy` put another at the
-tail.
+- **Added (#102):** any number of sinks on an open-drain line, `physics.open_drain_line(sinks=)`
+  and `open_drain(others=[...])`, with a cookbook I2C-like bus.
 
 ### Changed output
 
-Only a record whose first or last sample is not exactly zero moves. One that starts and ends at
-zero takes the old path and is the same bits (`tests/test_steady_state_start.py`).
+Two things move rendered samples, and both are recorded in `compose.NUMERIC_CHANGES`, so a
+recipe stamped before 0.48.0 that holds an affected op warns when it is replayed. See
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
+- **A record that does not start and end at exactly zero moves at its ends (#100).** One that
+  starts and ends at zero takes the old path and is the same bits
+  (`tests/test_steady_state_start.py`). Others change in the first and last samples, by the whole
+  level at the worst, and for a response with a long tail by a small and falling amount further
+  in (details below). Ops: `lossy`, `sparam`, `cascade`, `reflect`, `resonant_reflect`, `probe`,
+  `ctle`, `tx_ffe`, `de_emphasis`, `rx_ffe`, `hybrid_echo`, `multipair`, `crosstalk` (`next`),
+  `crosstalk_matrix` (`next`), `scope` (`gaussian`), and the resample behind `digitize(n_out=)`
+  and `capture(resample=True)`.
+- **A carrier whose samples per UI is not whole, or that has `jitter=` under a sample, moves
+  (#98).** A record with a whole number of samples per UI and no source jitter is bit-identical
+  to 0.47.0 (`tools/digest_compare.py` against 0.47.0 over the 31 chains and every example
+  render: only the chains with sub-sample jitter or a non-whole samples per UI move). Ops:
+  `carrier/nrz`, `carrier/pam4`, `carrier/pam3`, `carrier/pam5`, `carrier/pam8`, `symbols` and
+  `coded`.
+
+### #100: a record that idles at a level starts there
+
+Most filtering stages started a record in steady state at its first sample, as `scope_bandwidth`
+promises. The probe's ground lead and `lossy` did not, and nor did the others that an audit of
+every stage that filters, convolves, delays or resamples found: they started as if the input
+before the record had been zero. They put a false edge at the head of any record that idles at a
+rail, a bus level or a clock's low, and a zero-phase `lossy` put another at the tail.
 
 - **The ends are held.** The line is taken to have been at the first sample's value before the
   record and to stay at the last one after it, as the Bessel filters and `filter(...)` already
@@ -83,22 +100,18 @@ the FIR they return are unchanged. (`scope`, `filter` and `probe_loading` alread
 way.)
 
 `compose.NUMERIC_CHANGES` gains an entry for each op above, and a recipe can now name `<op>/<kind>`
-(`crosstalk/next`, `scope/gaussian`) as it names `carrier/<kind>`. Entries for 0.48.0 warn a
-recipe stamped earlier once the version is bumped. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+(`crosstalk/next`, `scope/gaussian`) as it names `carrier/<kind>`. A recipe stamped before 0.48.0
+that holds one of them warns on replay, wherever the op sits: stages inside a sub-chain
+(`aggressor`, `second`, `others`, a `net` driver) are found too.
 
-### Audited and already right
+**Audited and already right.** Flat in, flat out at both ends, tested for each: `scope` (every
+kind), `input_bandwidth`, `probe` (loading, bandwidth), `ac_couple`, `agc`, `filter` (every
+kind, zero-phase too, and `doppler`), `supply_coupling`, `crosstalk` (fext), `intra_pair_skew`,
+`delay`, `sample_clock`, `timebase`, `net` and `open_drain` (initialised at the first level). Not
+fixed, with the reason, in BACKLOG: `dfe`, the CDR's jitter-transfer filters, and the circular
+`probe_loading` wrap.
 
-Flat in, flat out at both ends, tested for each: `scope` (every kind), `input_bandwidth`,
-`probe` (loading, bandwidth), `ac_couple`, `agc`, `filter` (every kind, zero-phase too, and
-`doppler`), `supply_coupling`, `crosstalk` (fext), `intra_pair_skew`, `delay`, `sample_clock`,
-`timebase`, `net` and `open_drain` (initialised at the first level). Not fixed, with the reason,
-in BACKLOG: `dfe`, the CDR's jitter-transfer filters, and the circular `probe_loading` wrap.
-
-Carrier symbol edges are at their own times (#98). A record with a whole number of samples per UI
-and no source jitter is bit-identical to 0.47.0; one with a symbol rate off the sample rate, or
-`jitter=` under a sample, changes by design.
-
-### Changed output
+### #98: carrier symbol edges are at their own times
 
 - **`nrz` / `pam<N>` / `symbols` / `coded` edges are placed at their own times, to a fraction of
   a sample.** `physics._place_symbols` put every edge on a whole sample before the edge shaper.
@@ -111,13 +124,38 @@ and no source jitter is bit-identical to 0.47.0; one with a symbol rate off the 
   49.98 and 99.96 ps after** (within 2 % from 0.5 ps up; `jitter=` carries pj and dcd the same
   way, and 0.256 and 1.024 samples of dcd are no longer one record). An edge between samples
   is the hard step delayed by its fraction with the 8-tap Lagrange interpolator `square` and
-  `cmos` already use (0.46.0). An edge on a sample is left a hard step: every whole
-  samples-per-UI render with no jitter is bit-identical (`tools/digest_compare.py` against
-  0.47.0 over the 31 chains and every example render: only the chains with sub-sample jitter or
-  a non-whole samples-per-UI move). Cost: a whole-spb render is unchanged; a non-whole one adds
-  about 15 ms per 2 M samples at 131 k UI (20 to 36 ms), and a jittered one is faster (55 to 37
-  ms). Recorded in `compose.NUMERIC_CHANGES` as `carrier/nrz`, `carrier/pam4`, `carrier/pam3`,
-  `carrier/pam5`, `carrier/pam8`, `symbols` and `coded`.
+  `cmos` already use (0.46.0). An edge on a sample is left a hard step, so every whole
+  samples-per-UI render with no jitter is bit-identical. Cost: a whole-spb render is unchanged;
+  a non-whole one adds about 15 ms per 2 M samples at 131 k UI (20 to 36 ms), and a jittered
+  one is faster (55 to 37 ms).
+- **A short edge rings more between samples than on them.** The 8-tap Lagrange step is not flat
+  near Nyquist, so when the shaped edge is at the 2-sample floor (`tr_frac * spb < 2`, which
+  already warns) a non-whole samples per UI peaks higher than a whole one. NRZ PRBS7, peak of a
+  1.0 swing, before -> after: 3.5 spb 1.076 -> 1.103, 4.4 1.101 -> 1.150, 4.5 1.101 -> 1.133,
+  5.5 1.097 -> 1.080, 7.37 1.055 -> 1.086, 9.3 1.048 -> 1.079, 12.3 1.048 -> 1.079 (whole
+  samples per UI 4 / 8 / 12: 1.075 / 1.055 / 1.048, unchanged). It is 0.8 point at a 3-sample
+  edge, up to 1.3 at 4 and 0.6 or less from 5 samples up, the size of the scatter between sample
+  phases; a longer interpolator (12 taps) moves it by 0.1 point, and a linear one removes the
+  ring but costs 7x the timing accuracy (3.4e-2 against 5e-3 sample peak to peak at the floor),
+  so the timing was kept. Give the edge 5+ samples (a larger `tr_frac`; the default 0.15 needs
+  about 33 samples per UI). The same shaper at the floor already peaks at 1.05 on a whole
+  grid, against 1.007 for the same edge on a ten-times finer one: the floor edge is not a
+  faithful shape, so the extra is on top of an approximation.
+
+### Fixed and added in detail
+
+- **#101.** An editable install's metadata is written once, at install time, so after `git pull`
+  it names an older release than the code in front of you and every recipe stamp was wrong. The
+  reader also accepts single-quoted and CRLF forms of `name = ` and `version = `.
+- **#102.** `physics.open_drain_line(sinks=[(on_mask, r_on_ohm), ...])` resolves every device
+  that is pulling as parallel conductances against the pull-up, with the same exact exponential
+  stepping; `open_drain(others=[dict(source=..., r_sink_ohm=...), ...])` is the same on a
+  `Signal`, beside `second=` (sources are carrier specs or sub-chains, recorded in the recipe; a
+  misspelt key is refused with the nearest name, and a source on another length is refused naming
+  `others[i]`). `physics.open_drain_low_v` gives the settled low for a set of sinks and refuses a
+  non-positive or non-finite resistance by name. `sink_on` / `sink_b_on` and every existing
+  recipe render bit-for-bit as before. New cookbook entry: an I2C-like bus with a controller,
+  three targets and a stretched clock, with a validate check on the measured levels.
 
 ### Documented
 

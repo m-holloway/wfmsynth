@@ -155,6 +155,16 @@ depends on the filtering after it (0.5 ps asked reads 0.32 ps per edge through a
 for "x ps rms per edge" use `carrier(jitter=dict(rj=x_ps * fs / 1e12))`. `carrier` warns once when
 `n_ui` is left out on a grid whose `baud` the default 32 symbols do not match.
 
+One cost of placing an edge between samples: the 8-tap Lagrange delay is not flat near Nyquist,
+so an edge shaped to the 2-sample floor (`tr_frac * spb < 2`, which warns) peaks higher on a
+non-whole `spb` than on a whole one. NRZ PRBS7, peak of a 1.0 swing, whole-sample edges before
+-> placed after: 3.5 spb 1.076 -> 1.103, 4.4 1.101 -> 1.150, 4.5 1.101 -> 1.133, 7.37 1.055 ->
+1.086, 9.3 1.048 -> 1.079 (whole spb 4 / 8 / 12: 1.075 / 1.055 / 1.048, unchanged). It is 0.8
+point at a 3-sample edge, up to 1.3 at 4 and 0.6 or less from 5 (the scatter between sample
+phases is of that order); give the edge 5+ samples with a larger `tr_frac` (the default 0.15
+needs about 33 samples per UI). Timing is not what
+rings: 5e-3 sample peak to peak at the floor.
+
 Two places still interpolate linearly, and both act on the synthesis grid where the sizing rule
 keeps the oversample high: the FFE's fractional tap spacing and interleaved-converter channel
 skew. The cost there is bounded and measured (under 0.1 % of peak-to-peak at 20+ samples/UI).
