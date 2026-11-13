@@ -157,7 +157,7 @@ def test_a_record_that_starts_from_a_held_level_warns_a_pre_0_48_recipe_for_that
     got = [m for m in _replay(_idle_recipe("0.47.0")) if "changed in 0.48.0" in m]
     assert len(got) == 1 and "'lossy'" in got[0] and "false edge" in got[0]
     assert _replay(_idle_recipe("0.48.0")) == []
-    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("nrz", n_ui=64).recipe()
+    r = Signal(seed=1, grid=Grid(fs=1e9, n=2048)).carrier("dc", level=3.3).recipe()
     r["wfmsynth_version"] = "0.47.0"
     assert _replay(r) == []
 
@@ -166,7 +166,7 @@ def test_a_change_to_one_kind_of_an_op_warns_only_recipes_that_choose_it():
     """`crosstalk` is moved only for `kind="next"` (a delayed copy of the aggressor's level);
     the derivative form `fext`, the default, is not, so it must not be warned."""
     def recipe(kind):
-        s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=2048)).carrier("nrz", n_ui=256)
+        s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=2048)).carrier("dc", level=1.0)
         r = s.crosstalk(kind=kind).recipe()
         r["wfmsynth_version"] = "0.47.0"
         return r
