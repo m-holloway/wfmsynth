@@ -100,11 +100,13 @@ def _read_version(package_file=__file__):
     from pathlib import Path
     pyproject = Path(package_file).resolve().parent.parent / "pyproject.toml"
     try:
-        text = pyproject.read_text()
+        # bytes, decoded by hand: a BOM or CRLF line ends (a checkout on Windows) must not hide
+        # the line, and the quote may be either kind (TOML allows both)
+        text = pyproject.read_bytes().decode("utf-8-sig", "replace").replace("\r\n", "\n")
     except OSError:
         text = ""
-    if re.search(r'^name\s*=\s*"wfmsynth"', text, re.M):
-        m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    if re.search(r"""^name\s*=\s*["']wfmsynth["']""", text, re.M):
+        m = re.search(r"""^version\s*=\s*["']([^"']+)["']""", text, re.M)
         if m:
             return m.group(1)
     try:

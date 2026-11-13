@@ -454,7 +454,8 @@ scl = (ws.Signal(grid=g).carrier("square", f_hz=100e3)
                    others=[dict(source=stretch, r_sink_ohm=90.0)]))
 ```
 
-The clock's rising edges are at 10.56, 20.56, 30.56 and 40.56 us, and then the next is at
+The clock's rising edges, read where SCL crosses 70 % of the supply (the I2C high threshold),
+are at 10.56, 20.56, 30.56 and 40.56 us, and then the next is at
 72.56 us, 0.56 us after the target lets go. That rise is the same as after any release: 30 to
 70 % takes 398 ns, which is `0.8473 * RP * CB`, however many devices were pulling before it.
 `others` entries take a bare carrier spec or a sub-chain as `source`, are recorded in the recipe,

@@ -7,6 +7,8 @@ did not match the installed package, and `importlib.metadata.version("wfmsynth")
 from __future__ import annotations
 
 import re
+
+import pytest
 from pathlib import Path
 
 import wfmsynth as ws
@@ -78,3 +80,16 @@ def test_a_host_projects_pyproject_is_not_ours(tmp_path, monkeypatch):
     monkeypatch.setattr(md, "version", lambda name: "1.2.3")
     f = _fake_tree(tmp_path, '[project]\nname = "hostapp"\nversion = "5.5.5"\n')
     assert ws._read_version(f) == "1.2.3"
+
+
+@pytest.mark.parametrize("text", [
+    "[project]\r\nname = \"wfmsynth\"\r\nversion = \"9.8.7\"\r\n",
+    "[project]\nname = 'wfmsynth'\nversion = '9.8.7'\n",
+    "﻿[project]\r\nname='wfmsynth'\r\nversion='9.8.7'\r\n",
+])
+def test_a_crlf_or_single_quoted_pyproject_is_still_read(tmp_path, monkeypatch, text):
+    import importlib.metadata as md
+    monkeypatch.setattr(md, "version", lambda name: "0.0.1-stale")
+    f = _fake_tree(tmp_path, "")
+    (tmp_path / "pyproject.toml").write_bytes(text.encode("utf-8"))
+    assert ws._read_version(f) == "9.8.7"
