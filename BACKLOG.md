@@ -866,13 +866,18 @@ delivered in 0.46.0 with the test named).
    or a refusal.
 2. `coded(bits=, prbs=)` lets `bits` win and records `prbs` unused (as on `main`); `iq`
    refuses the same pair.
-3. Found while fixing ruling 1, the same grid placement in three other sources, unchanged:
-   an `nrz` / `pam<N>` / `symbols` carrier whose samples per UI is not a whole number puts
-   each edge on the next sample (measured: a clock pattern of 1000 UI on 32768 samples at
-   64 GSa/s, 15.5 ps peak to peak; under 1e-9 ps at 1024 UI); `carrier(jitter=)` displaces
-   edges by whole samples (U-13); `step` / `pulse` / `sawtooth` round their one edge or
-   flyback to a sample. `physics._edge_train` is the mechanism to reuse; each would need
-   its own `NUMERIC_CHANGES` entry.
+3. Found while fixing ruling 1, the same grid placement in other sources. `nrz` / `pam<N>` /
+   `symbols` / `coded` edges and `carrier(jitter=)` were fixed in 0.48.0 (#98;
+   `physics._place_symbols` through `_delay_steps`). Still on a sample, unchanged: `step` /
+   `pulse` / `sawtooth` round their one edge or flyback to a sample (`physics._edge_train` is the
+   mechanism to reuse; each needs its own `NUMERIC_CHANGES` entry); the label side of the
+   carrier, `events._symbol_edges` and `events._ui_bounds`, which give an edge or a UI window as
+   an INTEGER sample (`round` / `floor` of `ui * spb`), so on a non-whole samples-per-UI an event
+   label can sit up to a sample from the edge now rendered; the legacy random-corpus sources
+   (`physics.psk` / `qam`, `grammar._prbs_levels`), which are pinned by digest; and a PAM-N
+   whose `N` has no `NUMERIC_CHANGES` entry (only 3, 4, 5, 8 do).
+   `timing(rj_ps=)` stays per sample (documented in 0.48.0); a per-edge option on `timing` would
+   need edge detection on an arbitrary record, and `carrier(jitter=)` already is per edge.
 4. Python 3.9 with numpy 2.0.x on macOS arm64 raises spurious `matmul` floating-point
    warnings inside `net.py` (the results are finite and the tests of their values pass),
    which fails `test_the_demo_does_not_warn` for two examples there. Not seen on 3.14.

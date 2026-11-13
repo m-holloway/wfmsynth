@@ -157,6 +157,17 @@ not.
   response is read off an impulse at index 0 (a stage that holds its first sample answers that
   as a step down from 1).
 
+- **0.48.0, `nrz`, `pam<N>`, `symbols` and `coded` carriers.** Each symbol edge is at its own
+  time to a fraction of a sample, not on a whole one. A record whose samples per UI is not a
+  whole number had up to one sample of sawtooth timing error that was the grid's (14.43 ps rms
+  at 20 GSa/s and 40.00061 samples per UI; now 0.09 ps, the measure's own floor), and `jitter=`
+  under a sample was quantised to whole samples (24.97 ps rms for 0.0125 to 5 ps asked; now
+  within 2 % from 0.5 ps up). A record with a whole number of samples per UI and no `jitter=`,
+  or whose displaced edges all fall on samples, is unchanged bit for bit. Keyed `carrier/nrz`,
+  `carrier/pam3`, `carrier/pam4`, `carrier/pam5`, `carrier/pam8`, `symbols` and `coded`, so a
+  recipe holding only analog carriers is not warned; another `pam<N>` is moved and not named.
+  To reproduce an old record exactly, render it with 0.47.x.
+
 ---
 
 ## What is explicitly *not* promised

@@ -267,10 +267,10 @@ Composition and I/Q added these. Each renders, replays and digests cleanly, and 
     `that_signal.waveform()`; what was used is `sig.subchain("crosstalk/1/aggressor")`.
     `{"from": recipe}` is the opposite trap: pinned, unit included, so a loop that varies the
     parent's seed (or calls `unit()`) embeds the same lane in every record.
-28. **Keep samples per UI a whole number, and take jitter from `timing`.** An `nrz` / `pam<N>` /
-    `symbols` carrier puts each edge on a sample: MEASURED at 64 GSa/s, 1000 UI over 32768
-    samples carries 15.5 ps peak to peak that is the grid's, against under 1e-9 ps at 1024
-    UI, and `carrier(jitter=)` moves edges by whole samples. (`square` and `cmos` do not.)
+28. **`timing(rj_ps=)` is per sample, `carrier(jitter=dict(rj=))` is per edge.** The first draws
+    a fresh offset for every sample, so an edge shows less than asked once a filter follows (0.5 ps
+    asked read 0.32 ps through a 6 GHz scope). `carrier(jitter=)` is in SAMPLES and moves each
+    edge once, sub-sample included; for "x ps rms per edge" ask it for `x_ps * fs / 1e12`.
 29. **Randomness inside a SHARED chain is the same draw on every channel that uses it.** Right
     for a PLL, wrong for noise: put `rx_noise` on each channel.
 30. **`by=` is the quantity itself.** A 3 % ripple is `gain(by=)` a sine of amplitude 0.03 with

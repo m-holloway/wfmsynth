@@ -5842,6 +5842,56 @@ with P.zero_edges():
 check("`lead_in` sizes its guard from the impulse response, which holding the ends does not move",
       _ss_a == _ss_b, f"measured extent {_ss_a} samples held, {_ss_b} zero-padded")
 
+# ============================================================ edges at their own times (GitHub #98)
+print("\n== carrier edges at their own times: a symbol rate off the sample rate, and jitter under a sample ==")
+import wfmsynth as _se_ws                                                         # noqa: E402
+
+_se_fs, _se_baud = 20e9, 500e6
+
+
+def _se_tie_ps(x):
+    """rms timing error of the rising mid-level crossings against a constant-period fit."""
+    i = np.flatnonzero((x[:-1] < 0) & (x[1:] >= 0))
+    t = (i + x[i] / (x[i] - x[i + 1])) / _se_fs
+    k = np.r_[0, np.cumsum(np.round(np.diff(t) / np.median(np.diff(t))))]
+    A = np.c_[np.ones_like(k), k]
+    c, *_ = np.linalg.lstsq(A, t, rcond=None)
+    return float((t - A @ c).std() * 1e12)
+
+
+def _se_clock(n, n_ui, **kw):
+    return _se_ws.Signal(seed=1, grid=_se_ws.Grid(fs=_se_fs, baud=_se_baud, n=n)).carrier(
+        "nrz", n_ui=n_ui, pattern="clock", **kw).scope(bw_hz=6e9)
+
+
+_se_spb = _se_tie_ps(_se_clock(1 << 21, 52428).waveform())
+check("a clock at 40.00061 samples per UI carries no timing error of the grid's",
+      _se_spb < 0.1,
+      f"{_se_spb:.3f} ps rms at 20 GSa/s through a 6 GHz scope (14.43 ps when edges were on "
+      f"samples; the bound is the measure's own linear-crossing floor)")
+
+_se_rows, _se_worst = [], 0.0
+for _r in (0.00025, 0.01, 0.1, 0.4, 1.0, 2.0):
+    _want = _r * 1e12 / _se_fs
+    _got = _se_tie_ps(_se_clock(20000 * 40, 20000, jitter=dict(rj=_r)).waveform())
+    _se_rows.append(f"{_want:.4g}->{_got:.4g}")
+    if _want >= 0.4:                         # below that, the crossing measure's floor is the larger part
+        _se_worst = max(_se_worst, abs(_got / _want - 1.0))
+check("carrier jitter=dict(rj=) under a sample measures what was asked",
+      _se_worst < 0.02,
+      "asked->measured ps rms: " + ", ".join(_se_rows) + f"; worst error from 0.4 ps up "
+      f"{100 * _se_worst:.2f} % (a 25 ps floor before)")
+
+_se_g = _se_ws.Grid(fs=_se_fs, baud=_se_baud, n=20000 * 40)
+_se_tm = _se_tie_ps(_se_ws.Signal(seed=1, grid=_se_g).carrier("nrz", n_ui=20000, pattern="clock")
+                    .timing(rj_ps=0.5).scope(bw_hz=6e9).waveform())
+_se_cj = _se_tie_ps(_se_clock(20000 * 40, 20000, jitter=dict(rj=_se_tm * _se_fs / 1e12)).waveform())
+check("carrier jitter and timing(rj_ps=) agree at the same per-edge rms",
+      abs(_se_cj / _se_tm - 1.0) < 0.03,
+      f"timing(rj_ps=0.5) leaves {_se_tm:.3f} ps rms per edge through the scope (it draws per "
+      f"sample, so the figure depends on the filter after it); carrier jitter asked for that "
+      f"measures {_se_cj:.3f} ps")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")

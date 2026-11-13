@@ -143,13 +143,16 @@ reflection delay is continuous: `td_ps=100.0` and `td_ps=100.25` give different 
 matters because the echo's phase within the eye is what decides whether it lands on a crossing or
 in the middle.
 
-The SOURCE's own edges are a separate matter. `square` and `cmos` place each edge at its own
-time between samples (measured at 0.997 GHz on 64 GSa/s, where snapping to the next sample gave
-15.6 ps of edge-time error: 3e-5 ps with a 9.6-sample edge, 0.011 ps at `square`'s default
-3.2-sample edge, 0.052 ps for a 2.2-sample `cmos` edge). An `nrz` / `pam<N>` / `symbols` carrier places its
-edges ON samples, so its clock is clean only when samples per UI is a whole number: choose `n`
-and `n_ui` so `n / n_ui` is whole. `carrier(jitter=)` displaces edges by whole samples for the
-same reason; jitter that means what it says is `timing(rj_ps=)`. `carrier` warns once when
+The SOURCE's own edges are placed the same way. Every edge of a `square`, `cmos`, `nrz`,
+`pam<N>` or `symbols` carrier is at its own time between samples, so a symbol rate that does not
+divide the sample rate adds no timing error of the grid's: a clock at 40.00061 samples per UI
+measured 14.43 ps rms before and 0.09 ps after (the measure's own floor). `carrier(jitter=)`
+is in samples and is exact below one sample too: 0.0125 ps to 100 ps asked at 20 GSa/s measured
+within 2 % from 0.5 ps up, where it had a 25 ps floor. An edge ON a sample is a hard step, so a
+whole samples-per-UI with no jitter renders as it always did. `timing(rj_ps=)` is the other
+route, and a different quantity: it draws a fresh offset per SAMPLE, so what an edge shows
+depends on the filtering after it (0.5 ps asked reads 0.32 ps per edge through a 6 GHz scope);
+for "x ps rms per edge" use `carrier(jitter=dict(rj=x_ps * fs / 1e12))`. `carrier` warns once when
 `n_ui` is left out on a grid whose `baud` the default 32 symbols do not match.
 
 Two places still interpolate linearly, and both act on the synthesis grid where the sizing rule

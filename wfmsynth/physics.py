@@ -1785,17 +1785,38 @@ def _edge_disp(levels_per_ui, jitter, rng):
 
 
 def _place_symbols(levels_per_ui, n, spb, jitter=None, rng=None):
-    """Map a per-UI symbol-level array onto n samples. jitter=None -> uniform UI
-    boundaries (bit-identical legacy). With a Jitter, the interior symbol EDGES are
-    displaced (source jitter) before the piecewise-constant stream is returned."""
+    """Map a per-UI symbol-level array onto n samples, each symbol EDGE at its exact time.
+
+    An edge at ``te`` samples is the hard step at ``floor(te)`` DELAYED by the fraction, with the
+    fractional-delay interpolator the `square`/`cmos` edge train uses (`_delay_steps`). The edge
+    shaper's rise is then applied about the true time, so a ``spb`` that is not whole, or a
+    displacement under a sample, is not snapped to the grid. An edge within `EDGE_SNAP_SAMPLES`
+    of a sample IS on it and is left a hard step, so a whole ``spb`` with no jitter is the plain
+    piecewise-constant stream, bit-identical to what this returned before edges were fractional.
+    With a Jitter the interior edges are displaced (source jitter) first."""
     n_ui = len(levels_per_ui)
     if jitter is None:
-        idx = np.clip((np.arange(n) / spb).astype(int), 0, n_ui - 1)
-        return levels_per_ui[idx]
-    rng = rng or np.random.default_rng()
-    edges = np.arange(1, n_ui) * spb + _edge_disp(levels_per_ui, jitter, rng)
-    idx = np.clip(np.searchsorted(edges, np.arange(n), side="right"), 0, n_ui - 1)
-    return levels_per_ui[idx]
+        if spb == int(spb):
+            idx = np.clip((np.arange(n) / spb).astype(int), 0, n_ui - 1)
+            return levels_per_ui[idx]
+        te = np.arange(1, n_ui) * spb
+    else:
+        rng = rng or np.random.default_rng()
+        te = np.arange(1, n_ui) * spb + _edge_disp(levels_per_ui, jitter, rng)
+    near = np.round(te)
+    te = np.where(np.abs(te - near) <= EDGE_SNAP_SAMPLES, near, te)
+    m = np.floor(te).astype(np.int64)
+    if (np.diff(m) >= 0).all():
+        # the run of samples at each level, straight from the edges (a search of every sample
+        # against them is the dearer way to the same stream)
+        x = np.repeat(levels_per_ui, np.diff(np.clip(m, 0, n), prepend=0, append=n))
+    else:                                    # displaced past a neighbour: the order is theirs
+        idx = np.clip(np.searchsorted(m, np.arange(n), side="right"), 0, n_ui - 1)
+        x = levels_per_ui[idx]
+    d = te - m
+    if (d > 0).any():
+        x = _delay_steps(np.array(x, float), m, d, np.diff(levels_per_ui))
+    return x
 
 
 def carrier_symbols(kind, n_ui, seed=1, pattern="legacy", phase=0, pair=0,
@@ -2142,6 +2163,13 @@ def _edge_train(n, spp, duty, phase_rad):
     jumps = np.zeros(n)
     np.add.at(jumps, np.clip(m[inside], 0, None), step[inside])
     ideal = -1.0 + np.cumsum(jumps)
+    return _delay_steps(ideal, m, d, step)
+
+
+def _delay_steps(ideal, m, d, step):
+    """Delay each hard step of `ideal` (an edge of height `step` taking effect at sample `m`) by
+    its fraction `d` in [0, 1) of a sample, in place; the steps with `d == 0` stay as they are."""
+    n = len(ideal)
     # In blocks of edges, in order: each block's (edges, taps) temporaries are then a few
     # hundred kilobytes whatever the record holds, and the additions land in the order one
     # pass over all the edges would make them, so the result is the same bits.
@@ -2152,7 +2180,11 @@ def _edge_train(n, spp, duty, phase_rad):
         idx = m[sel][:, None] + off[None, :]
         val = step[sel][:, None] * corr
         ok = (idx >= 0) & (idx < n)
-        np.add.at(ideal, idx[ok], val[ok])
+        ms = m[sel]
+        if ms.size < 2 or (np.diff(ms) >= off.size).all():
+            ideal[idx[ok]] += val[ok]           # edges farther apart than the taps reach: no
+        else:                                   # sample is hit twice, and this is the same sum
+            np.add.at(ideal, idx[ok], val[ok])  # as add.at at a fraction of the cost
     return ideal
 
 
