@@ -297,6 +297,19 @@ def _kernel(mu):
     return h / h.sum(axis=1, keepdims=True)                 # a constant stays that constant
 
 
+def _constant_delay(x, s):
+    """`x` delayed by `s` samples (a fraction, `s >= 0`), the same for every sample: one fixed
+    kernel after a whole-sample shift, as a single FIR. The per-sample path in `delay` is for a
+    `by` that moves; this is its result for one that does not, to rounding (`NUMERIC_CHANGES`),
+    in a fraction of the time. Indices past either end are clamped, as there."""
+    n = len(x)
+    shift = int(np.ceil(s))
+    h = _kernel(np.array([shift - s]))[0]              # weights for offsets -15..16
+    half = DELAY_TAPS // 2
+    xp = x[np.clip(np.arange(-shift - half + 1, n - shift + half), 0, n - 1)]
+    return np.convolve(xp, h[::-1], "valid")
+
+
 def delay_error(f_hz, fs):
     """The worst error of the delay's interpolation for a unit tone at `f_hz` on a grid at
     `fs`, over every fractional position: `max |H(f) - exp(j*2*pi*f*mu)|`, MEASURED on the
@@ -388,7 +401,9 @@ def delay(x, by, fs, max_rate=DELAY_MAX_RATE, fc_hz=None, carrier=None):
     base = np.floor(pos)
     mu = pos - base
     base = base.astype(np.int64)
-    if not mu.any():
+    if mu.any() and d.min() == d.max():
+        y = _constant_delay(x, float(d[0]) * fs)
+    elif not mu.any():
         y = x[np.clip(base, 0, n - 1)]
     else:
         k = np.arange(-DELAY_TAPS // 2 + 1, DELAY_TAPS // 2 + 1)
