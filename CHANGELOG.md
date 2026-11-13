@@ -17,6 +17,14 @@ samples is called out explicitly under **Changed output** below.
 - **Fixed:** `__version__` and recipe stamps no longer go stale in an editable install after
   `git pull` (#101). A source checkout reads `pyproject.toml`; installed metadata is used only
   when there is no checkout (a wheel install).
+- **Added:** any number of sinks on an open-drain line (#102). `physics.open_drain_line(sinks=[(on_mask, r_on_ohm), ...])`
+  resolves every device that is pulling as parallel conductances against the pull-up, with the
+  same exact exponential stepping; `open_drain(others=[dict(source=..., r_sink_ohm=...), ...])`
+  is the same on a `Signal`, beside `second=` (sources are carrier specs or sub-chains, recorded
+  in the recipe; a misspelt key is refused with the nearest name). `physics.open_drain_low_v`
+  gives the settled low for a set of sinks. `sink_on` / `sink_b_on` and every existing recipe
+  render bit-for-bit as before. New cookbook entry: an I2C-like bus with a controller, three
+  targets and a stretched clock, with a validate check on the measured levels.
 
 ## 0.47.0 — 2026-11-12
 

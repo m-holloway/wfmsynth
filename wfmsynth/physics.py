@@ -2170,8 +2170,16 @@ def rc_tau_for_rise_time(tr_s, lo_frac=0.3, hi_frac=0.7):
     return float(tr_s) / math.log((1.0 - lo) / (1.0 - hi))
 
 
+def open_drain_low_v(r_pullup_ohm, r_sink_ohms, v_dd=3.3):
+    """The settled low of an open-drain line while the sinks with these on-resistances all pull
+    at once: the divider against their parallel resistance, v_dd * R / (R + r_pullup).
+    One sink gives v_dd * r / (r + r_pullup); none gives v_dd (released)."""
+    g = sum(1.0 / float(r) for r in r_sink_ohms)
+    return float(v_dd) / (1.0 + float(r_pullup_ohm) * g)
+
+
 def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.0, v0=None,
-                    sink_b_on=None, r_sink_b_ohm=None):
+                    sink_b_on=None, r_sink_b_ohm=None, sinks=None):
     """Line voltage on an open-drain bus, integrated as a first-order RC.
 
       `sink_on`        boolean per sample: is device A pulling the line down.
@@ -2183,6 +2191,15 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
       `sink_b_on`      a SECOND device's boolean per sample (same shape as `sink_on`), or None
                        (the default -- one sink, unchanged from before this parameter existed)
       `r_sink_b_ohm`   device B's on-resistance; defaults to `r_sink_ohm` when B is given
+      `sinks`          ANY number of devices: ``[(on_mask, r_on_ohm), ...]``, each its own boolean
+                       per sample and its own on-resistance. Pass `sink_on=None` with it; it
+                       replaces `sink_on`/`sink_b_on`, which stay as the one- and two-sink forms.
+                       Each step resolves the sinks that are on as parallel conductances against
+                       the pull-up (see `open_drain_low_v` for the settled level), so a shared
+                       bus with a controller and several targets is one call: each device's own
+                       low is the divider of its own `r_on_ohm`, two pulling at once give the
+                       lower parallel level, and the rise after the last release is still
+                       Rp * Cb. A cookbook example is in docs/COOKBOOK.md ("an I2C-like bus").
 
     With one sink, two resistances give two time constants and two targets:
 
@@ -2202,6 +2219,14 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
     waveform shows is the rise time the arithmetic asked for, at any oversampling ratio above the
     resolvability check below.
     """
+    if sinks is not None:
+        if sink_on is not None or sink_b_on is not None:
+            raise ValueError("open_drain_line: `sinks` replaces sink_on / sink_b_on; give one "
+                             "form or the other, not both.")
+        return _open_drain_many(sinks, fs, r_pullup_ohm, c_bus_f, v_dd, v0)
+    if sink_on is None:
+        raise ValueError("open_drain_line needs sink_on=<boolean per sample> or "
+                         "sinks=[(on_mask, r_on_ohm), ...].")
     sink = np.asarray(sink_on)
     if sink.dtype != bool:
         sink = sink.astype(bool)
@@ -2286,6 +2311,59 @@ def open_drain_line(sink_on, fs, r_pullup_ohm, c_bus_f, v_dd=3.3, r_sink_ohm=20.
             cur = v_a + (cur - v_a) * k_lo
         else:
             cur = v_dd + (cur - v_dd) * k_hi
+        v[i] = cur
+    return v
+
+
+def _open_drain_many(sinks, fs, r_pullup_ohm, c_bus_f, v_dd, v0):
+    """`open_drain_line` for any number of sinks: per sample the devices that are on add as
+    conductances, G = sum 1/r_k, so target = v_dd / (1 + Rp G) and tau = Rp Cb / (1 + Rp G),
+    stepped exactly as the one- and two-sink forms are."""
+    if isinstance(sinks, (str, bytes, dict)) or not hasattr(sinks, "__len__") or len(sinks) == 0:
+        raise ValueError("open_drain_line: sinks is a non-empty list of (on_mask, r_on_ohm) "
+                         "pairs, one per device.")
+    rp, cb, fs = float(r_pullup_ohm), float(c_bus_f), float(fs)
+    if rp <= 0 or cb <= 0:
+        raise ValueError("r_pullup_ohm and c_bus_f must be positive")
+    g = None
+    for k, pair in enumerate(sinks):
+        try:
+            mask, r = pair
+            r = float(r)
+        except (TypeError, ValueError):
+            raise ValueError(f"open_drain_line: sinks[{k}] must be an (on_mask, r_on_ohm) pair, "
+                             f"got {pair!r}.") from None
+        if not r > 0:
+            raise ValueError(f"open_drain_line: sinks[{k}] r_on_ohm must be positive, got {r!r}")
+        mask = np.asarray(mask).astype(bool)
+        if mask.ndim != 1 or (g is not None and mask.shape != g.shape):
+            raise ValueError(f"open_drain_line: sinks[{k}]'s mask must be 1-D and the same "
+                             f"length as the others, got shape {mask.shape}")
+        g = np.zeros(mask.shape) if g is None else g
+        g = g + mask * (1.0 / r)
+    dt = 1.0 / fs
+    tau_hi = rp * cb
+    if dt > 0.5 * tau_hi:
+        raise ValueError(
+            f"sample rate {fs:.4g} Sa/s cannot resolve the rise: dt = {dt:.4g} s against "
+            f"tau = {tau_hi:.4g} s (Rp * Cb). The rise is the edge this bus specifies, so a grid "
+            f"that cannot show it makes the record meaningless. Raise fs above "
+            f"{2.0 / tau_hi:.4g} Sa/s, or lower r_pullup_ohm / c_bus_f.")
+    tau_lo = tau_hi / (1.0 + rp * sum(1.0 / float(r) for _m, r in sinks))
+    if dt > 0.5 * tau_lo:
+        warnings.warn(
+            f"sample rate {fs:.4g} Sa/s does not resolve the fall: dt = {dt:.4g} s against "
+            f"tau = {tau_lo:.4g} s (every sink on at once, (Rp||Rs) * Cb). The level is "
+            f"correct and the rise is resolved; the falling edge completes inside one sample, "
+            f"as it would on a real capture at this rate.", RuntimeWarning, stacklevel=3)
+    den = 1.0 + rp * g
+    target = float(v_dd) / den
+    k = np.exp(-dt * den / tau_hi)
+    n = g.size
+    cur = (float(target[0]) if n else float(v_dd)) if v0 is None else float(v0)
+    v = np.empty(n, dtype=float)
+    for i in range(n):
+        cur = target[i] + (cur - target[i]) * k[i]
         v[i] = cur
     return v
 

@@ -29,6 +29,7 @@ order, which is what makes the round-trip exact.
 """
 from __future__ import annotations
 import dataclasses
+import difflib
 from dataclasses import asdict as _asdict, dataclass, field
 from typing import Optional
 import warnings
@@ -184,7 +185,9 @@ def _op_roles(op, i):
     if name == "hybrid_echo":
         return _spec_roles(op.get("own", {"n_ui": 32, "seed": 7}), f"echo{i}")
     if name == "open_drain":
-        return _spec_roles(op.get("second"), f"open_drain_second{i}")
+        return (_spec_roles(op.get("second"), f"open_drain_second{i}")
+                + [r for j, e in enumerate(op.get("others") or ()) if isinstance(e, dict)
+                   for r in _spec_roles(e.get("source"), f"open_drain_other{i}_{j}")])
     if name == "pass_fet":
         return _spec_roles(op.get("gate", {}), f"pass_fet_gate{i}", "square")
     if name == "net":
@@ -786,7 +789,19 @@ def _op_open_drain(x, p, streams, grid, idx):
             {"kind": "nrz", **s}, streams, grid, f"open_drain_second{idx}"))
         mid_b = 0.5 * (np.percentile(xb, 1) + np.percentile(xb, 99))
         sink_b = xb < mid_b
-    if not sink.any() and (sink_b is None or not sink_b.any()):
+    _check_open_drain_others(p)
+    extra = []
+    for j, e in enumerate(p.get("others") or ()):
+        # each extra sink is rendered like `second`: a carrier spec, or a sub-chain under
+        # `open_drain/<idx>/others/<j>/source`
+        xo = SUB.render(e["source"], streams, grid, f"open_drain/{idx}/others/{j}/source",
+                        len(xa), f"open_drain: `others[{j}].source`",
+                        carrier=lambda s, j=j: _carrier(
+                            {"kind": "nrz", **s}, streams, grid, f"open_drain_other{idx}_{j}"))
+        extra.append((xo < 0.5 * (np.percentile(xo, 1) + np.percentile(xo, 99)),
+                      float(e.get("r_sink_ohm", p.get("r_sink_ohm", 20.0)))))
+    if not sink.any() and (sink_b is None or not sink_b.any()) and not any(
+            m.any() for m, _r in extra):
         # the sink decision thresholds the incoming carrier at the MIDPOINT of its OWN
         # excursion, so a carrier that never varies (a `dc` level, any sign) straddles
         # nothing and never sinks -- the line then does exactly nothing for the whole
@@ -797,17 +812,58 @@ def _op_open_drain(x, p, streams, grid, idx):
             "midpoint) -- the line reads as released (v_dd) for the whole record. A "
             "constant carrier can never sink; use one that actually toggles.",
             RuntimeWarning, stacklevel=2)
-    y = open_drain_line(sink, grid.fs,
-                        r_pullup_ohm=float(p["r_pullup_ohm"]), c_bus_f=float(p["c_bus_f"]),
-                        v_dd=v_dd, r_sink_ohm=float(p.get("r_sink_ohm", 20.0)),
-                        v0=p.get("v0"), sink_b_on=sink_b,
-                        r_sink_b_ohm=(float(p["r_sink_b_ohm"]) if "r_sink_b_ohm" in p else None))
+    if extra:
+        rs_a = float(p.get("r_sink_ohm", 20.0))
+        sinks = [(sink, rs_a)]
+        if sink_b is not None:
+            sinks.append((sink_b, float(p["r_sink_b_ohm"]) if "r_sink_b_ohm" in p else rs_a))
+        y = open_drain_line(None, grid.fs, r_pullup_ohm=float(p["r_pullup_ohm"]),
+                            c_bus_f=float(p["c_bus_f"]), v_dd=v_dd, v0=p.get("v0"),
+                            sinks=sinks + extra)
+    else:
+        y = open_drain_line(sink, grid.fs,
+                            r_pullup_ohm=float(p["r_pullup_ohm"]), c_bus_f=float(p["c_bus_f"]),
+                            v_dd=v_dd, r_sink_ohm=float(p.get("r_sink_ohm", 20.0)),
+                            v0=p.get("v0"), sink_b_on=sink_b,
+                            r_sink_b_ohm=(float(p["r_sink_b_ohm"]) if "r_sink_b_ohm" in p
+                                          else None))
     if p.get("center"):
         lo, hi = float(np.percentile(y, 1)), float(np.percentile(y, 99))
         span = max(hi - lo, 1e-30)
         keep = max(float(np.percentile(xa, 99)) - float(np.percentile(xa, 1)), 1e-30)
         y = (y - 0.5 * (lo + hi)) * (keep / span)
     return y
+
+
+def _check_open_drain_others(p):
+    """`open_drain(others=[dict(source=..., r_sink_ohm=...), ...])`: refuse what nothing would
+    read, by name, where it is written (the builder) and where it is run (a hand-written recipe)."""
+    others = p.get("others")
+    if others is None:
+        return
+    entry_keys = ("source", "r_sink_ohm")
+    if isinstance(others, (str, bytes, dict)) or not isinstance(others, (list, tuple)) \
+            or not others:
+        raise ValueError(f"open_drain: others is a non-empty list of dict(source=<a carrier "
+                         f"spec or sub-chain>, r_sink_ohm=<its on-resistance>), one per extra "
+                         f"sink; got {others!r}. A single second sink is `second=`.")
+    for j, e in enumerate(others):
+        if not isinstance(e, dict):
+            raise ValueError(f"open_drain: others[{j}] is {type(e).__name__}; each entry is "
+                             f"dict(source=..., r_sink_ohm=...).")
+        for k in e:
+            if k not in entry_keys:
+                near = difflib.get_close_matches(k, entry_keys, n=1, cutoff=0.5)
+                raise ValueError(f"open_drain: others[{j}] has {k!r}, which nothing reads"
+                                 + (f" -- did you mean {near[0]!r}?" if near else
+                                    f"; an entry takes {' and '.join(entry_keys)}."))
+        if e.get("source") is None:
+            raise ValueError(f"open_drain: others[{j}] needs source=<a carrier spec or "
+                             f"sub-chain>: when that device pulls the line low.")
+        r = e.get("r_sink_ohm", p.get("r_sink_ohm", 20.0))
+        if isinstance(r, bool) or not isinstance(r, (int, float)) or not r > 0:
+            raise ValueError(f"open_drain: others[{j}] r_sink_ohm must be a positive number of "
+                             f"ohms, got {r!r}.")
 
 
 def _op_intra_pair_skew(x, p, streams, grid, idx):
@@ -3489,7 +3545,17 @@ class Signal:
         The sink decision thresholds each incoming carrier at the MIDPOINT of its OWN
         excursion, so a `dc` carrier -- any level, any sign -- straddles nothing and never
         sinks; only a carrier that actually toggles drives the bus. If NEITHER device ever
-        sinks the op warns, since the line then does exactly nothing for the whole record."""
+        sinks the op warns, since the line then does exactly nothing for the whole record.
+
+        `others=[dict(source=..., r_sink_ohm=...), ...]` adds any number of further sinks beside
+        `second=`, each with its own source (a carrier spec or a sub-chain, as `second`) and its
+        own on-resistance (default `r_sink_ohm`). The line resolves every device that is pulling
+        as parallel conductances against the pull-up, so each device has its own settled low,
+        v_dd * r_k / (r_k + r_pullup) (`physics.open_drain_low_v`), two at once give the lower
+        parallel level, and the rise after the last release is Rp * Cb. That is the shape of a
+        shared bus with a controller and several targets, or a target stretching the clock; see
+        the I2C-like bus in docs/COOKBOOK.md."""
+        _check_open_drain_others(params)
         return self._add("open_drain", **params)
 
     def lossy(self, **params):

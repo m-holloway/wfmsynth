@@ -424,6 +424,8 @@ KNOBS = [
      dict(kind="nrz", n_ui=32, seed=9)),
     ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12, second=dict(kind="nrz", n_ui=32, seed=9)),
      "r_sink_b_ohm", 90.0),
+    ("open_drain", dict(r_pullup_ohm=200.0, c_bus_f=1e-12), "others",
+     [dict(source=dict(kind="nrz", n_ui=32, seed=9), r_sink_ohm=60.0)]),
     # The hybrid echo and the summed four-pair observation. The echo's own transmit defaults to
     # the same carrier spec shape `crosstalk`'s aggressor uses, so only the echo's own knobs move
     # here; `multipair`'s three budgets are dB of LOSS, so a SMALLER number is MORE aggression.

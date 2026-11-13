@@ -5706,6 +5706,45 @@ check("rendering costs n x the occurrence's render, whatever the span the arriva
       f"{_seg_spans[1]:.3g} s (a render of the span at 1 GSa/s: {_seg_spans[1] * 1e9:.2g} "
       f"samples); time ratio {_seg_took[1] / _seg_took[0]:.2f} (bound 2)")
 
+print("== open-drain bus with N sinks: each device's own low, parallel pulls, the same rise ==")
+_od_g = _seg_ws.Grid(fs=2e9, n=160_000)
+_od_rp, _od_cb = 4.7e3, 100e-12
+
+
+def _od_holds(t0_us, width_us):
+    return _seg_ws.Signal(grid=_od_g).carrier("pulse", amp=-1.0, offset=1.0,
+                                              t_start_s=t0_us * 1e-6, width_s=width_us * 1e-6,
+                                              tr_s=20e-9)
+
+
+_od_y = _od_holds(5, 10).open_drain(
+    r_pullup_ohm=_od_rp, c_bus_f=_od_cb, r_sink_ohm=25.0,
+    others=[dict(source=_od_holds(20, 10), r_sink_ohm=60.0),
+            dict(source=_od_holds(35, 10), r_sink_ohm=150.0),
+            dict(source=_od_holds(40, 10), r_sink_ohm=1200.0)]).waveform()
+_od_t = np.arange(_od_g.n) / _od_g.fs
+
+
+def _od_low(a_us, b_us):
+    return float(_od_y[(_od_t > (a_us + 3) * 1e-6) & (_od_t < b_us * 1e-6)].mean())
+
+
+_od_cases = [((5, 15), [25.0]), ((20, 30), [60.0]), ((35, 40), [150.0]), ((45, 50), [1200.0]),
+             ((40, 45), [150.0, 1200.0])]
+_od_err = [abs(_od_low(*w) - P.open_drain_low_v(_od_rp, r, 3.3)) for w, r in _od_cases]
+check("N sinks: each device's settled low is v_dd*r/(r+Rp), and simultaneous pulls take the "
+      "parallel resistance",
+      max(_od_err) < 1e-4,
+      "measured " + ", ".join(f"{_od_low(*w) * 1e3:.1f} mV" for w, _r in _od_cases)
+      + f" against the dividers; max error {max(_od_err) * 1e3:.4f} mV")
+_od_i = int(50e-6 * 2e9)
+_od_seg = _od_y[_od_i + 20:_od_i + 3000]            # after the last release, at 50 us
+_od_k = int(np.argmax(_od_seg > 0.7 * 3.3)) - int(np.argmax(_od_seg > 0.3 * 3.3))
+_od_want = 0.8473 * _od_rp * _od_cb * 2e9
+check("N sinks: the rise after the last release is the pull-up times the bus capacitance",
+      abs(_od_k - _od_want) / _od_want < 0.01,
+      f"30-70 % rise {_od_k / 2.0:.1f} ns against 0.8473*Rp*Cb = {_od_want / 2.0:.1f} ns")
+
 print()
 if fails:
     print(f"VALIDATION FAILED: {len(fails)} checks -> {fails}")
