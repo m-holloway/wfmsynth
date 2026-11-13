@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); a record can be complex baseband (I/Q, OFDM, fading and multipath) with RF impairments and measures, or an optical field with a swept laser and resonators; and wfmsynth.recipes ships realistic clutter (hum, ripple, 1/f, contact bounce) as visible chains. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
-version: 12
+version: 13
 ---
 
 # wfmsynth
@@ -341,6 +341,14 @@ A segmented acquisition (0.47) added this one.
     90000-sample render is 5 wide on a 700-sample one, and nothing says so. State it
     (`events(..., width=8)` is 8 on both), and compare the event list before trusting a
     population first built on a long render.
+47. **A stage holds the record's first and last samples; an impulse at index 0 is a step
+    down.** Since 0.48.0 every linear stage takes the line to have been at `x[0]` before the
+    record and to stay at `x[-1]` after it, so a record idling at 3.3 V stays at 3.3 V times the
+    stage's DC gain (a record that starts and ends at exactly zero is unchanged). To read an
+    impulse response, put the impulse past sample 0 or run the stage inside `with
+    ws.physics.zero_edges():`; an impulse at index 0 otherwise returns the response plus the
+    settling from a held 1 to 0. The same context zero-pads on purpose, for a transmission that
+    STARTS at the first sample.
 
 ## Where the boundary sits
 

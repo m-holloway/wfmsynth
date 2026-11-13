@@ -138,6 +138,24 @@ not.
   is unchanged bit for bit. The entries are keyed `carrier/square` and `carrier/cmos` and
   match that kind of carrier anywhere in a recipe, so a recipe holding only `nrz` or `sine`
   carriers is not warned. To reproduce an old record exactly, render it with 0.45.x.
+- **0.48.0, a record that idles at a level (#100).** `lossy`, `sparam`, `cascade`, `reflect`,
+  `resonant_reflect`, `hybrid_echo`, `probe` (ground lead, compensation), `ctle`, `tx_ffe`,
+  `de_emphasis`, `rx_ffe`, the near-end `crosstalk`, `scope(kind="gaussian")` and the resample
+  behind `digitize(n_out=)` started a record as if the input before it were zero, so a record
+  idling at 3.3 V opened with a ring, a sag (a zero-phase `lossy` at both ends) or an echo
+  that had not yet arrived. They now take the line to have been at the first sample's value
+  and to stay at the last one, as `scope`, `filter` and the other IIR stages already did.
+  **A record whose first and last samples are exactly zero is unchanged bit for bit.** Any
+  other moves in its first and last samples, by up to the whole level at the worst
+  (a ground-lead probe on 3.3 V: 0.794 of the level at the head, now 0), and by a small, falling
+  amount further in for a response with a long tail: for `lossy` on an 8-inch channel, at most
+  1.4 % of a step 200 samples from the ends, 0.35 % at 1000 and 0.08 % at 4000. That interior
+  change is the line's history that the zero pad was missing. The entries are keyed on the op,
+  and on `crosstalk/next` and `scope/gaussian` where only that kind moves, and warn a recipe
+  stamped before 0.48.0. To reproduce an old record exactly, render it with 0.47.x. Inside a
+  script, `physics.zero_edges()` renders the zero-padded form, which is also how an impulse
+  response is read off an impulse at index 0 (a stage that holds its first sample answers that
+  as a step down from 1).
 
 ---
 
