@@ -16,7 +16,10 @@ G = ws.Grid(fs=256e9, baud=28e9, n=16384)
 
 def _chain():
     return (ws.Signal(seed=7, grid=G).carrier("nrz", n_ui=1792, causal=True)
-            .lossy(loss_db=8.0, loss_at_ghz=14.0, causal=True)).waveform()
+            .lossy(loss_db=8.0, loss_at_ghz=14.0, causal=True)
+            # the channel alone delays this by under half a symbol now that edges sit at their own
+            # times (GitHub #98); 20 ps more makes realignment by a whole symbol necessary again
+            .delay(by=20e-12)).waveform()
 
 
 def test_inverted_record_locks_onto_the_same_alignment_with_a_negative_sign():

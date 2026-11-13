@@ -22,7 +22,7 @@ from wfmsynth.grid import Grid
 
 
 def _recipe(with_de_emphasis=True):
-    s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=2048)).carrier("nrz", n_ui=256)
+    s = Signal(seed=1, grid=Grid(fs=80e9, baud=10e9, n=2048)).carrier("sine", f_hz=1e9)
     if with_de_emphasis:
         s = s.de_emphasis(db=-3.5)
     return s.recipe()
@@ -118,8 +118,15 @@ def test_a_change_to_one_kind_of_carrier_warns_only_recipes_holding_that_kind():
     got = _replay(_square_recipe("0.45.0"))
     assert len(got) == 1 and "carrier/square" in got[0] and "0.46.0" in got[0]
     assert _replay(_square_recipe("0.46.0")) == []
-    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("nrz", n_ui=64).recipe()
+    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("sine", f_hz=1e9).recipe()
     r["wfmsynth_version"] = "0.45.0"
+    assert _replay(r) == []
+    # 0.48.0 moved the symbol carriers' edges (#98): an `nrz` is warned, from before then only
+    r = Signal(seed=1, grid=Grid(fs=64e9, baud=1e9, n=4096)).carrier("nrz", n_ui=64).recipe()
+    r["wfmsynth_version"] = "0.47.0"
+    got = _replay(r)
+    assert len(got) == 1 and "carrier/nrz" in got[0] and "0.48.0" in got[0]
+    r["wfmsynth_version"] = "0.48.0"
     assert _replay(r) == []
     r = Signal(seed=1, grid=Grid(fs=10e9, n=4096)).carrier(
         "cmos", v_lo=0.0, v_hi=3.3, f_hz=10e6, tr_s=2e-9).recipe()

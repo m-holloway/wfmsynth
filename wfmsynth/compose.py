@@ -1124,7 +1124,8 @@ def _op_dfe(x, p, streams, grid, idx):
 #
 # The only way to reach it was `carrier(..., jitter=dict(dcd=<samples>))`, which routes through
 # `physics._edge_disp`'s `(dcd/2)*sign(diff(levels))` and then through `_place_symbols`'s
-# `searchsorted` on the INTEGER sample grid. MEASURED on a 1024 UI clock pattern at
+# `searchsorted` on the INTEGER sample grid (until 0.48.0, which places edges at their own times;
+# the sign and scale fault below remains). MEASURED on a 1024 UI clock pattern at
 # fs=256e9/baud=16e9 (mean high pulse width minus mean low pulse width, which is the definition
 # of DCD):
 #
@@ -2838,7 +2839,9 @@ class Signal:
 
     def carrier(self, kind, **params):
         """First op: a carrier ('nrz'|'pam4'). params: n_ui, n, seed, tr_frac, causal,
-        pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter.
+        pattern, jitter=dict(rj,pj,f_pj,dcd) for source jitter (in samples; each edge is
+        placed at its own time, so a symbol rate that does not divide the sample rate and a
+        jitter under one sample are both exact, to the edge shaper's resolution).
 
         STATE `n_ui`. It is the number of symbols in the record and it defaults to 32,
         stretched over the whole record whatever `Grid(baud=)` says: the symbol rate of the
@@ -3446,7 +3449,13 @@ class Signal:
 
     def timing(self, **params):
         """Compose arbitrary clock timing into the carrier (the timing-modulation enabler).
-        params: ssc, pj, wander, rj_ps, phase_noise (see cdr.timing_source)."""
+        params: ssc, pj, wander, rj_ps, phase_noise (see cdr.timing_source).
+
+        `rj_ps` draws a fresh offset for every SAMPLE, not every edge, so the jitter an edge
+        shows depends on the filtering after it: 0.5 ps asked reads 0.32 ps per edge through a
+        6 GHz scope at 20 GSa/s. For "x ps rms per edge" ask the source instead,
+        `carrier(..., jitter=dict(rj=x_ps * fs / 1e12))` (in samples), which moves each edge once
+        before the edge shaper."""
         return self._add("timing", **params)
 
     def ssc(self, **params):
@@ -4257,6 +4266,16 @@ NUMERIC_CHANGES = (
      "up to one sample at each edge that is not on a sample, or that rounding had put one "
      "sample late; a record whose edges were all on samples and correctly placed is unchanged "
      "bit for bit."),
+    *(("0.48.0", op,
+       "each symbol edge is placed at its own time to a fraction of a sample, instead of on "
+       "a whole sample. A record whose samples per UI is not a whole number had the grid's "
+       "rounding as up to one sample of sawtooth timing error (14.4 ps rms at 20 GSa/s and "
+       "40.00061 samples per UI), and `jitter=` under a sample was quantised to whole "
+       "samples (a floor of about half a sample rms, 25 ps at 20 GSa/s). A record with a "
+       "whole number of samples per UI and no `jitter=`, or whose displaced edges all fall "
+       "on samples, is unchanged bit for bit.")
+      for op in ("carrier/nrz", "carrier/pam4", "carrier/pam3", "carrier/pam5", "carrier/pam8",
+                 "symbols", "coded")),
 )
 
 
