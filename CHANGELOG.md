@@ -12,6 +12,39 @@ Dates are the last commit in each range. The project uses [semantic versioning](
 loosely: it is pre-1.0, so a minor bump may change behaviour, and anything that changes rendered
 samples is called out explicitly under **Changed output** below.
 
+## 0.48.0 — unreleased
+
+Carrier symbol edges are at their own times (#98). A record with a whole number of samples per UI
+and no source jitter is bit-identical to 0.47.0; one with a symbol rate off the sample rate, or
+`jitter=` under a sample, changes by design.
+
+### Changed output
+
+- **`nrz` / `pam<N>` / `symbols` / `coded` edges are placed at their own times, to a fraction of
+  a sample.** `physics._place_symbols` put every edge on a whole sample before the edge shaper.
+  A samples-per-UI that is not whole therefore walked as a sawtooth of up to one sample, and
+  `carrier(jitter=dict(rj=...))` under a sample had a floor of about half a sample, since an
+  undisplaced edge sits on a boundary and half of them jump. Measured at 20 GSa/s through a
+  6 GHz scope, timing error rms by constant-period fit: a clock at 40.00061 samples per UI
+  **14.43 ps before, 0.09 ps after** (the crossing measure's own floor); `rj` of 0.0125, 5, 20,
+  50 and 100 ps asked **24.97, 24.97, 26.16, 51.9 and 100.97 ps before; 0.012, 4.98, 19.99,
+  49.98 and 99.96 ps after** (within 2 % from 0.5 ps up; `jitter=` carries pj and dcd the same
+  way, and 0.256 and 1.024 samples of dcd are no longer one record). An edge between samples
+  is the hard step delayed by its fraction with the 8-tap Lagrange interpolator `square` and
+  `cmos` already use (0.46.0). An edge on a sample is left a hard step: every whole
+  samples-per-UI render with no jitter is bit-identical (`tools/digest_compare.py` against
+  0.47.0 over the 31 chains and every example render: only the chains with sub-sample jitter or
+  a non-whole samples-per-UI move). Cost: a whole-spb render is unchanged; a non-whole one adds
+  about 15 ms per 2 M samples at 131 k UI (20 to 36 ms), and a jittered one is faster (55 to 37
+  ms). Recorded in `compose.NUMERIC_CHANGES` as `carrier/nrz`, `carrier/pam4`, `carrier/pam3`,
+  `carrier/pam5`, `carrier/pam8`, `symbols` and `coded`.
+
+### Documented
+
+- **`timing(rj_ps=)` draws per sample, not per edge**, so the jitter an edge shows depends on the
+  filtering after it (0.5 ps asked reads 0.32 ps per edge through a 6 GHz scope). Stated in
+  `timing()`'s docstring and the reference; `carrier(jitter=dict(rj=))` is the per-edge route.
+
 ## 0.47.0 — 2026-11-12
 
 A segmented acquisition of an event that happens rarely (#97): many occurrences, each rendered
