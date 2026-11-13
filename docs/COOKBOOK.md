@@ -395,6 +395,17 @@ captured = ws.Signal(seed=1, grid=ws.Grid(fs=fs_cap, n=4096)) \
   .lossy(loss_db=3.0, loss_at_ghz=1.0).waveform()     # recipe carries a sha256 over the values
 ```
 
+**Where a one-shot source rests.** `step` and `pulse` are bipolar about `offset`, like `sine` and
+`square`: they rest at `offset - amp` and go to `offset + amp`, an excursion of `2*amp`. `exp`
+is one-sided, `offset` toward `offset + amp`. So "rest at 0, dip to -1.3" is `amp=-0.65,
+offset=-0.65` on a `pulse`; for "rest at X, go to Y" it is `amp=(Y-X)/2, offset=(X+Y)/2`, or
+`**ws.physics.levels(X, Y)`:
+
+```python
+dip = ws.Signal(grid=g).carrier("pulse", **ws.physics.levels(0.0, -1.3),
+                                t_start_s=1e-3, width_s=0.25e-3, tr_s=50e-6)   # rests at 0
+```
+
 `cmos` stays in real volts (0 V is 0, not stretched onto -1); `capture`'s digest is over the
 sample values, not the file's bytes, so a missing or changed file is a named error rather than
 zeros or a silently different waveform. Pass a `grid=Grid(fs=...)` matching the file's own rate

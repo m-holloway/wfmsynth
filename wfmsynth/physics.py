@@ -2554,9 +2554,33 @@ def _fs_of(fs, grid):
     return None
 
 
+def levels(rest, to):
+    """``dict(amp=, offset=)`` that makes a `step` or `pulse` carrier rest at `rest` and go to
+    `to`: ``amp = (to - rest) / 2``, ``offset = (rest + to) / 2``. Those two are bipolar about
+    ``offset`` (they rest at ``offset - amp``), so "rest at 0, dip to -1.3" is not
+    ``amp=-1.3`` but this::
+
+        Signal().carrier("pulse", **levels(0.0, -1.3), t_start_s=..., width_s=...)
+
+    `exp` does not need it: it starts at ``offset`` and heads for ``offset + amp``. The two
+    levels must be finite numbers and must differ (equal levels would be no event at all)."""
+    for name, v in (("rest", rest), ("to", to)):
+        if isinstance(v, bool) or not isinstance(v, (int, float, np.integer, np.floating)) \
+                or not np.isfinite(v):
+            raise ValueError(f"levels: {name}={v!r} must be a finite number (a level, in the "
+                             f"waveform's own units).")
+    if float(rest) == float(to):
+        raise ValueError(f"levels: rest and to are both {float(rest):g}; there is no event to "
+                         f"make. Give two different levels.")
+    return {"amp": (float(to) - float(rest)) / 2.0, "offset": (float(rest) + float(to)) / 2.0}
+
+
 def step(amp=1.0, offset=0.0, t_step_s=None, t_step_frac=0.5, tr_s=None, tr_frac=0.02,
          n=None, fs=None, grid=None, causal=False):
-    """A single band-limited step from ``offset - amp`` to ``offset + amp``.
+    """A single band-limited step from ``offset - amp`` to ``offset + amp``: it is BIPOLAR, like
+    `sine` and `square`, so it rests at ``offset - amp`` and its excursion is ``2 * amp``.
+    (`exp` is the one-sided one-shot: ``offset`` to ``offset + amp``. For "rest at X, go to Y"
+    on `step` or `pulse` without the arithmetic, `levels(X, Y)`.)
 
     ``t_step_s`` (seconds, needs ``fs``/``grid``) or ``t_step_frac`` (fraction of the record,
     default the midpoint) place it; ``tr_s`` (seconds) is the edge's absolute 10-90 % duration,
@@ -2584,8 +2608,16 @@ def step(amp=1.0, offset=0.0, t_step_s=None, t_step_frac=0.5, tr_s=None, tr_frac
 
 def pulse(amp=1.0, offset=0.0, t_start_s=None, t_start_frac=0.4, width_s=None,
           width_frac=0.1, tr_s=None, tr_frac=0.02, n=None, fs=None, grid=None, causal=False):
-    """A single band-limited rectangular pulse -- `square`'s one-shot cousin. ``t_start``/
-    ``width`` take the same seconds-or-fraction-of-record pair `step` does."""
+    """A single band-limited rectangular pulse -- `square`'s one-shot cousin, so it is BIPOLAR
+    about ``offset`` as `sine`, `square` and `step` are: it rests at ``offset - amp``, goes to
+    ``offset + amp`` for ``width``, and comes back. The excursion is ``2 * amp``, NOT ``amp``
+    (`exp` is the one that goes from ``offset`` to ``offset + amp``).
+
+    To rest at X and go to Y: ``amp = (Y - X) / 2``, ``offset = (X + Y) / 2`` -- or let
+    `levels(X, Y)` do it. A dip from 0 V to -1.3 V is ``amp=-0.65, offset=-0.65``, and
+    ``amp=-1.3, offset=0`` rests at +1.3 V and swings to -1.3 V.
+
+    ``t_start``/``width`` take the same seconds-or-fraction-of-record pair `step` does."""
     t = timebase(n, fs, grid)
     nn = t.size
     fs_eff = _fs_of(fs, grid)
@@ -2615,7 +2647,8 @@ def pulse(amp=1.0, offset=0.0, t_start_s=None, t_start_frac=0.4, width_s=None,
 
 def exp(amp=1.0, offset=0.0, t_start_s=None, t_start_frac=0.0, tau_s=None, tau_frac=0.1,
         decay=False, n=None, fs=None, grid=None):
-    """A single-pole exponential step response: from ``offset`` toward ``offset + amp``
+    """A single-pole exponential step response, ONE-SIDED unlike `step` and `pulse` (which are
+    bipolar about ``offset``): from ``offset`` toward ``offset + amp``
     (``decay=False``, the default) or from ``offset + amp`` back toward ``offset``
     (``decay=True``), starting at ``t_start``, with time constant ``tau``.
 

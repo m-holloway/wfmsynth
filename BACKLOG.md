@@ -1243,6 +1243,14 @@ Not this unit's file. `instrument.resample_at`, `sample_positions`, `sample_cloc
 imported by the package) but are not in the top-level `from .instrument import (...)` /
 `from .rx import ...` lists or `__all__`. Add them alongside `scope_bandwidth` and `ctle`.
 
+### other constant fractional delays checked for #104, left as they are
+
+`resample.shift` (used by `differential_pair` skew) already builds one fixed kernel, and the
+`Segments` source delay goes through `joins.delay`, so it gained the speed-up. `_delay_steps`
+(#98 carrier edges) delays each edge by its OWN fraction, so there is no single kernel to share.
+`timing` and `apply_phase` warp by a per-sample phase (`np.interp`); a timing source that is a
+pure constant offset is not a case the op has. `interleave_adc` skew is per-core, not one value.
+
 ## CI status
 
 The current workflow uses a fast Linux/Python 3.12 gate for pull requests and a scheduled

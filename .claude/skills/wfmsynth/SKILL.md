@@ -1,7 +1,7 @@
 ---
 name: wfmsynth
 description: Synthesise oscilloscope-realistic waveforms with known ground truth using the wfmsynth library — compose impairment chains, size a record from its edge, model the acquisition instrument, export to HDF5 or Zarr, and emit replayable recipes with content digests. Chains can start from an analog source, a CMOS/PWM source, or a real capture, not just a serial link; chains can meet (a chain as another op's parameter, several correlated channels in one recipe, a triggered acquisition, toleranced parts); a record can be complex baseband (I/Q, OFDM, fading and multipath) with RF impairments and measures, or an optical field with a swept laser and resonators; and wfmsynth.recipes ships realistic clutter (hum, ripple, 1/f, contact bounce) as visible chains. Use when asked to generate or extend synthetic signal-integrity data, build training sets with defect labels, model a link, a bus, a multi-channel capture, an RF signal or an instrument, or reproduce a waveform from a recipe.
-version: 13
+version: 14
 ---
 
 # wfmsynth
@@ -349,6 +349,10 @@ A segmented acquisition (0.47) added this one.
     ws.physics.zero_edges():`; an impulse at index 0 otherwise returns the response plus the
     settling from a held 1 to 0. The same context zero-pads on purpose, for a transmission that
     STARTS at the first sample.
+48. **`step` and `pulse` are bipolar about `offset`; only `exp` is one-sided.** They rest at
+    `offset - amp` and go to `offset + amp` (an excursion of `2*amp`), as `sine` and `square`
+    do. "Rest at 0, dip to -1.3" is `amp=-0.65, offset=-0.65`, not `amp=-1.3`; say it as
+    `carrier("pulse", **ws.physics.levels(0.0, -1.3), ...)`.
 
 ## Where the boundary sits
 

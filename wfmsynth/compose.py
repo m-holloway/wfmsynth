@@ -2930,7 +2930,10 @@ class Signal:
         'sine'/'square'/'triangle'/'sawtooth'/'dc' (params: f_hz or cycles, amp, offset,
         phase_rad, duty/symmetry, tr_frac), plus 'step'/'pulse'/'exp' (a band-limited step, a
         one-shot pulse, a single-pole RC step response -- t_step_s/t_start_s/tau_s in seconds,
-        or their _frac equivalents as a fraction of the record), 'chirp' (f0_hz/f1_hz, a REAL
+        or their _frac equivalents as a fraction of the record; `step` and `pulse` are BIPOLAR
+        about `offset` like sine/square -- they rest at offset - amp and go to offset + amp, an
+        excursion of 2*amp -- while `exp` goes from offset toward offset + amp; for "rest at X,
+        go to Y" pass `**physics.levels(X, Y)` as amp/offset), 'chirp' (f0_hz/f1_hz, a REAL
         Hz sweep -- see physics.chirp_sweep; physics.chirp is the legacy normalised one and is
         untouched), 'two_tone' (f1_hz/f2_hz), and 'noise' (rms, df, pink_frac, band_lo_hz/
         band_hi_hz). 'cmos' is the one UNIPOLAR kind: v_lo/v_hi/duty/f_hz/tr_s, in real volts,
