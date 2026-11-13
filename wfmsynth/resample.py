@@ -194,9 +194,11 @@ def shift(x, samples, half_width=HALF_WIDTH, fill="hold"):
 
     `fill` says what lies outside the record, and it is a physical choice rather than a detail.
     "hold" repeats the end sample, which is exact for a record whose ends are a settled quiescent
-    line -- what `Signal.lead_in` renders and discards. `fill=0.0` says nothing is there, which is
-    what an ECHO needs: the reflection of a record that had not started yet has not arrived, and
-    holding the first sample would invent a precursor that the line never carried.
+    line -- what `Signal.lead_in` renders and discards. `fill=0.0` says nothing is there, which
+    is what an echo of a transmission that STARTS at the record's first sample needs: the
+    reflection of a record that had not started yet has not arrived. `multi_reflection` takes
+    the other reading, as every linear stage now does: a line idling at a level has had its
+    echoes arriving all along (#100), so it holds.
     """
     x = np.asarray(x, dtype=float)
     d = float(samples)
@@ -205,7 +207,7 @@ def shift(x, samples, half_width=HALF_WIDTH, fill="hold"):
     zero = not isinstance(fill, str)
     if float(d).is_integer():
         k = int(d)
-        y = np.zeros_like(x) if zero else np.empty_like(x)
+        y = np.full_like(x, float(fill)) if zero else np.empty_like(x)
         if k > 0:
             if not zero:
                 y[:min(k, x.size)] = x[0]

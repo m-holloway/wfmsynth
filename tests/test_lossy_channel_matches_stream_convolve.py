@@ -11,10 +11,15 @@ cannot quietly reopen it.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import wfmsynth as ws
 from wfmsynth import physics as P
 from wfmsynth.stream import channel_fir, stream_convolve
+
+
+# The reference here is `stream_convolve`, zero-padded by definition, so the channel is too.
+pytestmark = pytest.mark.usefixtures("zero_edges")
 
 
 def test_lossy_channel_head_matches_the_streamed_linear_reference_not_the_circular_one():

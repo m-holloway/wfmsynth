@@ -45,7 +45,9 @@ def test_reading_a_binary_record_as_four_levels_understates_it_enormously():
     x, g = _record("nrz", "prbs13")
     as_two = ws.eye_height(x, g, levels=2, defn="contour")
     as_four = ws.eye_height(x, g, levels=4, defn="contour")
-    assert as_two > 10 * as_four, (
+    # 20x while the channel opened the record from zero; holding the first sample's level (#100)
+    # puts a +1 history behind a nearly closed eye, which takes some of the binary reading too
+    assert as_two > 5 * as_four, (
         f"levels=2 gives {as_two:.6f}, levels=4 gives {as_four:.6f}")
 
 

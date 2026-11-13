@@ -271,7 +271,8 @@ def test_absolute_units_round_trip():
     assert abs(realized_ps - 40.0) <= g.dt * 1e12 + 1e-9
     # loss in dB at a stated frequency is realized there
     hi = np.zeros(g.n); hi[0] = 1.0
-    H = np.abs(np.fft.rfft(P.lossy_channel(hi, loss_db=12.0, loss_at_ghz=20.0, grid=g)))
+    with P.zero_edges():            # an impulse at index 0 is a probe, not a step down
+        H = np.abs(np.fft.rfft(P.lossy_channel(hi, loss_db=12.0, loss_at_ghz=20.0, grid=g)))
     k = int(np.argmin(np.abs(np.fft.rfftfreq(g.n) * g.fs / 1e9 - 20.0)))
     assert abs(-20 * np.log10(H[k] + 1e-12) - 12.0) < 0.5
 

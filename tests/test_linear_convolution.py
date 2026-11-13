@@ -26,6 +26,11 @@ import wfmsynth.physics as P
 import wfmsynth.sparam as SP
 from wfmsynth.grid import Grid
 
+# These tests measure the convolution machinery against references that are zero-padded by
+# definition (np.convolve, an impulse read at index 0), so they run with the ends zero-padded;
+# `tests/test_steady_state_start.py` covers the held ends (#100).
+pytestmark = pytest.mark.usefixtures("zero_edges")
+
 FS = 256e9
 GRID = Grid(fs=FS, baud=16e9, n=8192)
 
