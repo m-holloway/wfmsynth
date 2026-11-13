@@ -39,6 +39,14 @@ faster or leaner, re-record the floor so a regression back to the old behaviour 
 python tools/benchmark.py --quick --baseline          # --quick is the mode CI checks
 ```
 
+## Version number
+
+The one place a version is written is `pyproject.toml`. From a source checkout (including
+`pip install -e .`), `wfmsynth.__version__` and every recipe stamp read that file directly, so
+`git pull` is enough; installed metadata is used only for a wheel install with no checkout.
+`pip show wfmsynth` can still report the old number in an editable install: that is pip's
+record, not the library's.
+
 ## Definition of done
 
 From `BACKLOG.md`, and applied to every change:

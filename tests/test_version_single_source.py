@@ -22,11 +22,8 @@ def _pyproject_version():
 
 
 _STALE_INSTALL = (
-    "\n\n`__version__` reads the INSTALLED distribution's metadata first, and an editable "
-    "install froze that at install time -- so bumping pyproject.toml leaves it stale until you "
-    "reinstall:\n    python -m pip install -e .\n"
-    "The precedence is deliberate (a vendored copy must not pick up the HOST project's "
-    "pyproject.toml two directories up), so this is a refresh, not a bug.")
+    "\n\n`__version__` should follow the source tree's pyproject.toml (GitHub #101); if it "
+    "does not, this file is not being imported from the checkout.")
 
 
 def test_dunder_version_matches_pyproject_toml():
@@ -50,3 +47,34 @@ def test_recipe_stamps_the_same_version_the_package_reports():
     assert sig.recipe()["wfmsynth_version"] == ws.__version__ == _pyproject_version(), (
         f"recipe stamps {sig.recipe()['wfmsynth_version']!r}, __version__ is "
         f"{ws.__version__!r}, pyproject says {_pyproject_version()!r}." + _STALE_INSTALL)
+
+
+def _fake_tree(tmp_path, pyproject):
+    pkg = tmp_path / "wfmsynth"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    if pyproject is not None:
+        (tmp_path / "pyproject.toml").write_text(pyproject)
+    return str(pkg / "__init__.py")
+
+
+def test_source_checkout_prefers_the_file_over_stale_metadata(tmp_path, monkeypatch):
+    """GitHub #101: an editable install's metadata is frozen at install time."""
+    import importlib.metadata as md
+    monkeypatch.setattr(md, "version", lambda name: "0.0.1-stale")
+    f = _fake_tree(tmp_path, '[project]\nname = "wfmsynth"\nversion = "9.8.7"\n')
+    assert ws._read_version(f) == "9.8.7"
+
+
+def test_no_pyproject_uses_installed_metadata(tmp_path, monkeypatch):
+    import importlib.metadata as md
+    monkeypatch.setattr(md, "version", lambda name: "1.2.3")
+    assert ws._read_version(_fake_tree(tmp_path, None)) == "1.2.3"
+
+
+def test_a_host_projects_pyproject_is_not_ours(tmp_path, monkeypatch):
+    """A vendored copy must not pick up the host project's version."""
+    import importlib.metadata as md
+    monkeypatch.setattr(md, "version", lambda name: "1.2.3")
+    f = _fake_tree(tmp_path, '[project]\nname = "hostapp"\nversion = "5.5.5"\n')
+    assert ws._read_version(f) == "1.2.3"
