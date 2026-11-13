@@ -1184,11 +1184,11 @@ of the raw samples would fix it without a parameter.
 when the decisions were taken on a clock that was not uniform. The decisions and their instants
 are right (`compose.dfe_decisions` returns both); only the waveform rendering is nominal.
 
-### `physics._edge_disp` realises DCD at -2x the request, quantised to whole samples
+### `physics._edge_disp` realises DCD at -2x the request (was also quantised to whole samples, fixed in 0.48.0)
 
 Not this unit's file (`wfmsynth/physics.py`), so it is logged rather than changed. `dcd` is now a
 first-class knob (`Signal.dcd(ps=)`, `compose._op_dcd`) with the standard definition; the SOURCE
-route still carries two defects. MEASURED on a 1024 UI clock pattern, fs=256e9, baud=16e9, as
+route carried two defects: the quantisation is fixed (0.48.0, #98); the -2x remains. MEASURED on a 1024 UI clock pattern, fs=256e9, baud=16e9, as
 `mean(high pulse width) - mean(low pulse width)` at the constructed 0 V threshold:
 
 | `jitter=dict(dcd=...)` (samples) | stated | realised high-minus-low | ratio |

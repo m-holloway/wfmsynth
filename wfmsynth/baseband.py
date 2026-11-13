@@ -55,7 +55,8 @@ That ringing lives at the band's edges, where an envelope that fits its grid hol
 agreement above is stated for a band-limited envelope.
 
 The convolution is LINEAR, as for the real ops (`physics.apply_transfer`): the record is
-zero-padded past the response's own length. `linear=False` is the circular form; `guard=`
+padded past the response's own length with its end samples held, not zeros (a record that
+idles at a level starts there; `physics.zero_edges()` restores the zero pad). `linear=False` is the circular form; `guard=`
 states the length. `method="overlap"` is refused: the block path is real-only.
 """
 from __future__ import annotations

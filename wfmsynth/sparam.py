@@ -689,8 +689,9 @@ def sparam_channel(x, freqs, s21, grid=None, dt=None, linear=True, guard=None,
                        previous default DC-BLOCKED every record whose file did not start at 0 Hz.
     ``dc="zero"``      the previous behaviour, with a warning naming the power removed.
 
-    The convolution is LINEAR (`physics.apply_transfer`): the record is zero-padded past the
-    response's own length before transforming, so the channel's answer to the record's tail
+    The convolution is LINEAR (`physics.apply_transfer`): the record is padded past the
+    response's own length before transforming -- with its end samples held, so a record that
+    idles at a level starts there (`physics.zero_edges()` restores the zero pad) -- so the channel's answer to the record's tail
     does not wrap onto its head. ``linear=False`` restores the pinned-length circular form."""
     from . import physics as P
     x = np.asarray(x, float)
@@ -1228,8 +1229,9 @@ def cascade_channel(x, path, grid=None, dt=None, node="load", eps_r_default=4.0,
     of an analytic path and the delays are exact (a linear phase, not a rounded sample count —
     `physics.multi_reflection` rounds `td_ps` to the nearest sample).
 
-    The convolution is LINEAR (`physics.apply_transfer`): the record is zero-padded past the
-    cascade's own impulse-response length — which for a path with structure is dominated by the
+    The convolution is LINEAR (`physics.apply_transfer`): the record is padded past the
+    cascade's own impulse-response length, with its end samples held (`physics.zero_edges()`
+    restores the zero pad) — which for a path with structure is dominated by the
     LAST echo's round trip — so no echo of the record's tail is delivered to its head. A path
     whose echoes take longer than the record itself simply pads further. ``linear=False``
     restores the pinned-length circular form for comparison."""
